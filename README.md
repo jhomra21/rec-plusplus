@@ -160,6 +160,7 @@ One run each on a Windows 11 (26200) PC with an RTX 5070 Ti driving a 3840x2160 
 | 15 s, native 4K60 HEVC, system audio | 900/900 frames; 0.9–1.0 s CPU total (about 6% of one core); peak working set 116 MB |
 | Live stream, `REC_E2E_STREAM=1` (display + system audio, hardware H.264 at 6 Mb/s to MediaMTX) | Local file: 720/720 frames, 7 pairs, mean −12.3 ms. Received: 719 frames, 7 pairs, mean −12.8 ms, worst 13.5 ms; 0 frames skipped |
 | Same with `REC_E2E_MIC=1` | Local file: 720/720 frames, mean −16.6 ms. Received: 719 frames, 7 pairs, mean −16.5 ms, worst 21.9 ms |
+| Desktop app, real display + system audio, driven through MSAA: Start, 2 s Pause mid-stimulus, Resume, Stop | 643 frames (10.7 s kept), 0 dropped, 7 pairs, mean −16.4 ms, worst 23.7 ms |
 | `rec.exe` / `rec-app.exe` size | 244 KB / 300 KB |
 
 Most of the working set and private memory belongs to the GPU driver's Direct3D allocations, not recorder buffers. MediaMTX's MP4 writer drops the last received frame, whose duration it cannot know, so received streams have 719 frames.

@@ -40,7 +40,7 @@ Full parity with `michaelshimeles/rec-rs` is the product goal. This is a living 
 
 | Capability | State | Required acceptance |
 | --- | --- | --- |
-| Native app and live preview | Native app on both, no preview: AppKit `Rec.app` and Win32 `rec-app.exe` over a shared session layer (`src/app/`). App E2E passes on both CIs (synthetic source): record with both audio sources, pause/resume (sync ≤ 10.8 ms), hotkey, Go Live to MediaMTX, close while recording, settings. Windows also passes locally. Not yet used with real capture on a Mac | Composited preview matches export, minimal idle work |
+| Native app and live preview | Native app on both, no preview: AppKit `Rec.app` and Win32 `rec-app.exe` over a shared session layer (`src/app/`). App E2E passes on both CIs (synthetic source): record with both audio sources, pause/resume (sync ≤ 10.8 ms), hotkey, Go Live to MediaMTX, close while recording, settings. Windows also passes locally, and records a real display with system audio through the app in sync (2 s pause, 0 drops, 7 pairs, mean −16.4 ms, worst 23.7 ms). Not yet used with real capture on a Mac | Composited preview matches export, minimal idle work |
 | Scene presets and switching | Missing | Screen, screen+cam and camera switching without stopping |
 | Floating camera layout controls | Missing | Drag/snap, circle/rounded/square/pill/squircle, border/shadow |
 | Audio meters | Implemented: per-source peak meters from the engine (system audio, microphone), dB scale with decay, polled only while recording. Not checked against a known signal level | Per-source peak meters, no render work while hidden |
