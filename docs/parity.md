@@ -33,23 +33,23 @@ Full parity with `michaelshimeles/rec-rs` is the product goal. This is a living 
 | RTMP and RTMPS | RTMP implemented on both: rec's own client (handshake, AMF0, chunking, FLV H.264/AAC), `--stream`. Verified against MediaMTX v1.21.2, which records what it receives. Windows synthetic (CI and local): 119/120 frames received, 4 pairs, worst 10.8 ms; mix sent with a stems-only file; silent AAC without audio sources; killing the server keeps the recording. Windows live with hardware H.264: 719/720 frames received, 7 pairs, worst 21.9 ms (`REC_E2E_STREAM=1`). macOS synthetic (CI, VideoToolbox hardware H.264): the same checks pass, 119/120 frames received, 4 pairs. Through AVFoundation the received file reads −31.9 ms mean, 42.5 ms worst, which matches AVFoundation trimming 44 ms of AAC priming from a file without an edit list. The same file probed on Windows reads +2.6 ms mean, 10.0 ms worst. macOS live with hardware H.264 ([run 5](evidence/2026-10-17-run5/README.md)): 720/720 frames streamed, 0 skipped, 719 received; received sync (AVFoundation) mean −11.0 to −15.7 ms, worst 25.4 ms, including with the mic and a 2 s pause. RTMPS and reconnect missing | Twitch/YouTube ingest, RTMPS, reconnect, 4K stream, slow-network keyframe skipping, long pauses |
 | WHIP/WebRTC | Missing | Server handshake, ICE/DTLS/SRTP, A/V sync, cleanup |
 | Shared live encoder | Partial on both: one stream encoder (H.264 + AAC) beside the file encoder, fed the same frames and program audio. No replay buffer or second stream uses it yet | Replay and simultaneous streams share one encode |
-| Stream keys in Keychain | Missing. The CLI prints `rtmp://host/app/****` and smoke checks that the key is not printed, but the key is visible in the process arguments | No keys in logs/settings, revoke and replace |
-| Capture survives GUI close | Missing | Recording, replay and streams continue headless |
+| Stream keys in Keychain | Desktop app: one key per server URL in the login keychain (macOS) or Credential Manager (Windows). App E2E on both CIs checks the key was stored and is absent from the settings file. The CLI prints `rtmp://host/app/****` and never the key, but the key is visible in its process arguments | No keys in logs/settings, revoke and replace |
+| Capture survives GUI close | Partial: closing the app window keeps recording, and the menu bar or tray stops it (app E2E on both CIs). Quitting the app stops and saves; there is no headless daemon | Recording, replay and streams continue headless |
 
 ## Application experience
 
 | Capability | State | Required acceptance |
 | --- | --- | --- |
-| Native app and live preview | Missing | Composited preview matches export, minimal idle work |
+| Native app and live preview | Native app on both, no preview: AppKit `Rec.app` and Win32 `rec-app.exe` over a shared session layer (`src/app/`). App E2E passes on both CIs (synthetic source): record with both audio sources, pause/resume (sync ≤ 10.8 ms), hotkey, Go Live to MediaMTX, close while recording, settings. Windows also passes locally. Not yet used with real capture on a Mac | Composited preview matches export, minimal idle work |
 | Scene presets and switching | Missing | Screen, screen+cam and camera switching without stopping |
 | Floating camera layout controls | Missing | Drag/snap, circle/rounded/square/pill/squircle, border/shadow |
-| Audio meters | Missing | Per-source peak meters, no render work while hidden |
+| Audio meters | Implemented: per-source peak meters from the engine (system audio, microphone), dB scale with decay, polled only while recording. Not checked against a known signal level | Per-source peak meters, no render work while hidden |
 | CLI recording status | Implemented (TTY only): recorded time, PAUSED, drops | Elapsed time and drops visible while recording |
-| Menu bar and Dock behavior | Missing | Start/pause/stop/save/quit, finalized file on exit |
-| Global hotkeys | Missing | Registered/unregistered safely, conflicts visible |
-| Settings persistence | Missing | No recording corruption on invalid/stale settings |
+| Menu bar and Dock behavior | Implemented: macOS menu bar item and Windows notification-area icon with Start/Stop, Pause, Show, Open Recordings Folder, Quit. Quitting mid-recording saves the movie (macOS CI). Windows quit-while-recording and log-off paths are implemented but untested | Start/pause/stop/save/quit, finalized file on exit |
+| Global hotkeys | Implemented: ⇧⌘R (Carbon hot key) and Ctrl+Alt+R (RegisterHotKey); the window says when another app owns the shortcut. Windows CI types it; macOS CI delivers the hot-key event to the registered handler | Registered/unregistered safely, conflicts visible |
+| Settings persistence | Implemented: key=value file replaced atomically; unknown or invalid values fall back to defaults. App E2E checks the saved destination, server, bitrate and frame rate | No recording corruption on invalid/stale settings |
 | Device/permission diagnostics | Partial | Useful errors and permission recovery in the app |
-| File reveal and quick actions | Missing | One-click reveal, last recording, retry, sensible paths |
+| File reveal and quick actions | Implemented, not E2E-checked: Open Folder, Show Last Recording (Finder/Explorer selection), folder picker, `rec-YYYY-MM-DD-HHMMSS` names that never overwrite | One-click reveal, last recording, retry, sensible paths |
 
 ## Joyful UI guidelines
 
