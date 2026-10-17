@@ -185,6 +185,9 @@ else
   expect_failure 'already exists' record --test-pattern -t 1 -o "$artifacts/h264.mov"
   "$rec" probe "$artifacts/h264.mov" | grep -qx 'frames=60'
 
+  # The desktop app drives its own controls through a recording session.
+  "$root/scripts/app-e2e.sh" "$rec" "$tmp/build/Rec.app" "$artifacts/app"
+
   if [[ "${REC_E2E_CAPTURE:-0}" == 1 ]]; then
     "$rec" record --display 1 -r 1080p -f 30 -t 3 --codec h264 -o "$artifacts/screen.mov" | tee "$artifacts/screen.record.log"
     "$rec" probe "$artifacts/screen.mov" | tee "$artifacts/screen.probe"

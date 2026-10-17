@@ -2,6 +2,7 @@
 
 #include "rec/rec.hpp"
 
+#include <array>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -36,6 +37,27 @@ struct Settings {
     std::uint32_t stream_kbps = 6000;
     std::string last_recording;
 };
+
+// The choices both interfaces offer, as a settings value and its label.
+struct Choice {
+    const char* value;
+    const char* label;
+};
+inline constexpr std::array<Choice, 5> kResolutions{
+    {{"720p", "720p"}, {"1080p", "1080p"}, {"1440p", "1440p"}, {"4k", "4K"}, {"native", "Native"}}};
+inline constexpr std::array<std::uint32_t, 6> kFrameRates{24, 25, 30, 50, 60, 120};
+inline constexpr std::array<Choice, 3> kCodecs{{{"auto", "Automatic"}, {"h264", "H.264"}, {"hevc", "HEVC"}}};
+inline constexpr std::array<Choice, 2> kFormats{{{"mp4", "MP4"}, {"mov", "MOV"}}};
+inline constexpr std::array<Choice, 3> kServices{
+    {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
+
+// The position of value in choices, or 0.
+template <std::size_t N>
+int choice_index(const std::array<Choice, N>& choices, const std::string& value) {
+    for (std::size_t i = 0; i < N; ++i)
+        if (value == choices[i].value) return static_cast<int>(i);
+    return 0;
+}
 
 // key=value lines; unknown keys are ignored and missing ones keep their defaults.
 Settings load_settings(const std::string& path);

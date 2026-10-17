@@ -48,15 +48,12 @@ enum Control : int {
 
 enum Command : UINT { kMenuRecord = 1000, kMenuPause, kMenuShow, kMenuFolder, kMenuQuit };
 
-const std::array<const char*, 5> kResolutions{"720p", "1080p", "1440p", "4k", "native"};
-const std::array<const wchar_t*, 5> kResolutionNames{L"720p", L"1080p", L"1440p", L"4K", L"Native"};
-const std::array<std::uint32_t, 6> kRates{24, 25, 30, 50, 60, 120};
-const std::array<const char*, 3> kCodecs{"auto", "h264", "hevc"};
-const std::array<const wchar_t*, 3> kCodecNames{L"Automatic", L"H.264", L"HEVC"};
-const std::array<const char*, 2> kFormats{"mp4", "mov"};
-const std::array<const wchar_t*, 2> kFormatNames{L"MP4", L"MOV"};
-const std::array<const char*, 3> kServices{"twitch", "youtube", "custom"};
-const std::array<const wchar_t*, 3> kServiceNames{L"Twitch", L"YouTube", L"Custom RTMP server"};
+using rec::app::choice_index;
+using rec::app::kCodecs;
+using rec::app::kFormats;
+using rec::app::kFrameRates;
+using rec::app::kResolutions;
+using rec::app::kServices;
 
 std::wstring wide(const std::string& text) {
     if (text.empty()) return {};
@@ -374,11 +371,15 @@ private:
         SendMessageW(mic, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Default microphone"));
         for (const auto& device : microphones_)
             SendMessageW(mic, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(device.name).c_str()));
-        for (auto* name : kResolutionNames) SendMessageW(resolution, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
-        for (auto rate : kRates) SendMessageW(fps, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>((std::to_wstring(rate) + L" fps").c_str()));
-        for (auto* name : kCodecNames) SendMessageW(codec, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
-        for (auto* name : kFormatNames) SendMessageW(format, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
-        for (auto* name : kServiceNames) SendMessageW(service, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
+        const auto fill = [](HWND list, const auto& choices) {
+            for (const auto& choice : choices)
+                SendMessageW(list, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(choice.label).c_str()));
+        };
+        fill(resolution, kResolutions);
+        fill(codec, kCodecs);
+        fill(format, kFormats);
+        fill(service, kServices);
+        for (auto rate : kFrameRates) SendMessageW(fps, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>((std::to_wstring(rate) + L" fps").c_str()));
         for (int meter : {kSystemMeter, kMicMeter}) SendMessageW(get(meter), PBM_SETRANGE32, 0, 1000);
 
         show_settings();
@@ -472,13 +473,6 @@ private:
         return GetSysColor(COLOR_WINDOWTEXT);
     }
 
-    template <class List, class Value>
-    static int index_of(const List& list, const Value& value) {
-        for (std::size_t i = 0; i < list.size(); ++i)
-            if (list[i] == value) return static_cast<int>(i);
-        return 0;
-    }
-
     void select(int id, int index) { SendMessageW(get(id), CB_SETCURSEL, static_cast<WPARAM>(index), 0); }
     int selected(int id) const { return static_cast<int>(SendMessageW(get(id), CB_GETCURSEL, 0, 0)); }
     void set_check(int id, bool on) { SendMessageW(get(id), BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0); }
@@ -494,12 +488,12 @@ private:
             if (microphones_[i].id == s.microphone_device) mic = static_cast<int>(i) + 1;
         select(kMicDevice, mic);
         set_check(kCursor, s.cursor);
-        select(kResolution, index_of(kResolutions, s.resolution));
-        select(kFps, index_of(kRates, s.fps));
-        select(kCodec, index_of(kCodecs, s.codec));
-        select(kFormat, index_of(kFormats, s.format));
+        select(kResolution, choice_index(kResolutions, s.resolution));
+        select(kFps, static_cast<int>(std::find(kFrameRates.begin(), kFrameRates.end(), s.fps) - kFrameRates.begin()) % static_cast<int>(kFrameRates.size()));
+        select(kCodec, choice_index(kCodecs, s.codec));
+        select(kFormat, choice_index(kFormats, s.format));
         set_check(kStream, s.stream);
-        select(kService, index_of(kServices, s.destination));
+        select(kService, choice_index(kServices, s.destination));
         SetWindowTextW(get(kBitrate), std::to_wstring(s.stream_kbps).c_str());
         show_server();
         SetWindowTextW(get(kFolder), wide(s.folder).c_str());
@@ -521,12 +515,13 @@ private:
         const int mic = selected(kMicDevice);
         s.microphone_device = mic > 0 && mic <= static_cast<int>(microphones_.size()) ? microphones_[mic - 1].id : "default";
         s.cursor = checked(kCursor);
-        s.resolution = kResolutions[static_cast<std::size_t>(std::max(0, selected(kResolution)))];
-        s.fps = kRates[static_cast<std::size_t>(std::max(0, selected(kFps)))];
-        s.codec = kCodecs[static_cast<std::size_t>(std::max(0, selected(kCodec)))];
-        s.format = kFormats[static_cast<std::size_t>(std::max(0, selected(kFormat)))];
+        const auto at = [this](int id) { return static_cast<std::size_t>(std::max(0, selected(id))); };
+        s.resolution = kResolutions[at(kResolution)].value;
+        s.fps = kFrameRates[at(kFps)];
+        s.codec = kCodecs[at(kCodec)].value;
+        s.format = kFormats[at(kFormat)].value;
         s.stream = checked(kStream);
-        s.destination = kServices[static_cast<std::size_t>(std::max(0, selected(kService)))];
+        s.destination = kServices[at(kService)].value;
         if (s.destination == "custom") s.server = narrow(text_of(get(kServer)));
         const auto kbps = std::wcstoul(text_of(get(kBitrate)).c_str(), nullptr, 10);
         s.stream_kbps = static_cast<std::uint32_t>(std::clamp<unsigned long>(kbps ? kbps : 6000, 500, 50000));

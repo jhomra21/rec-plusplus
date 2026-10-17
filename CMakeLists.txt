@@ -44,6 +44,16 @@ if(WIN32)
     target_compile_definitions(rec-app PRIVATE UNICODE _UNICODE)
     target_compile_options(rec-app PRIVATE /utf-8 /EHsc /permissive-)
     target_link_libraries(rec-app PRIVATE rec comctl32 shell32 ole32 advapi32)
+elseif(APPLE)
+    add_executable(rec-app MACOSX_BUNDLE src/app/macos/main.mm src/app/session.cpp)
+    set_source_files_properties(src/app/macos/main.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_include_directories(rec-app PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(rec-app PRIVATE rec "-framework AppKit" "-framework Carbon" "-framework Security")
+    set_target_properties(rec-app PROPERTIES OUTPUT_NAME Rec
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/support/RecApp-Info.plist")
+    # A stable ad-hoc signature over the whole bundle, so privacy permissions apply to Rec.app.
+    add_custom_command(TARGET rec-app POST_BUILD
+        COMMAND codesign --force --sign - --timestamp=none "$<TARGET_FILE_DIR:rec-app>/../..")
 endif()
 
 install(TARGETS rec rec-cli EXPORT recTargets)
