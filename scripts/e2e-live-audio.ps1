@@ -8,6 +8,8 @@
 # in sync too.
 # REC_E2E_PREPLAY=1 starts the stimulus 2 s before the recording, so its audio is already
 # playing when capture starts.
+# Nothing else may play: the beep detector cannot tell other sound from beeps. The script
+# stops if the output device is not silent for 2 s first; REC_E2E_ALLOW_SOUND=1 skips that.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
 
@@ -32,6 +34,15 @@ if ($stream) {
 
 Write-Host "Saving recordings and evidence to: $artifacts"
 (Invoke-Rec $rec @('devices')).Text | Tee-Object -FilePath (Join-Path $artifacts 'devices.txt')
+if ($env:REC_E2E_ALLOW_SOUND -ne '1') {
+    $peak = Get-OutputPeak 2
+    Set-Content -Path (Join-Path $artifacts 'background-peak.txt') -Value $peak
+    # -40 dBFS; a steady tone from another app at a tenth of full scale broke Mac runs.
+    if ($peak -gt 0.01) {
+        if ($server) { Stop-MediaMTX $server }
+        throw "other audio is playing (peak $([math]::Round($peak, 3)) of full scale on the default output). Silence it and retry, or set REC_E2E_ALLOW_SOUND=1."
+    }
+}
 $seconds = if ($pause) { 8 } else { 6 }
 function Start-Stimulus([int]$length) {
     return Start-Process -FilePath powershell -PassThru -WindowStyle Hidden -ArgumentList @(

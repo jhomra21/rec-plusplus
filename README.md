@@ -91,7 +91,7 @@ The smoke scripts run an app end-to-end check on both platforms. `REC_APP_HOME` 
 
 The Windows app's manifest has no Windows 10 compatibility entry, on purpose. The Media Foundation MP4 sink stamps the Windows version the process sees into each file. Media Foundation's reader returned out-of-order video timestamps from the third keyframe on in fragmented files stamped 10.0.26200, and read the same files correctly once restamped 6.2 (the version a process without the entry sees). A host app that embeds `rec::Recorder` and declares Windows 10 compatibility would hit the same problem.
 
-The app has no live preview, camera, scenes, window or region selection, replay buffer or launch at login yet. On a Mac the app recorded the real display with system audio and a microphone, paused, saved, revealed the file, started from ⇧⌘R in another app, kept recording with its window closed, stopped from the menu bar and saved on ⌘Q ([evidence](docs/evidence/2026-10-17-app-mac/README.md)). That run found that sound already playing when recording started was recorded as silence on macOS; the fix still needs a run on a Mac.
+The app has no live preview, camera, scenes, window or region selection, replay buffer or launch at login yet. On a Mac the app recorded the real display with system audio and a microphone, paused, saved, revealed the file, started from ⇧⌘R in another app, kept recording with its window closed, stopped from the menu bar and saved on ⌘Q ([evidence](docs/evidence/2026-10-17-app-mac/README.md)). That run found that sound already playing when recording started was recorded as silence on macOS. After the fix, a Mac run with the stimulus started first passed (9 pairs, mean +29.6 ms, worst 37.9 ms), and a voice clip playing before Start was in the movie from 0.0 s. On Windows a tone playing before Start was in the app's movie from the first 100 ms ([Windows evidence](docs/evidence/2026-10-17-windows-preplay/README.md)).
 ## Audio and sync
 
 ```sh
@@ -133,7 +133,7 @@ REC_E2E_PREPLAY=1 bash scripts/e2e-live-audio.sh # start the stimulus 2 s before
 
 The script compiles `scripts/flash-beep.swift`, which flashes a full-screen window white with a simultaneous beep once a second. It records the display and system audio, probes the movie, and fails if fewer than four flash/beep pairs are found or if the mean offset falls outside the ITU-R BT.1359 detectability window (audio up to 45 ms early or 125 ms late). The movie, logs and probe report stay in the printed evidence directory. Nothing else may play sound during the run: the test cannot tell another app's audio from its beeps, and a steady tone from another app hides them.
 
-On Windows the equivalent is `scripts/e2e-live-audio.ps1` (set `$env:REC_E2E_MIC='1'` to add the microphone). Its stimulus, `scripts/flash-beep.ps1`, drives the flash from the audio device's play position. `$env:REC_E2E_STREAM='1'` also streams the recording to a local MediaMTX server and checks the flash/beep sync of what the server received. A system dialog that dims the screen (such as a firewall prompt) makes the flashes too dark to detect, so close any open dialog first.
+On Windows the equivalent is `scripts/e2e-live-audio.ps1` (set `$env:REC_E2E_MIC='1'` to add the microphone). Its stimulus, `scripts/flash-beep.ps1`, drives the flash from the audio device's play position. `$env:REC_E2E_STREAM='1'` also streams the recording to a local MediaMTX server and checks the flash/beep sync of what the server received, and `$env:REC_E2E_PREPLAY='1'` starts the stimulus 2 s before the recording. Before the stimulus, the script reads the default output's peak meter for 2 s and stops with "other audio is playing" if it is above −40 dBFS (`$env:REC_E2E_ALLOW_SOUND='1'` skips that). The macOS script has no such check yet. A system dialog that dims the screen (such as a firewall prompt) makes the flashes too dark to detect, so close any open dialog first.
 
 Streaming tests use [MediaMTX](https://github.com/bluenviron/mediamtx) v1.21.2 as the receiving server. `scripts/mediamtx.sh` (macOS) and `windows-common.ps1` download it once into `build/tools`, check its SHA-256, and run it with only RTMP enabled on 127.0.0.1. MediaMTX records what it receives as fragmented MP4, and `rec probe` checks that file. MediaMTX writes no edit list. AVFoundation then reads the received audio 44 ms shorter and earlier than Media Foundation does, which matches it trimming AAC's usual 2112-frame encoder delay. Players built on FFmpeg, like Media Foundation, keep that delay, and the stream is timed for them. A macOS CI stream probed on Windows measured +2.6 ms mean and 10 ms worst. Through AVFoundation the same file measured −31.9 ms mean and 42.5 ms worst, so the macOS check allows for the 44 ms.
 
@@ -168,6 +168,8 @@ One run each on a Windows 11 (26200) PC with an RTX 5070 Ti driving a 3840x2160 
 | Live stream, `REC_E2E_STREAM=1` (display + system audio, hardware H.264 at 6 Mb/s to MediaMTX) | Local file: 720/720 frames, 7 pairs, mean −12.3 ms. Received: 719 frames, 7 pairs, mean −12.8 ms, worst 13.5 ms; 0 frames skipped |
 | Same with `REC_E2E_MIC=1` | Local file: 720/720 frames, mean −16.6 ms. Received: 719 frames, 7 pairs, mean −16.5 ms, worst 21.9 ms |
 | Desktop app, real display + system audio, driven through MSAA: Start, 2 s Pause mid-stimulus, Resume, Stop | 643 frames (10.7 s kept), 0 dropped, 7 pairs, mean −16.4 ms, worst 23.7 ms |
+| `REC_E2E_PREPLAY=1` (stimulus already playing), without and with `REC_E2E_MIC=1` | 10 pairs each, means −13.3 and −10.8 ms, worst 30.4 ms; 720/720 frames ([evidence](docs/evidence/2026-10-17-windows-preplay/README.md)) |
+| Desktop app with a tone already playing before Start | Tone in the system track and mix from the first 100 ms; meters 0 after Stop |
 | `rec.exe` / `rec-app.exe` size | 244 KB / 300 KB |
 
 Most of the working set and private memory belongs to the GPU driver's Direct3D allocations, not recorder buffers. MediaMTX's MP4 writer drops the last received frame, whose duration it cannot know, so received streams have 719 frames.
@@ -179,7 +181,6 @@ The live mean moved from about −12 ms on the first day to about −24 ms the n
 ## Current limits
 
 - Capture is display-only.
-- On macOS, system audio that was already playing when recording started was recorded as silence while rec excluded its own audio from capture. rec no longer excludes it; `REC_E2E_PREPLAY=1` checks this live and has not yet run on a Mac.
 - Pausing a live recording on macOS cuts audio per capture buffer (about 10–20 ms), so a sound that spans the pause can leave up to one buffer at the cut. Windows cuts at the exact sample. Neither has been tested with a sound playing at the pause instant.
 - Windows HEVC recordings are not crash-safe (see above).
 - Streaming is plain RTMP. It has not been tested against Twitch or YouTube, at 4K, or over a slow network, and it does not reconnect.

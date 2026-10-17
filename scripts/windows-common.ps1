@@ -155,3 +155,45 @@ paths:
 function Stop-MediaMTX($server) {
     if (-not $server.Process.HasExited) { $server.Process.Kill(); $server.Process.WaitForExit() }
 }
+
+# The loudest peak (0..1) on the default output device over $seconds, from the endpoint's
+# own meter. Zero when nothing plays.
+function Get-OutputPeak([double]$seconds = 2) {
+    if (-not ('RecOutputMeter' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+[ComImport, Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")] class RecDeviceEnumerator {}
+[ComImport, Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IRecDeviceEnumerator {
+    int EnumAudioEndpoints(int flow, int mask, out IntPtr devices);
+    int GetDefaultAudioEndpoint(int flow, int role, out IRecDevice device);
+}
+[ComImport, Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IRecDevice {
+    int Activate(ref Guid iid, int context, IntPtr parameters, [MarshalAs(UnmanagedType.IUnknown)] out object result);
+}
+[ComImport, Guid("C02216F6-8C67-4B5B-9D00-D008E73E0064"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+interface IRecMeter { int GetPeakValue(out float peak); }
+public static class RecOutputMeter {
+    public static float Peak(int milliseconds) {
+        var devices = (IRecDeviceEnumerator)new RecDeviceEnumerator();
+        IRecDevice device;
+        Marshal.ThrowExceptionForHR(devices.GetDefaultAudioEndpoint(0, 1, out device));
+        Guid iid = typeof(IRecMeter).GUID;
+        object meter;
+        Marshal.ThrowExceptionForHR(device.Activate(ref iid, 23, IntPtr.Zero, out meter));
+        float loudest = 0;
+        for (int waited = 0; waited < milliseconds; waited += 20) {
+            float peak;
+            ((IRecMeter)meter).GetPeakValue(out peak);
+            loudest = Math.Max(loudest, peak);
+            System.Threading.Thread.Sleep(20);
+        }
+        return loudest;
+    }
+}
+'@
+    }
+    return [RecOutputMeter]::Peak([int]($seconds * 1000))
+}
