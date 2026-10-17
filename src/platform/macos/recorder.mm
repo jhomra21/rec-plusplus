@@ -74,6 +74,10 @@ std::int64_t nanos(CMTime time) { return CMTimeConvertScale(time, kNanos, kCMTim
 std::int64_t now_nanos() { return nanos(CMClockGetTime(CMClockGetHostTimeClock())); }
 
 std::string message(NSError* error, const char* fallback) {
+    // ScreenCaptureKit reports a missing permission as "The user declined TCCs ...".
+    if ([error.domain isEqualToString:SCStreamErrorDomain] && error.code == SCStreamErrorUserDeclined)
+        return "Screen Recording permission is off. Turn it on for this app in System Settings > Privacy & "
+               "Security > Screen & System Audio Recording, then quit and reopen the app.";
     return error ? std::string(error.localizedDescription.UTF8String ?: fallback) : std::string(fallback);
 }
 
@@ -682,7 +686,11 @@ private:
         config.capturesAudio = options_.system_audio;
         config.sampleRate = kMixRate;
         config.channelCount = 2;
-        config.excludesCurrentProcessAudio = YES;
+        // rec plays no sound of its own. Excluding this process also made ScreenCaptureKit
+        // deliver all-zero system audio for the whole recording whenever another app was
+        // already playing when capture started (macOS 27 on an M3 Pro; sounds that began
+        // after the start were captured).
+        config.excludesCurrentProcessAudio = NO;
         config.scalesToFit = YES;
         config.preservesAspectRatio = YES;
         if (options_.microphone) {

@@ -6,6 +6,8 @@
 # full length and stay in sync across the cut.
 # REC_E2E_STREAM=1 also streams to a local MediaMTX server; the stream it records must be
 # in sync too.
+# REC_E2E_PREPLAY=1 starts the stimulus 2 s before the recording, so its audio is already
+# playing when capture starts.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
 
@@ -30,15 +32,23 @@ if ($stream) {
 
 Write-Host "Saving recordings and evidence to: $artifacts"
 (Invoke-Rec $rec @('devices')).Text | Tee-Object -FilePath (Join-Path $artifacts 'devices.txt')
-$run = Start-RecProcess $rec $arguments
+$seconds = if ($pause) { 8 } else { 6 }
+function Start-Stimulus([int]$length) {
+    return Start-Process -FilePath powershell -PassThru -WindowStyle Hidden -ArgumentList @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'flash-beep.ps1'), '-Seconds', $length)
+}
 $stimulus = $null
+if ($env:REC_E2E_PREPLAY -eq '1') {
+    # Covers the 2 s lead and the recorder's 3 s start-up as well.
+    $stimulus = Start-Stimulus ($seconds + 5)
+    Start-Sleep -Seconds 2
+}
+$run = Start-RecProcess $rec $arguments
 try {
     # Allow the recorder to establish its capture streams and first video frame.
     Start-Sleep -Seconds 3
     if ($run.Process.HasExited) { throw "Recording stopped before the stimulus: $((Stop-RecProcess $run).Text)" }
-    $seconds = if ($pause) { 8 } else { 6 }
-    $stimulus = Start-Process -FilePath powershell -PassThru -WindowStyle Hidden -ArgumentList @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'flash-beep.ps1'), '-Seconds', $seconds)
+    if (-not $stimulus) { $stimulus = Start-Stimulus $seconds }
     if ($pause) {
         Start-Sleep -Milliseconds 3500
         Send-RecCommand $run 'pause'

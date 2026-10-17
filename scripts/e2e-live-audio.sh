@@ -7,6 +7,8 @@
 # full length and stay in sync across the cut.
 # REC_E2E_STREAM=1 also streams to a local MediaMTX server; the stream it records must be
 # in sync too.
+# REC_E2E_PREPLAY=1 starts the stimulus 2 s before the recording, so its audio is already
+# playing when capture starts.
 set -euo pipefail
 
 [[ "$(uname -s)" == Darwin ]] || { echo 'live A/V sync E2E requires macOS' >&2; exit 1; }
@@ -41,6 +43,16 @@ fi
 
 echo "Saving recordings and evidence to: $artifacts"
 "$rec" devices | tee "$artifacts/devices.txt"
+pause="${REC_E2E_PAUSE:-0}"
+stimulus_seconds=6
+if [[ "$pause" == 1 ]]; then stimulus_seconds=8; fi
+stimulus_pid=""
+if [[ "${REC_E2E_PREPLAY:-0}" == 1 ]]; then
+  # Covers the 2 s lead and the recorder's 3 s start-up as well.
+  "$artifacts/flash-beep" "$((stimulus_seconds + 5))" >"$artifacts/stimulus.log" 2>&1 &
+  stimulus_pid="$!"
+  sleep 2
+fi
 # rec reads pause/resume commands from stdin. The FIFO stays open on fd 3 until the end so
 # rec never sees end of input early.
 control="$artifacts/control"
@@ -58,18 +70,17 @@ if ! kill -0 "$capture_pid" 2>/dev/null; then
   exit 1
 fi
 
-# Separate process: ScreenCaptureKit excludes only rec's own audio.
-if [[ "${REC_E2E_PAUSE:-0}" == 1 ]]; then
-  "$artifacts/flash-beep" 8 >"$artifacts/stimulus.log" 2>&1 &
+if [[ -z "$stimulus_pid" ]]; then
+  "$artifacts/flash-beep" "$stimulus_seconds" >"$artifacts/stimulus.log" 2>&1 &
   stimulus_pid="$!"
+fi
+if [[ "$pause" == 1 ]]; then
   sleep 3.5
   echo pause >&3
   sleep 2
   echo resume >&3
-  wait "$stimulus_pid"
-else
-  "$artifacts/flash-beep" 6 >"$artifacts/stimulus.log" 2>&1
 fi
+wait "$stimulus_pid"
 wait "$capture_pid" || { echo "Recorder failed; see $artifacts/record.log" >&2; exit 1; }
 capture_pid=""
 exec 3>&-
@@ -84,7 +95,7 @@ grep -qx 'audio_codec=aac' "$artifacts/recording.probe"
 grep -qx 'frames=720' "$artifacts/recording.probe"
 awk -v d="$(value audio_duration)" 'BEGIN { exit !(d >= 11.9 && d <= 12.1) }' || { echo "audio lasts $(value audio_duration) s, not 12 s" >&2; exit 1; }
 if [[ "${REC_E2E_MIC:-0}" == 1 ]]; then grep -qx 'audio_tracks=3' "$artifacts/recording.probe"; fi
-if [[ "${REC_E2E_PAUSE:-0}" == 1 ]]; then grep -q 'not in the movie' "$artifacts/record.log"; fi
+if [[ "$pause" == 1 ]]; then grep -q 'not in the movie' "$artifacts/record.log"; fi
 events="$(value av_sync_events)"
 offset="$(value av_offset_ms)"
 worst="$(value av_offset_max_ms)"

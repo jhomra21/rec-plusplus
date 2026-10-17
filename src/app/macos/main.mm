@@ -533,6 +533,10 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     if (state == State::recording || state == State::paused) {
         _session->stop();
     } else if (state == State::idle) {
+        if (!_testPattern && !CGPreflightScreenCaptureAccess()) {
+            [self askForScreenRecording];
+            return;
+        }
         [self remember];
         const std::string key = utf8(_key.stringValue);
         if (auto started = _session->start(_settings, key, _testPattern); !started) {
@@ -549,6 +553,27 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     if (state == State::recording) _session->pause();
     else if (state == State::paused) _session->resume();
     [self refresh];
+}
+
+// macOS shows its own prompt once per app; after that only System Settings can grant access,
+// and the change applies when Rec reopens.
+- (void)askForScreenRecording {
+    [self showWindow:nil];
+    CGRequestScreenCaptureAccess();
+    NSString* text = @"Turn on Rec in System Settings > Privacy & Security > Screen & System Audio Recording, "
+                     @"then quit and reopen Rec.";
+    _detail.stringValue = text;
+    _detail.textColor = NSColor.systemOrangeColor;
+    NSAlert* alert = [[NSAlert alloc] init];
+    alert.messageText = @"Rec needs Screen Recording permission";
+    alert.informativeText = text;
+    [alert addButtonWithTitle:@"Open System Settings"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert beginSheetModalForWindow:_window completionHandler:^(NSModalResponse response) {
+        if (response != NSAlertFirstButtonReturn) return;
+        [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:
+            @"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"]];
+    }];
 }
 
 - (void)warn:(NSString*)message {
@@ -675,6 +700,8 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     _detail.textColor = _attention ? NSColor.systemOrangeColor : NSColor.secondaryLabelColor;
     NSString* live = active && s.live ? @"● LIVE" : @"";
     if (![_live.stringValue isEqualToString:live]) _live.stringValue = live;
+    // Hide the last level once recording ends; polling stops with it.
+    if (!active) _systemShown = _micShown = 0;
     [self meter:_systemMeter peak:s.system_peak shown:_systemShown];
     [self meter:_micMeter peak:s.mic_peak shown:_micShown];
 

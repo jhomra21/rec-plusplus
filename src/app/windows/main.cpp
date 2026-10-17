@@ -740,6 +740,8 @@ private:
         set_text(kStatus, status);
         set_text(kDetail, detail);
         set_text(kLive, active && s.live ? L"\u25CF LIVE" : L"");
+        // Hide the last level once recording ends; polling stops with it.
+        if (!active) system_shown_ = mic_shown_ = 0;
         meter(kSystemMeter, s.system_peak, system_shown_);
         meter(kMicMeter, s.mic_peak, mic_shown_);
         if (changed) {
