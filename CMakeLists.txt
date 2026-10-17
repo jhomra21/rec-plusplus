@@ -51,9 +51,13 @@ elseif(APPLE)
     target_link_libraries(rec-app PRIVATE rec "-framework AppKit" "-framework Carbon" "-framework Security")
     set_target_properties(rec-app PROPERTIES OUTPUT_NAME Rec
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/support/RecApp-Info.plist")
-    # A stable ad-hoc signature over the whole bundle, so privacy permissions apply to Rec.app.
+    # Sign the whole bundle so privacy permissions apply to Rec.app. macOS ties an ad-hoc
+    # grant to the exact build, so every rebuild needs a new approval; a certificate identity
+    # keeps the grant across rebuilds.
+    set(REC_SIGN_IDENTITY "-" CACHE STRING "codesign identity for Rec.app; '-' signs ad-hoc")
     add_custom_command(TARGET rec-app POST_BUILD
-        COMMAND codesign --force --sign - --timestamp=none "$<TARGET_FILE_DIR:rec-app>/../..")
+        COMMAND codesign --force --sign "${REC_SIGN_IDENTITY}" --timestamp=none "$<TARGET_FILE_DIR:rec-app>/../.."
+        VERBATIM)
 endif()
 
 install(TARGETS rec rec-cli EXPORT recTargets)
