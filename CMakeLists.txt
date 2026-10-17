@@ -37,5 +37,14 @@ if(APPLE)
     set_property(TARGET rec-cli APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/support/Info.plist")
 endif()
 
+# The desktop app: native controls on each platform over the shared session layer.
+if(WIN32)
+    add_executable(rec-app WIN32 src/app/windows/main.cpp src/app/session.cpp support/rec-app.manifest)
+    target_include_directories(rec-app PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_compile_definitions(rec-app PRIVATE UNICODE _UNICODE)
+    target_compile_options(rec-app PRIVATE /utf-8 /EHsc /permissive-)
+    target_link_libraries(rec-app PRIVATE rec comctl32 shell32 ole32 advapi32)
+endif()
+
 install(TARGETS rec rec-cli EXPORT recTargets)
 install(DIRECTORY include/ DESTINATION include)

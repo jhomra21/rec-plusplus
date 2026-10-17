@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -10,6 +11,14 @@
 namespace rec::core {
 
 inline constexpr std::int32_t kMixRate = 48000;
+
+// Raises a level meter to the peak of interleaved samples. The reader takes it with exchange(0).
+inline void raise_peak(std::atomic<float>& meter, const float* samples, std::size_t count) {
+    float peak = 0;
+    for (std::size_t i = 0; i < count; ++i) peak = std::max(peak, std::fabs(samples[i]));
+    float seen = meter.load(std::memory_order_relaxed);
+    while (peak > seen && !meter.compare_exchange_weak(seen, peak, std::memory_order_relaxed)) {}
+}
 
 // Sums two sources on a 48 kHz stereo timeline whose sample 0 is the recording origin,
 // then limits the result below -1 dBFS instead of clipping. Not thread-safe; the

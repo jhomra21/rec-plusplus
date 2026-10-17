@@ -65,6 +65,9 @@ struct Stats {
     std::uint64_t mic_written = 0;
     std::uint64_t mic_dropped = 0;
     std::uint64_t mix_written = 0;
+    // Linear peak (0 to 1) of each source since the previous stats() call, for level meters.
+    float system_peak = 0;
+    float mic_peak = 0;
     double system_audio_offset_ms = 0;
     bool paused = false;
     double paused_seconds = 0; // Total time paused, excluded from the movie.

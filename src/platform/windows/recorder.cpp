@@ -497,6 +497,7 @@ struct AudioSource {
     float gain = 1;
     std::int64_t next = INT64_MIN;      // Next 48 kHz sample index; keeps the source continuous.
     std::atomic<std::uint64_t> written{0}, dropped{0};
+    mutable std::atomic<float> peak{0};  // Level meter; stats() takes it.
 };
 
 enum class SlotState { free, filling, pending, current };
@@ -733,6 +734,8 @@ public:
         stats.mic_dropped = audio_[kMic].dropped.load() +
             (audio_[kMic].capture ? audio_[kMic].capture->overflowed() : 0);
         stats.mix_written = mix_written_.load();
+        stats.system_peak = audio_[kSystem].peak.exchange(0);
+        stats.mic_peak = audio_[kMic].peak.exchange(0);
         stats.system_audio_offset_ms = audio_[kSystem].enabled ? system_offset_ms_ : 0;
         stats.paused = timeline_.paused();
         stats.paused_seconds = static_cast<double>(timeline_.paused_total(now_ticks())) / kTicks;
@@ -1179,6 +1182,7 @@ private:
         if (start >= audio_cap_) return;
         frames = static_cast<std::size_t>(std::min<std::int64_t>(static_cast<std::int64_t>(frames), audio_cap_ - start));
         if (!frames) return;
+        core::raise_peak(source.peak, data, frames * 2);
         bool ok = true;
         if (source.stream >= 0) {
             if (start > floor) ok = write_pcm(source.stream, nullptr, static_cast<std::size_t>(start - floor), source.stem_channels, floor);
@@ -1446,7 +1450,9 @@ Result probe_file(const std::string& path, Probe& probe) {
         hr = reader->ReadSample(static_cast<DWORD>(video), 0, &stream, &flags, &time, &sample);
         if (FAILED(hr)) return {failed("video decode failed", hr)};
         if (sample) {
-            if (previous != LLONG_MIN && time <= previous) return {"video timestamps are not strictly increasing"};
+            if (previous != LLONG_MIN && time <= previous)
+                return {"video timestamps are not strictly increasing: frame " + std::to_string(probe.frames) + " at " +
+                        std::to_string(time / 10000) + " ms follows " + std::to_string(previous / 10000) + " ms"};
             previous = time;
             ++probe.frames;
             LONGLONG duration = 0;

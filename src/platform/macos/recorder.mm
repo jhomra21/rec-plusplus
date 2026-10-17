@@ -407,6 +407,7 @@ struct AudioSource {
     float gain = 1;
     std::int64_t next_mix = INT64_MIN;   // Keeps consecutive buffers contiguous in the mix.
     std::atomic<std::uint64_t> written{0}, dropped{0};
+    mutable std::atomic<float> peak{0};  // Level meter; stats() takes it.
 };
 } // namespace
 
@@ -611,6 +612,8 @@ public:
         stats.mic_written = audio_[kMic].written.load();
         stats.mic_dropped = audio_[kMic].dropped.load();
         stats.mix_written = mix_written_.load();
+        stats.system_peak = audio_[kSystem].peak.exchange(0);
+        stats.mic_peak = audio_[kMic].peak.exchange(0);
         stats.system_audio_offset_ms = audio_[kSystem].enabled ? system_offset_ms_ : 0;
         stats.paused = timeline_.paused();
         stats.paused_seconds = static_cast<double>(timeline_.paused_total(now_nanos())) / kNanos;
@@ -885,9 +888,11 @@ private:
                     fail(message(writer_.error, "audio encoding failed"));
             }
         }
+        const bool pcm = stereo_pcm(sample, pcm_, scratch_);
+        if (pcm) core::raise_peak(source.peak, pcm_.data(), pcm_.size());
         // A single source goes to the live stream as it is; two go through the mix.
         if (mixing_ || live_) {
-            if (stereo_pcm(sample, pcm_, scratch_)) {
+            if (pcm) {
                 auto first = static_cast<std::int64_t>(std::llround(CMTimeGetSeconds(start) * kMixRate));
                 // Timestamps jitter by a sample or two; keep a continuous stream continuous.
                 if (source.next_mix != INT64_MIN && std::llabs(first - source.next_mix) <= kMixRate / 1000)

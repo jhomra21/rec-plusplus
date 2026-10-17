@@ -1,6 +1,7 @@
 # Windows smoke: build with MSVC, then encode and decode real Media Foundation output.
 # REC_E2E_ARTIFACT_DIR keeps the recordings and probe reports; REC_E2E_CAPTURE=1 also
-# records the real display. The streaming check downloads a pinned MediaMTX release.
+# records the real display. The streaming check downloads a pinned MediaMTX release. The
+# desktop app check (app-e2e.ps1) needs an interactive desktop session.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
 
@@ -198,6 +199,11 @@ try {
         Expect-Field $screen.Probe 'codec' 'h264'
         Expect-Field $screen.Probe 'frames' '90'
     }
+    # The desktop app, driven through its accessibility interface.
+    $app = Join-Path (Split-Path -Parent $rec) 'rec-app.exe'
+    $appArtifacts = Join-Path $artifacts 'app'
+    New-Item -ItemType Directory -Force $appArtifacts | Out-Null
+    & (Join-Path $PSScriptRoot 'app-e2e.ps1') -Rec $rec -App $app -Artifacts $appArtifacts
     Write-Host 'smoke passed'
 } finally {
     if ($artifacts -ne $tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
