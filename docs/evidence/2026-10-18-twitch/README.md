@@ -14,7 +14,9 @@ All three exited with status 0: the TLS connection verified against the system r
 
 ## What Twitch received
 
-Twitch Inspector (inspector.twitch.tv, checked by the account owner) listed both synthetic sessions, 9:31:17–9:31:48 and 9:31:49–9:32:20, each 31 s and "stable". It showed the encoder as `rec` and rated the configuration check "Excellent" with no recommended changes. Its bitrate graph stayed near zero because the test pattern compresses to about 270 kb/s. The screen session was not checked in Inspector.
+Twitch Inspector (inspector.twitch.tv, checked by the account owner) listed both synthetic sessions, 9:31:17–9:31:48 and 9:31:49–9:32:20, each 31 s and "stable". It showed the encoder as `rec` and rated the configuration check "Excellent" with no recommended changes. Its bitrate graph stayed near zero because the test pattern compresses to about 270 kb/s.
+
+Inspector also listed the real-screen session, 9:34:48–9:35:48, with 0 unstable events, "stable" for 40 s and configuration "Excellent". While it was live it read "Stable @ 1,401 Kbps", in line with the 1.5 Mb/s average rec sent. The RTMP header Twitch recorded matches what rec announces: `videocodecid:7` (H.264), `width:1920 height:1080 framerate:30 videodatarate:6000`, `audiocodecid:10` (AAC), `audiosamplerate:48000 audiosamplesize:16 stereo:true audiodatarate:160`, `encoder:rec`.
 
 ## Not covered
 
