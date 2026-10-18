@@ -62,7 +62,7 @@ struct Track {
     }
 };
 
-Bytes sample_table(const Track& t, const Bytes& description) {
+Bytes sample_table(const Track& t, bool audio, const Bytes& description) {
     Bytes stsd;
     u32(stsd, 1);
     append(stsd, description);
@@ -95,6 +95,22 @@ Bytes sample_table(const Track& t, const Bytes& description) {
         append(table, full_box("stss", 0, stss));
     }
     append(table, boxes({full_box("stsc", 0, stsc), full_box("stsz", 0, stsz), full_box("co64", 0, co64)}));
+    if (audio) {
+        // Every AAC frame needs the one before it, as AVAssetWriter declares. Without this group
+        // AVFoundation also drops the encoder delay from the clip's first frames and plays the
+        // audio about 44 ms early.
+        Bytes sgpd;
+        sgpd.insert(sgpd.end(), {'r', 'o', 'l', 'l'});
+        u32(sgpd, 2);  // Entry length.
+        u32(sgpd, 1);
+        u16(sgpd, 0xFFFF);  // Roll distance -1.
+        Bytes sbgp;
+        sbgp.insert(sbgp.end(), {'r', 'o', 'l', 'l'});
+        u32(sbgp, 1);
+        u32(sbgp, static_cast<std::uint32_t>(t.sizes.size()));
+        u32(sbgp, 1);
+        append(table, boxes({full_box("sgpd", 0x01000000, sgpd), full_box("sbgp", 0, sbgp)}));  // sgpd is version 1.
+    }
     return box("stbl", table);
 }
 
@@ -150,7 +166,7 @@ Bytes track_box(const Track& t, bool video, std::uint32_t width, std::uint32_t h
     u32(dref, 1);
     append(dref, full_box("url ", 1, {}));
     const Bytes minf = box("minf", boxes({full_box(video ? "vmhd" : "smhd", video ? 1 : 0, header),
-                                          box("dinf", full_box("dref", 0, dref)), sample_table(t, description)}));
+                                          box("dinf", full_box("dref", 0, dref)), sample_table(t, !video, description)}));
     const Bytes mdia = box("mdia", boxes({full_box("mdhd", 0, mdhd), full_box("hdlr", 0, hdlr), minf}));
     return box("trak", boxes({full_box("tkhd", 3, tkhd), box("edts", full_box("elst", 0, elst)), mdia}));
 }
