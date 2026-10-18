@@ -183,7 +183,7 @@ The live mean moved from about −12 ms on the first day to about −24 ms the n
 - Capture is display-only.
 - Pausing a live recording on macOS cuts audio per capture buffer (about 10–20 ms), so a sound that spans the pause can leave up to one buffer at the cut. Windows cuts at the exact sample. Neither has been tested with a sound playing at the pause instant.
 - Windows HEVC recordings are not crash-safe (see above).
-- Streaming has not been tested against Twitch or YouTube (over RTMP or RTMPS), at 4K, or over a slow network. Reconnecting is tested only against a local server restart. The app's Twitch and YouTube destinations still use plain RTMP.
+- Streaming to Twitch works over RTMPS and RTMP from Windows (bandwidth-test mode, [evidence](docs/evidence/2026-10-18-twitch/README.md)). It has not been tested against YouTube, from macOS to Twitch, at a sustained 6 Mb/s, at 4K, or over a slow network. Reconnecting is tested only against a local server restart. The app's Twitch and YouTube destinations still use plain RTMP.
 - Windows loopback captures the default output device. rec plays silence on it while recording so the audio clock keeps moving when nothing else plays.
 - The output latency is read once, when recording starts. Switching output devices mid-recording keeps the old offset.
 - A microphone that is not 48 kHz is resampled linearly per buffer for the mix. Its stem is converted by AVFoundation.
