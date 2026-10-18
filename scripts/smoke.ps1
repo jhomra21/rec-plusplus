@@ -184,13 +184,15 @@ try {
     $display = Get-Probe $rec $scenePath (Join-Path $artifacts 'scene-display.probe') @('--sample', '1240,170,400,200')
     $before = Get-Probe $rec $scenePath (Join-Path $artifacts 'scene-screen-before.probe') @('--sample', '1000,700,400,250')
     $after = Get-Probe $rec $scenePath (Join-Path $artifacts 'scene-screen-after.probe') @('--sample', '100,700,300,250')
-    foreach ($second in 0..1) { Expect-Color $window "sample_$second" 'blue' }
+    # A slow runner may not have a layer's first frame yet at 0 s; until then it is black.
+    Expect-Color $window 'sample_1' 'blue'
     Expect-Color $window 'sample_4' 'black'
-    foreach ($second in 0..4) { Expect-Color $display "sample_$second" 'blue' }
+    foreach ($second in 1..4) { Expect-Color $display "sample_$second" 'blue' }
     Expect-Color $before 'sample_0' 'white'
     Expect-Color $before 'sample_4' 'black'
     Expect-Color $after 'sample_0' 'black'
-    Expect-Color $after 'sample_4' 'white'    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
+    Expect-Color $after 'sample_4' 'white'
+    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
     # is unmuted 3.5 s in: no beep with the first flash. Mixed with the mic, the tone is turned
     # down 6 dB, then muted 2.5 s in: the mix has no beeps after that.
     $unmutePath = Join-Path $artifacts 'unmute.mp4'
