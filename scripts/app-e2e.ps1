@@ -10,9 +10,10 @@
 #   4. Closing the window while recording keeps recording; the next stop saves the movie.
 #   5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
 #   6. A camera and an image are drawn; the scene moves the camera while recording.
-#   7. Settings persist without the stream key, which Credential Manager holds.
-#   8. Quit Rec from the notification-area menu while recording saves the movie, then exits.
-#   9. Logging off while recording saves the movie before WM_ENDSESSION returns.
+#   7. Volume and mute change the mix while recording, from the window and the menu.
+#   8. Settings persist without the stream key, which Credential Manager holds.
+#   9. Quit Rec from the notification-area menu while recording saves the movie, then exits.
+#  10. Logging off while recording saves the movie before WM_ENDSESSION returns.
 param([string]$Rec, [string]$App, [string]$Artifacts)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
@@ -41,7 +42,7 @@ public static class AppWindow {
 '@
 
 # MSAA roles.
-$PushButton = 43; $CheckButton = 44; $Text = 42; $ComboBox = 46
+$PushButton = 43; $CheckButton = 44; $Text = 42; $ComboBox = 46; $Slider = 51
 $appHome = Join-Path $Artifacts 'app-home'
 $folder = Join-Path $appHome 'recordings'
 $server = 'rtmp://127.0.0.1:1935/live'
@@ -66,7 +67,7 @@ function Start-App {
 
 # The control whose accessible name and role match; control ids run from 100.
 function Find($ui, [string]$name, [int]$role) {
-    for ($id = 100; $id -lt 160; $id++) {
+    for ($id = 100; $id -lt 200; $id++) {
         $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
         if ($handle -eq [IntPtr]::Zero) { continue }
         $item = [AppWindow]::Of($handle)
@@ -174,11 +175,15 @@ try {
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
     $deadline = (Get-Date).AddSeconds(10)
-    while ((Text-Of $ui 102) -ne "$([char]0x25CF) LIVE") {
+    while (-not (Text-Of $ui 102).StartsWith("$([char]0x25CF) LIVE")) {
         if ((Get-Date) -gt $deadline) { throw "no LIVE badge: $(Text-Of $ui 101)" }
         Start-Sleep -Milliseconds 100
     }
-    Start-Sleep -Seconds 4
+    Start-Sleep -Seconds 3
+    # The badge shows the measured send rate, here over a second of a 3000 kb/s stream.
+    $badge = Text-Of $ui 102
+    if (-not ($badge -match 'LIVE\s+(\d+\.\d) Mb/s') -or [double]$Matches[1] -le 0) { throw "no stream rate in the LIVE badge: '$badge'" }
+    Start-Sleep -Seconds 1
     Press $ui 'Stop Recording'
     Wait-Status $ui 'Ready to record' | Out-Null
     if ((Text-Of $ui 101) -match 'Stream stopped early') { throw (Text-Of $ui 101) }
@@ -269,7 +274,31 @@ try {
     Expect-Color $corner 'sample_6' 'white'
     foreach ($second in 0..6) { Expect-Color $logo "sample_$second" 'red' }
     Write-Host "6. camera and image: $($corner['frames']) frames, corner, full frame, hidden"
-    # 7. Closing when idle quits and saves settings, without the key.
+
+    # 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
+    # unmuted from the notification-area menu 4.5 s in. The mix loses the beeps at 3 and 4 s.
+    Set-Check $ui 'Microphone' $true
+    $slider = (Find $ui 'System audio volume' $Slider).Handle
+    [AppWindow]::SendMessage($slider, 0x0405, [IntPtr]1, [IntPtr](-6)) | Out-Null  # TBM_SETPOS
+    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $slider) | Out-Null  # WM_HSCROLL, TB_ENDTRACK
+    Press $ui 'Start Recording'
+    Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    Start-Sleep -Milliseconds 2500
+    Set-Check $ui 'Mute system' $true
+    Start-Sleep -Milliseconds 2000
+    [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1006, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Mute System Audio"
+    Start-Sleep -Milliseconds 2000
+    Press $ui 'Stop Recording'
+    Wait-Status $ui 'Ready to record' | Out-Null
+    $movie = Newest-Movie
+    Copy-Item $movie (Join-Path $Artifacts 'app-mute.mp4')
+    $muted = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-mute.probe')
+    $beeps = @($muted['beeps'].Split(',') | ForEach-Object { [double]::Parse($_, [Globalization.CultureInfo]::InvariantCulture) })
+    if (@($beeps | Where-Object { $_ -lt 2.5 }).Count -lt 2) { throw "beeps before the mute are missing: $($muted['beeps'])" }
+    if (@($beeps | Where-Object { $_ -gt 2.7 -and $_ -lt 4.5 }).Count -ne 0) { throw "beeps while muted: $($muted['beeps'])" }
+    if (@($beeps | Where-Object { $_ -gt 4.7 }).Count -lt 1) { throw "no beeps after unmuting: $($muted['beeps'])" }
+    Write-Host "7. volume and mute: beeps at $($muted['beeps'])"
+    # 8. Closing when idle quits and saves settings, without the key.
     [AppWindow]::PostMessage($handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     if (-not $ui.Process.WaitForExit(15000)) { throw 'the app did not quit' }
     $settings = Get-Content -Raw (Join-Path $appHome 'settings.conf')
@@ -283,9 +312,11 @@ try {
     Expect-Text $settings 'camera_device=test'
     Expect-Text $settings 'scene=screen'
     Expect-Text $settings 'image=1'
+    Expect-Text $settings 'system_volume=-6'
+    Expect-Text $settings 'system_muted=0'
     if ($settings.Contains('appkey')) { throw 'the stream key was written to the settings file' }
 
-    # 8. Quit from the notification-area menu while recording: the app saves the movie, then exits.
+    # 9. Quit from the notification-area menu while recording: the app saves the movie, then exits.
     $before = @(Get-ChildItem $folder -Filter '*.mp4').Count
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
@@ -298,9 +329,9 @@ try {
     $quit = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-quit.probe')
     Expect-Within $quit 'duration' 1.5 3.5
     Expect-Within $quit 'av_offset_max_ms' 0 20
-    Write-Host "8. quit while recording: $($quit['frames']) frames"
+    Write-Host "9. quit while recording: $($quit['frames']) frames"
 
-    # 9. Log off while recording: the movie is complete when WM_ENDSESSION returns, after which
+    # 10. Log off while recording: the movie is complete when WM_ENDSESSION returns, after which
     # Windows may end the process at any moment.
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
@@ -316,7 +347,7 @@ try {
     $ended = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-logoff.probe')
     Expect-Within $ended 'duration' 1.5 3.5
     Expect-Within $ended 'av_offset_max_ms' 0 20
-    Write-Host "9. log off while recording: $($ended['frames']) frames"
+    Write-Host "10. log off while recording: $($ended['frames']) frames"
     Write-Host 'app e2e passed'
 } finally {
     if ($ui -and -not $ui.Process.HasExited) { $ui.Process.Kill() }

@@ -39,10 +39,14 @@ std::atomic_bool interrupted{false};
 
 extern "C" void on_signal(int) { interrupted.store(true); }
 
-enum class Command { toggle, pause, resume, stop, save_replay, show, hide, flip };
+enum class Command { toggle, pause, resume, stop, save_replay, show, hide, flip, audio };
 struct Posted {
     Command command;
     std::size_t overlay = 0;  // show, hide and flip: 0-based.
+    // audio: the source, and its new mute (none: toggle) or volume.
+    rec::AudioInput input = rec::AudioInput::system;
+    std::optional<bool> muted;
+    std::optional<double> gain_db;
 };
 std::mutex commands_mutex;
 std::deque<Posted> commands;
@@ -50,6 +54,18 @@ std::deque<Posted> commands;
 void post(Command command, std::size_t overlay = 0) {
     std::lock_guard lock(commands_mutex);
     commands.push_back({command, overlay});
+}
+
+void post_audio(rec::AudioInput input, std::optional<bool> muted, std::optional<double> gain_db = std::nullopt) {
+    std::lock_guard lock(commands_mutex);
+    commands.push_back({Command::audio, 0, input, muted, gain_db});
+}
+
+// "system" or "mic" at the start of text.
+std::optional<rec::AudioInput> audio_input(std::string_view text) {
+    if (text == "system") return rec::AudioInput::system;
+    if (text == "mic" || text == "microphone") return rec::AudioInput::microphone;
+    return std::nullopt;
 }
 
 bool next_command(Posted& posted) {
@@ -80,8 +96,9 @@ void restore_terminal() {
 #endif
 
 // Keys in a terminal: p or space toggles pause, s saves the replay, 1 to 4 show or hide an
-// overlay, q stops. Piped stdin takes one command per line (pause, resume, toggle, save,
-// show N, hide N, stop), so scripts can drive a recording. The reader thread is detached: a
+// overlay, m and a mute or unmute the microphone and system audio, q stops. Piped stdin
+// takes one command per line (pause, resume, toggle, save, show N, hide N, mute SOURCE,
+// unmute SOURCE, volume SOURCE DB, stop), so scripts can drive a recording. The reader thread is detached: a
 // pending read must not keep the process alive after the movie is saved.
 void watch_input() {
     if (keyboard()) {
@@ -107,6 +124,8 @@ void watch_input() {
                 if (key == 'p' || key == 'P' || key == ' ') post(Command::toggle);
                 else if (key == 's' || key == 'S') post(Command::save_replay);
                 else if (key >= '1' && key <= '4') post(Command::flip, static_cast<std::size_t>(key - '1'));
+                else if (key == 'm' || key == 'M') post_audio(rec::AudioInput::microphone, std::nullopt);
+                else if (key == 'a' || key == 'A') post_audio(rec::AudioInput::system, std::nullopt);
                 else if (key == 'q' || key == 'Q') post(Command::stop);
             }
         }).detach();
@@ -127,7 +146,18 @@ void watch_input() {
             else if ((line.rfind("show ", 0) == 0 || line.rfind("hide ", 0) == 0) && line.size() == 6 && line[5] >= '1' &&
                      line[5] <= '4')
                 post(line[0] == 's' ? Command::show : Command::hide, static_cast<std::size_t>(line[5] - '1'));
-            else if (line == "stop") post(Command::stop);
+            else if (line.rfind("mute ", 0) == 0 && audio_input(line.substr(5)))
+                post_audio(*audio_input(line.substr(5)), true);
+            else if (line.rfind("unmute ", 0) == 0 && audio_input(line.substr(7)))
+                post_audio(*audio_input(line.substr(7)), false);
+            else if (line.rfind("volume ", 0) == 0) {
+                const auto space = line.find(' ', 7);
+                const auto input = space == std::string::npos ? std::nullopt : audio_input(line.substr(7, space - 7));
+                char* end = nullptr;
+                const double db = input ? std::strtod(line.c_str() + space + 1, &end) : 0;
+                if (input && end && *end == '\0' && end != line.c_str() + space + 1) post_audio(*input, std::nullopt, db);
+                else std::cerr << "Use: volume system|mic DB\n";
+            } else if (line == "stop") post(Command::stop);
         }
     }).detach();
 }
@@ -172,8 +202,9 @@ void usage() {
                  "  --system-audio                 Record system audio\n"
                  "  --mic DEVICE                   Record a microphone: default, or an ID or name from devices\n"
                  "  --audio-tracks LAYOUT          both (mix + stems), mix, or stems (default: both)\n"
-                 "  --system-gain DB               System audio level in the mix (-60 to 24)\n"
-                 "  --mic-gain DB                  Microphone level in the mix (-60 to 24)\n"
+                 "  --system-gain DB               System audio volume (-60 to 24); stems stay as captured\n"
+                 "  --mic-gain DB                  Microphone volume (-60 to 24); stems stay as captured\n"
+                 "  --mute-system, --mute-mic      Start with the source muted (unmute with a or m)\n"
                  "  --system-audio-offset-ms MS    Delay system audio (default: output device latency)\n"
                  "  --mic-offset-ms MS             Delay the microphone (default: 0)\n"
                  "  --stream URL                   Also stream live: rtmp[s]://host[:port]/app/stream-key\n"
@@ -187,8 +218,10 @@ void usage() {
                  "  --test-tone                    Add a beep with each flash as system audio\n"
                  "  --test-mic                     Add a quiet synthetic microphone\n\n"
                  "While recording, press p or space to pause and resume, s to save the replay, 1 to 4 to show or\n"
-                 "hide a camera or image (in the order given), q or Ctrl-C to stop.\n"
-                 "With stdin piped, send lines: pause, resume, toggle, save, show N, hide N, stop.\n"
+                 "hide a camera or image (in the order given), m or a to mute or unmute the microphone or system\n"
+                 "audio, q or Ctrl-C to stop.\n"
+                 "With stdin piped, send lines: pause, resume, toggle, save, show N, hide N, mute system|mic,\n"
+                 "unmute system|mic, volume system|mic DB, stop.\n"
                  "rec probe --sample reports the mean color of a rectangle (video pixels) once a second.\n";
 }
 
@@ -278,6 +311,8 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
         if (arg == "--test-tone") { o.test_tone = true; continue; }
         if (arg == "--test-mic") { o.test_mic = true; continue; }
         if (arg == "--system-audio") { o.system_audio = true; continue; }
+        if (arg == "--mute-system") { o.system_muted = true; continue; }
+        if (arg == "--mute-mic") { o.mic_muted = true; continue; }
         if (i + 1 >= argc) { error = "missing value for " + std::string(arg); return false; }
         std::string_view value(argv[++i]);
         double real = 0;
@@ -384,15 +419,22 @@ std::string redact(const std::string& url) {
 }
 
 // One rewritten line: elapsed time and anything that needs attention.
-void show_status(const rec::Stats& stats, double recorded, bool audio, bool streaming) {
+void show_status(const rec::Stats& stats, double recorded, bool audio, bool streaming, const std::string& muted,
+                 double stream_kbps) {
     if (stats.paused) std::cout << "\r\033[33m\xE2\x9D\x9A\xE2\x9D\x9A PAUSED\033[0m ";
     else std::cout << "\r\033[31m\xE2\x97\x8F\033[0m REC    ";
     std::cout << clock_text(recorded) << "   " << stats.written << " frames";
     if (stats.dropped) std::cout << ", \033[33m" << stats.dropped << " dropped\033[0m";
     if (audio && stats.audio_dropped + stats.mic_dropped)
         std::cout << ", \033[33maudio drops " << stats.audio_dropped + stats.mic_dropped << "\033[0m";
+    if (!muted.empty()) std::cout << "   \033[33m" << muted << " muted\033[0m";
     if (streaming) {
-        if (stats.streaming) std::cout << "   \033[35m\xE2\x97\x8F LIVE\033[0m";
+        if (stats.streaming) {
+            std::cout << "   \033[35m\xE2\x97\x8F LIVE\033[0m " << static_cast<int>(stream_kbps) << " kb/s";
+            // Over a second of media waiting means the network is not keeping up.
+            if (stats.stream_queued_ms > 1000)
+                std::cout << ", \033[33m" << std::fixed << std::setprecision(1) << stats.stream_queued_ms / 1000.0 << " s behind\033[0m";
+        }
         else if (stats.stream_reconnecting) std::cout << "   \033[33mreconnecting\033[0m";
         else std::cout << "   \033[33mstream lost\033[0m";
         if (stats.stream_dropped) std::cout << ", \033[33m" << stats.stream_dropped << " skipped\033[0m";
@@ -524,6 +566,18 @@ int main(int argc, char** argv) {
     unsigned replays = 0;
     std::vector<bool> visible;
     for (const auto& o : options.overlays) visible.push_back(o.visible);
+    // Volume and mute per source: system audio, then the microphone.
+    double gains[2]{options.system_gain_db, options.mic_gain_db};
+    bool mutes[2]{options.system_muted, options.mic_muted};
+    const bool has_input[2]{options.system_audio || options.test_tone, options.microphone || options.test_mic};
+    const auto muted_text = [&] {
+        const bool system = has_input[0] && mutes[0], mic = has_input[1] && mutes[1];
+        return std::string(system && mic ? "system audio and mic" : system ? "system audio" : mic ? "mic" : "");
+    };
+    // The stream's send rate, measured over about a second.
+    double stream_kbps = 0;
+    std::uint64_t rate_bytes = 0;
+    auto rate_since = began;
     while (!interrupted.load() && !recorder.finished()) {
         Posted posted;
         while (next_command(posted)) {
@@ -543,6 +597,27 @@ int main(int argc, char** argv) {
                     } else {
                         std::cerr << changed.error << '\n';
                     }
+                }
+                std::cout << std::flush;
+                shown -= std::chrono::seconds(1);
+                continue;
+            }
+            if (command == Command::audio) {
+                if (live) std::cout << "\r\033[K";
+                const auto i = posted.input == rec::AudioInput::system ? 0 : 1;
+                const char* name = i == 0 ? "system audio" : "microphone";
+                const bool mute = posted.muted.value_or(posted.gain_db ? mutes[i] : !mutes[i]);
+                const double gain = posted.gain_db.value_or(gains[i]);
+                if (auto changed = recorder.set_volume(posted.input, gain, mute); changed) {
+                    if (posted.gain_db)
+                        std::cout << "Set " << name << " to " << std::fixed << std::setprecision(1) << gain << " dB";
+                    else
+                        std::cout << (mute ? "Muted " : "Unmuted ") << name;
+                    std::cout << " at " << clock_text(recorded()) << '\n';
+                    gains[i] = gain;
+                    mutes[i] = mute;
+                } else {
+                    std::cerr << changed.error << '\n';
                 }
                 std::cout << std::flush;
                 shown -= std::chrono::seconds(1);
@@ -590,8 +665,15 @@ int main(int argc, char** argv) {
             }
         }
         const auto now = std::chrono::steady_clock::now();
+        if (streaming && now - rate_since >= std::chrono::seconds(1)) {
+            const auto bytes = recorder.stats().stream_bytes;
+            stream_kbps = static_cast<double>(bytes - rate_bytes) * 8 / 1000 /
+                          std::chrono::duration<double>(now - rate_since).count();
+            rate_bytes = bytes;
+            rate_since = now;
+        }
         if (live && now - shown >= std::chrono::milliseconds(250)) {
-            show_status(recorder.stats(), recorded(), audio, streaming);
+            show_status(recorder.stats(), recorded(), audio, streaming, muted_text(), stream_kbps);
             shown = now;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
@@ -600,6 +682,7 @@ int main(int argc, char** argv) {
 #ifndef _WIN32
     restore_terminal();
 #endif
+    const std::chrono::duration<double> wall = std::chrono::steady_clock::now() - began;
     const auto stopped = recorder.stop();
     const auto stats = recorder.stats();
     std::cout << "Captured " << stats.captured << ", written " << stats.written
@@ -616,7 +699,9 @@ int main(int argc, char** argv) {
         std::cout << "Paused " << std::fixed << std::setprecision(1) << stats.paused_seconds << " s (not in the movie)\n";
     if (streaming)
         std::cout << "Streamed " << stats.stream_frames << " frames (" << std::fixed << std::setprecision(1)
-                  << static_cast<double>(stats.stream_bytes) / 1e6 << " MB), skipped " << stats.stream_dropped
+                  << static_cast<double>(stats.stream_bytes) / 1e6 << " MB, "
+                  << static_cast<int>(static_cast<double>(stats.stream_bytes) * 8 / 1000 / std::max(1.0, wall.count()))
+                  << " kb/s), skipped " << stats.stream_dropped
                   << (stats.stream_reconnects ? ", reconnected " + std::to_string(stats.stream_reconnects) : std::string()) << '\n';
     if (!stopped) { std::cerr << stopped.error << '\n'; return 1; }
     if (!recorder.failure().empty()) { std::cerr << recorder.failure() << '\n'; return 1; }

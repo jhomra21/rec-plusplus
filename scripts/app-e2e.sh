@@ -10,7 +10,8 @@
 #   5. closing the window keeps recording, and the menu bar item's menu stops it;
 #   6. with the replay buffer on, Save Replay writes the last seconds while recording goes on;
 #   7. a camera and an image are drawn, and the scene moves the camera while recording;
-#   8. quitting during a recording saves the movie; settings persist without the stream key.
+#   8. volume and mute change the mix while recording, from the window and the menu bar item;
+#   9. quitting during a recording saves the movie; settings persist without the stream key.
 # Usage: app-e2e.sh REC REC_APP ARTIFACTS
 set -euo pipefail
 
@@ -55,14 +56,14 @@ REC_APP_HOME="$home" REC_APP_TEST_PATTERN=1 REC_APP_SELF_TEST="$report" \
   REC_APP_SELF_TEST_STREAM=rtmp://127.0.0.1:1935/live \
   "$app/Contents/MacOS/Rec" >"$artifacts/app.log" 2>&1 &
 pid="$!"
-for _ in $(seq 240); do
+for _ in $(seq 360); do
   kill -0 "$pid" 2>/dev/null || break
   sleep 0.5
 done
 if kill -0 "$pid" 2>/dev/null; then
   kill -9 "$pid"
   cat "$artifacts/app.log" >&2
-  echo 'Rec did not finish its self-test in 2 minutes' >&2
+  echo 'Rec did not finish its self-test in 3 minutes' >&2
   exit 1
 fi
 code=0
@@ -76,6 +77,7 @@ fi
 grep -qx 'accessibility=ok' "$report"
 grep -qx 'keychain=ok' "$report"
 grep -qx 'quit=started' "$report"
+grep -q '^live=● LIVE' "$report"
 
 probe "$(step pause)" app-pause
 grep -qx 'audio_tracks=3' "$artifacts/app-pause.probe"
@@ -113,6 +115,13 @@ color sample_4 "$artifacts/app-camera-center.probe" green
 color sample_6 "$artifacts/app-camera-corner.probe" white
 for second in 0 1 2 3 4 5 6; do color "sample_$second" "$artifacts/app-camera-image.probe" red; done
 
+# System audio at -6 dB, muted 2.5 s in, unmuted 4.5 s in: the mix has no beeps at 3 and 4 s.
+probe "$(step mute)" app-mute
+value beeps "$artifacts/app-mute.probe" | tr , '\n' | awk '
+  $1 < 2.5 { before++ } $1 > 2.7 && $1 < 4.5 { muted++ } $1 > 4.7 { after++ }
+  END { exit !(before >= 2 && muted == 0 && after >= 1) }' \
+  || { echo "mute: unexpected beeps $(value beeps "$artifacts/app-mute.probe")" >&2; exit 1; }
+
 probe "$(step replay)" app-replay
 grep -qx 'codec=h264' "$artifacts/app-replay.probe"
 within "$(value duration "$artifacts/app-replay.probe")" 3 6
@@ -136,5 +145,7 @@ grep -qx 'camera=1' "$settings"
 grep -qx 'camera_device=test' "$settings"
 grep -qx 'scene=screen' "$settings"
 grep -qx 'image=1' "$settings"
+grep -qx 'system_volume=-6' "$settings"
+grep -qx 'system_muted=0' "$settings"
 if grep -q appkey "$settings"; then echo 'the stream key was written to the settings file' >&2; exit 1; fi
 echo 'app e2e passed'

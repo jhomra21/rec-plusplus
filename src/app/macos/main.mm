@@ -222,6 +222,9 @@ NSString* window_label(const std::string& app, const std::string& title) {
     NSWindow* _window;
     NSTextField *_status, *_detail, *_live, *_folder;
     NSLevelIndicator *_systemMeter, *_micMeter;
+    NSSlider *_systemVolume, *_micVolume;
+    NSTextField *_systemVolumeText, *_micVolumeText;
+    NSButton *_systemMute, *_micMute;
     NSButton *_record, *_pause, *_saveReplay, *_replay, *_systemAudio, *_microphone, *_cursor, *_stream, *_changeFolder, *_openFolder, *_showLast;
     NSButton *_camera, *_image, *_chooseImage;
     NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service, *_replayLength;
@@ -530,6 +533,21 @@ NSString* window_label(const std::string& app, const std::string& title) {
             [menu addItem:scene];
         }
     }
+    if (const auto status = _session->status(); active && (status.system_audio || status.microphone)) {
+        [menu addItem:NSMenuItem.separatorItem];
+        if (status.system_audio) {
+            NSMenuItem* mute = [self item:@"Mute System Audio" action:@selector(toggleMute:) key:@""];
+            mute.tag = 0;
+            mute.state = _systemMute.state;
+            [menu addItem:mute];
+        }
+        if (status.microphone) {
+            NSMenuItem* mute = [self item:@"Mute Microphone" action:@selector(toggleMute:) key:@""];
+            mute.tag = 1;
+            mute.state = _micMute.state;
+            [menu addItem:mute];
+        }
+    }
     if (menu == _statusItem.menu) {
         [menu addItem:NSMenuItem.separatorItem];
         [menu addItem:[self item:@"Show Rec" action:@selector(showWindow:) key:@""]];
@@ -617,6 +635,14 @@ NSString* window_label(const std::string& app, const std::string& title) {
     return meter;
 }
 
+- (NSSlider*)volumeSlider:(NSString*)name {
+    NSSlider* slider = [NSSlider sliderWithValue:0 minValue:rec::app::kVolumeMin maxValue:rec::app::kVolumeMax
+                                          target:self action:@selector(volumeChanged:)];
+    slider.continuous = YES;
+    slider.accessibilityLabel = name;
+    return slider;
+}
+
 - (void)buildWindow {
     _window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 480, 760)
                                           styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable
@@ -642,9 +668,26 @@ NSString* window_label(const std::string& app, const std::string& title) {
     detailRow.distribution = NSStackViewDistributionFill;
     detailRow.alignment = NSLayoutAttributeFirstBaseline;
 
+    // Each source: its level before volume, the volume, and mute.
     _systemMeter = [self meter:@"System audio level"];
     _micMeter = [self meter:@"Microphone level"];
-    NSGridView* meters = [self grid:@[@[label(@"System audio"), _systemMeter], @[label(@"Microphone"), _micMeter]]];
+    _systemVolume = [self volumeSlider:@"System audio volume"];
+    _micVolume = [self volumeSlider:@"Microphone volume"];
+    _systemVolumeText = label(@"0 dB");
+    _micVolumeText = label(@"0 dB");
+    _systemMute = [self check:@"Mute system"];
+    _micMute = [self check:@"Mute mic"];
+    const auto levelRow = ^NSStackView*(NSLevelIndicator* meter, NSSlider* slider, NSTextField* value, NSButton* mute) {
+        [slider.widthAnchor constraintEqualToConstant:180].active = YES;
+        [value.widthAnchor constraintEqualToConstant:50].active = YES;
+        [mute.widthAnchor constraintEqualToConstant:110].active = YES;
+        NSStackView* row = [NSStackView stackViewWithViews:@[meter, slider, value, mute]];
+        row.distribution = NSStackViewDistributionFill;
+        row.spacing = 10;
+        return row;
+    };
+    NSGridView* meters = [self grid:@[@[label(@"System audio"), levelRow(_systemMeter, _systemVolume, _systemVolumeText, _systemMute)],
+                                      @[label(@"Microphone"), levelRow(_micMeter, _micVolume, _micVolumeText, _micMute)]]];
 
     _record = [self button:@"Start Recording" action:@selector(toggleRecord:)];
     _record.controlSize = NSControlSizeLarge;
@@ -785,6 +828,8 @@ NSString* window_label(const std::string& app, const std::string& title) {
     [_corner selectItemAtIndex:choice_index(kCorners, s.camera_corner)];
     [_cameraSize selectItemAtIndex:choice_index(kCameraSizes, s.camera_size)];
     [_scene selectItemAtIndex:choice_index(kScenes, s.scene)];
+    [self showVolume:rec::AudioInput::system];
+    [self showVolume:rec::AudioInput::microphone];
     _image.state = s.image ? NSControlStateValueOn : NSControlStateValueOff;
     [self showImage];
     [self showCameras:_connected];
@@ -792,6 +837,52 @@ NSString* window_label(const std::string& app, const std::string& title) {
     _folder.toolTip = ns(s.folder);
     [self showServer];
     [self showDisplays:_displays windows:_windows microphones:_microphones];
+}
+
+- (void)showVolume:(rec::AudioInput)input {
+    const bool system = input == rec::AudioInput::system;
+    (system ? _systemVolume : _micVolume).integerValue = system ? _settings.system_volume : _settings.mic_volume;
+    (system ? _systemMute : _micMute).state = (system ? _settings.system_muted : _settings.mic_muted) ? NSControlStateValueOn : NSControlStateValueOff;
+    [self showDecibels:system];
+}
+
+- (void)showDecibels:(bool)system {
+    const int volume = system ? _settings.system_volume : _settings.mic_volume;
+    NSString* text = [NSString stringWithFormat:@"%@%d dB", volume > 0 ? @"+" : @"", volume];
+    (system ? _systemVolumeText : _micVolumeText).stringValue = text;
+    // VoiceOver reads the slider's value in dB rather than as a bare number.
+    (system ? _systemVolume : _micVolume).accessibilityValueDescription = text;
+}
+
+// Reads a source's slider and mute box, and applies them at once while recording.
+- (void)changeVolume:(rec::AudioInput)input {
+    const bool system = input == rec::AudioInput::system;
+    int& volume = system ? _settings.system_volume : _settings.mic_volume;
+    bool& muted = system ? _settings.system_muted : _settings.mic_muted;
+    volume = static_cast<int>(std::lround((system ? _systemVolume : _micVolume).doubleValue));
+    muted = (system ? _systemMute : _micMute).state == NSControlStateValueOn;
+    [self showDecibels:system];
+    const auto s = _session->status();
+    if ((s.state == State::recording || s.state == State::paused) && (system ? s.system_audio : s.microphone)) {
+        if (auto changed = _session->set_volume(input, volume, muted); !changed) {
+            _note = [@"Volume not changed: " stringByAppendingString:ns(changed.error)];
+            _noteAttention = true;
+            _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
+        }
+    }
+    // A drag saves once, when it ends.
+    if (NSApp.currentEvent.type != NSEventTypeLeftMouseDragged) rec::app::save_settings(_settingsPath, _settings);
+    [self refresh];
+}
+
+- (void)volumeChanged:(NSSlider*)slider {
+    [self changeVolume:slider == _systemVolume ? rec::AudioInput::system : rec::AudioInput::microphone];
+}
+
+- (void)toggleMute:(NSMenuItem*)item {
+    NSButton* box = item.tag == 0 ? _systemMute : _micMute;
+    box.state = box.state == NSControlStateValueOn ? NSControlStateValueOff : NSControlStateValueOn;
+    [self changeVolume:item.tag == 0 ? rec::AudioInput::system : rec::AudioInput::microphone];
 }
 
 - (void)showImage {
@@ -868,6 +959,10 @@ NSString* window_label(const std::string& app, const std::string& title) {
     if (sender == _service) {
         [self readSettings];
         [self showServer];
+    }
+    if (sender == _systemMute || sender == _micMute) {
+        [self changeVolume:sender == _systemMute ? rec::AudioInput::system : rec::AudioInput::microphone];
+        return;
     }
     if (sender == _scene) {
         [self setScene:kScenes[static_cast<std::size_t>(std::max<NSInteger>(0, _scene.indexOfSelectedItem))].value];
@@ -1101,6 +1196,10 @@ NSString* window_label(const std::string& app, const std::string& title) {
         if (s.audio_dropped) { [text appendFormat:@", audio drops %llu", static_cast<unsigned long long>(s.audio_dropped)]; _attention = true; }
         if (s.streaming && !s.stream_error.empty()) { [text appendFormat:@". Stream lost: %@", ns(s.stream_error)]; _attention = true; }
         else if (s.stream_dropped) { [text appendFormat:@", stream skipped %llu", static_cast<unsigned long long>(s.stream_dropped)]; _attention = true; }
+        if (s.live && s.stream_queued_ms > 1000) {
+            [text appendFormat:@", stream %.1f s behind", s.stream_queued_ms / 1000.0];
+            _attention = true;
+        }
         if (s.reconnects) [text appendFormat:@", stream reconnected %u %@", s.reconnects, s.reconnects == 1 ? @"time" : @"times"];
         if (s.replay) [text appendFormat:@", replay %d s", static_cast<int>(s.replay_seconds)];
         detail = text;
@@ -1115,7 +1214,9 @@ NSString* window_label(const std::string& app, const std::string& title) {
                       : s.state == State::paused    ? NSColor.systemOrangeColor
                                                     : NSColor.labelColor;
     _detail.textColor = _attention ? NSColor.systemOrangeColor : NSColor.secondaryLabelColor;
-    NSString* live = !active ? @"" : s.live ? @"● LIVE" : s.reconnecting ? @"Reconnecting…" : @"";
+    NSString* live = !active ? @""
+                   : s.live ? [NSString stringWithFormat:@"● LIVE  %.1f Mb/s", s.stream_kbps / 1000.0]
+                   : s.reconnecting ? @"Reconnecting…" : @"";
     if (![_live.stringValue isEqualToString:live]) _live.stringValue = live;
     // Hide the last level once recording ends; polling stops with it.
     if (!active) _systemShown = _micShown = 0;
@@ -1132,6 +1233,11 @@ NSString* window_label(const std::string& app, const std::string& title) {
                                  _stream, _service, _server, _key, _bitrate, _replay, _replayLength, _changeFolder])
         control.enabled = editable;
     _micDevice.enabled = editable && _microphone.state == NSControlStateValueOn;
+    // Volume and mute change during a recording that has the source.
+    for (NSControl* control in @[_systemVolume, _systemMute])
+        control.enabled = editable ? _systemAudio.state == NSControlStateValueOn : active && s.system_audio;
+    for (NSControl* control in @[_micVolume, _micMute])
+        control.enabled = editable ? _microphone.state == NSControlStateValueOn : active && s.microphone;
     for (NSControl* control in @[_camera, _image, _chooseImage]) control.enabled = editable;
     for (NSControl* control in @[_cameraDevice, _corner, _cameraSize]) control.enabled = editable && _camera.state == NSControlStateValueOn;
     // The scene is the one setting that changes during a recording, when it draws a camera.
@@ -1225,7 +1331,8 @@ NSString* window_label(const std::string& app, const std::string& title) {
                                      self->_micDevice, self->_cursor, self->_resolution, self->_fps, self->_codec,
                                      self->_format, self->_stream, self->_service, self->_server, self->_key,
                                      self->_bitrate, self->_changeFolder, self->_openFolder, self->_showLast,
-                                     self->_systemMeter, self->_micMeter]) {
+                                     self->_systemMeter, self->_micMeter, self->_systemVolume, self->_micVolume,
+                                     self->_systemMute, self->_micMute]) {
             NSString* name = control.accessibilityLabel.length ? control.accessibilityLabel : control.accessibilityTitle;
             // Buttons are named by their title.
             if (!name.length && [control isKindOfClass:NSButton.class]) name = ((NSButton*)control).title;
@@ -1290,12 +1397,21 @@ NSString* window_label(const std::string& app, const std::string& title) {
         bool live = false;
         for (int i = 0; i < 100 && !live; ++i) {
             __block BOOL on = NO;
-            ui(^{ on = [self->_live.stringValue isEqualToString:@"● LIVE"]; });
+            ui(^{ on = [self->_live.stringValue hasPrefix:@"● LIVE"]; });
             live = on;
             if (!live) usleep(100000);
         }
         if (!live) fail([@"no LIVE badge: " stringByAppendingString:detail()]);
-        sleep(4);
+        sleep(3);
+        // The badge shows the measured send rate.
+        __block NSString* badge;
+        ui(^{ badge = self->_live.stringValue; });
+        NSScanner* scanner = [NSScanner scannerWithString:badge];
+        [scanner scanUpToCharactersFromSet:NSCharacterSet.decimalDigitCharacterSet intoString:nil];
+        double rate = 0;
+        if (![scanner scanDouble:&rate] || rate <= 0) fail([@"no stream rate in the LIVE badge: " stringByAppendingString:badge]);
+        note([@"live=" stringByAppendingString:badge]);
+        sleep(1);
         press(_record);
         wait_for(@"Ready to record", 30);
         if ([detail() hasPrefix:@"Stream stopped early"]) fail(detail());
@@ -1399,7 +1515,35 @@ NSString* window_label(const std::string& app, const std::string& title) {
     wait_for(@"Ready to record", 30);
     saved(@"camera");
 
-    // 7. Quitting during a recording saves the movie, then the app exits.
+    // 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
+    // unmuted from the menu bar item's menu 4.5 s in. The mix loses the beeps at 3 and 4 s.
+    set_check(_microphone, true);
+    ui(^{
+        self->_systemVolume.integerValue = -6;
+        [self->_systemVolume sendAction:self->_systemVolume.action to:self->_systemVolume.target];
+    });
+    press(_record);
+    wait_for(recording, 20);
+    usleep(2500000);
+    set_check(_systemMute, true);
+    usleep(2000000);
+    __block BOOL unmuted = NO;
+    ui(^{
+        NSMenu* menu = self->_statusItem.menu;
+        [self menuNeedsUpdate:menu];
+        const NSInteger at = [menu indexOfItemWithTitle:@"Mute System Audio"];
+        if (at >= 0 && [menu itemAtIndex:at].state == NSControlStateValueOn) {
+            [menu performActionForItemAtIndex:at];
+            unmuted = YES;
+        }
+    });
+    if (!unmuted) fail(@"the menu bar item's menu has no checked Mute System Audio");
+    usleep(2000000);
+    press(_record);
+    wait_for(@"Ready to record", 30);
+    saved(@"mute");
+
+    // 8. Quitting during a recording saves the movie, then the app exits.
     press(_record);
     wait_for(recording, 20);
     sleep(2);

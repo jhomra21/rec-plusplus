@@ -276,6 +276,77 @@ CMSampleBufferRef pcm_buffer(CMAudioFormatDescriptionRef format, const void* dat
     return status == noErr ? sample : nullptr;
 }
 
+// A copy of a 16/32-bit integer or 32-bit float PCM buffer with its samples scaled along
+// ramp, in the same format and at the same time. Null for other formats. The caller
+// releases the result.
+CMSampleBufferRef scaled_pcm(CMSampleBufferRef sample, const core::Fader::Ramp& ramp, std::vector<std::byte>& scratch) {
+    CMAudioFormatDescriptionRef description = CMSampleBufferGetFormatDescription(sample);
+    const auto* format = CMAudioFormatDescriptionGetStreamBasicDescription(description);
+    if (!format || format->mFormatID != kAudioFormatLinearPCM || format->mChannelsPerFrame == 0 ||
+        (format->mFormatFlags & kAudioFormatFlagIsBigEndian))
+        return nullptr;
+    const bool is_float = format->mFormatFlags & kAudioFormatFlagIsFloat;
+    const auto bits = format->mBitsPerChannel;
+    if (!(is_float ? bits == 32 : (bits == 16 || bits == 32))) return nullptr;
+    const auto frames = static_cast<std::size_t>(CMSampleBufferGetNumSamples(sample));
+    if (!frames) return nullptr;
+    const bool planar = format->mFormatFlags & kAudioFormatFlagIsNonInterleaved;
+    const std::size_t per_frame = planar ? 1 : format->mChannelsPerFrame;
+    const std::size_t planes = planar ? format->mChannelsPerFrame : 1;
+    const std::size_t plane_bytes = frames * per_frame * (bits / 8);
+
+    const auto flags = kCMSampleBufferFlag_AudioBufferList_Assure16ByteAlignment;
+    std::size_t list_size = 0;
+    if (CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sample, &list_size, nullptr, 0, nullptr, nullptr,
+                                                                flags, nullptr) != noErr)
+        return nullptr;
+    scratch.resize(list_size);
+    auto* list = reinterpret_cast<AudioBufferList*>(scratch.data());
+    CMBlockBufferRef source = nullptr;
+    if (CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(sample, nullptr, list, list_size, nullptr, nullptr,
+                                                                flags, &source) != noErr)
+        return nullptr;
+    bool readable = list->mNumberBuffers == planes;
+    for (UInt32 i = 0; readable && i < list->mNumberBuffers; ++i)
+        readable = list->mBuffers[i].mData && list->mBuffers[i].mDataByteSize >= plane_bytes;
+    CMBlockBufferRef block = nullptr;
+    char* data = nullptr;
+    // Planes follow one another in the new buffer, as CMSampleBufferCreate expects.
+    if (!readable ||
+        CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, nullptr, plane_bytes * planes, kCFAllocatorDefault,
+                                           nullptr, 0, plane_bytes * planes, kCMBlockBufferAssureMemoryNowFlag,
+                                           &block) != kCMBlockBufferNoErr ||
+        CMBlockBufferGetDataPointer(block, 0, nullptr, nullptr, &data) != kCMBlockBufferNoErr) {
+        if (block) CFRelease(block);
+        if (source) CFRelease(source);
+        return nullptr;
+    }
+    const float step = (ramp.to - ramp.from) / static_cast<float>(frames);
+    for (std::size_t p = 0; p < planes; ++p) {
+        std::memcpy(data + p * plane_bytes, list->mBuffers[p].mData, plane_bytes);
+        for (std::size_t i = 0; i < frames * per_frame; ++i) {
+            const float g = ramp.from + step * static_cast<float>(i / per_frame + 1);
+            const std::size_t at = p * frames * per_frame + i;
+            if (is_float) {
+                reinterpret_cast<float*>(data)[at] *= g;
+            } else if (bits == 16) {
+                auto& v = reinterpret_cast<std::int16_t*>(data)[at];
+                v = static_cast<std::int16_t>(std::lround(std::clamp(v * g, -32768.0f, 32767.0f)));
+            } else {
+                auto& v = reinterpret_cast<std::int32_t*>(data)[at];
+                v = static_cast<std::int32_t>(std::clamp(static_cast<double>(v) * g, -2147483648.0, 2147483647.0));
+            }
+        }
+    }
+    if (source) CFRelease(source);
+    CMSampleBufferRef out = nullptr;
+    const auto status = CMAudioSampleBufferCreateReadyWithPacketDescriptions(
+        kCFAllocatorDefault, block, description, static_cast<CMItemCount>(frames),
+        CMSampleBufferGetPresentationTimeStamp(sample), nullptr, &out);
+    CFRelease(block);
+    return status == noErr ? out : nullptr;
+}
+
 // Reads 16/32-bit integer or 32-bit float PCM, interleaved or planar, as interleaved
 // stereo float at 48 kHz. Mono is duplicated; channels after the second are ignored.
 bool stereo_pcm(CMSampleBufferRef sample, std::vector<float>& out, std::vector<std::byte>& scratch) {
@@ -444,7 +515,7 @@ struct AudioSource {
     CMSampleBufferRef held = nullptr;    // Dequeued, waiting for its writer input to accept it.
     AVAssetWriterInput* __strong stem = nil;
     CMTime offset = kCMTimeZero;
-    float gain = 1;
+    core::Fader fader;                   // Volume and mute of the program audio.
     std::int64_t next_mix = INT64_MIN;   // Keeps consecutive buffers contiguous in the mix.
     std::atomic<std::uint64_t> written{0}, dropped{0};
     mutable std::atomic<float> peak{0};  // Level meter; stats() takes it.
@@ -535,8 +606,8 @@ public:
                 options_.test_pattern ? 0.0 : output_latency_seconds() * 1000.0);
             audio_[kSystem].offset = CMTimeMakeWithSeconds(system_offset_ms_ / 1000.0, kMixRate);
             audio_[kMic].offset = CMTimeMakeWithSeconds(options_.mic_offset_ms / 1000.0, kMixRate);
-            audio_[kSystem].gain = static_cast<float>(std::pow(10.0, options_.system_gain_db / 20.0));
-            audio_[kMic].gain = static_cast<float>(std::pow(10.0, options_.mic_gain_db / 20.0));
+            audio_[kSystem].fader.reset(core::gain_of(options_.system_gain_db, options_.system_muted));
+            audio_[kMic].fader.reset(core::gain_of(options_.mic_gain_db, options_.mic_muted));
 
             if (!options_.test_pattern) {
                 if (auto started = start_capture(); !started) return started;
@@ -710,6 +781,7 @@ public:
             stats.stream_frames = live.frames;
             stats.stream_dropped = live.dropped;
             stats.stream_bytes = live.bytes;
+            stats.stream_queued_ms = live.queued_ms;
             stats.replay_seconds = live.replay_seconds;
         }
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
@@ -725,6 +797,14 @@ public:
     Result set_overlay(std::size_t index, bool visible, const std::optional<Area>& area) {
         if (!overlays_) return {"no overlay " + std::to_string(index + 1)};
         return overlays_->set(index, visible, area);
+    }
+    Result set_volume(AudioInput input, double gain_db, bool muted) {
+        if (!(gain_db >= -60 && gain_db <= 24)) return {"volume must be between -60 and 24 dB"};
+        auto& source = audio_[input == AudioInput::system ? kSystem : kMic];
+        if (!recording_.load() || !source.enabled)
+            return {input == AudioInput::system ? "system audio is not being recorded" : "the microphone is not being recorded"};
+        source.fader.set(core::gain_of(gain_db, muted));
+        return {};
     }
 
     Result pause() {
@@ -1008,9 +1088,16 @@ private:
             start = CMTimeMake(point.output, kNanos);
             shift = CMTimeSubtract(start, pts);
         }
+        // With one source its track is the program and takes the volume; with two, the stems
+        // stay as captured.
+        const auto ramp = source.fader.next();
+        const bool alone = !(audio_[kSystem].enabled && audio_[kMic].enabled);
         bool used = false;
         if (source.stem && CMTimeCompare(start, kCMTimeZero) >= 0) {
-            if (append_retimed(source.stem, sample, shift)) {
+            CMSampleBufferRef scaled = alone && !ramp.unity() ? scaled_pcm(sample, ramp, scale_scratch_) : nullptr;
+            const bool appended = append_retimed(source.stem, scaled ? scaled : sample, shift);
+            if (scaled) CFRelease(scaled);
+            if (appended) {
                 used = true;
             } else {
                 source.dropped.fetch_add(1);
@@ -1019,7 +1106,11 @@ private:
             }
         }
         const bool pcm = stereo_pcm(sample, pcm_, scratch_);
-        if (pcm) core::raise_peak(source.peak, pcm_.data(), pcm_.size());
+        if (pcm) {
+            // Meters show the source before its volume, so a muted microphone still shows it works.
+            core::raise_peak(source.peak, pcm_.data(), pcm_.size());
+            if (!ramp.unity()) ramp.apply(pcm_.data(), pcm_.size() / 2);
+        }
         // A single source goes to the live stream as it is; two go through the mix.
         if (mixing_ || live_) {
             if (pcm) {
@@ -1029,7 +1120,7 @@ private:
                     first = source.next_mix;
                 const auto frames = pcm_.size() / 2;
                 source.next_mix = first + static_cast<std::int64_t>(frames);
-                if (mixing_) mixer_.add(kind, first, pcm_.data(), frames, source.gain);
+                if (mixing_) mixer_.add(kind, first, pcm_.data(), frames);
                 else live_->audio(first, pcm_.data(), frames);
                 used = true;
             } else if (!source.stem) {
@@ -1244,7 +1335,7 @@ private:
     core::Mixer mixer_;
     AVAssetWriterInput* __strong mix_input_ = nil;
     std::vector<float> pcm_, mixed_;
-    std::vector<std::byte> scratch_;
+    std::vector<std::byte> scratch_, scale_scratch_;
     CMAudioFormatDescriptionRef mix_format_ = nullptr;
     CMAudioFormatDescriptionRef tone_format_ = nullptr;
     CMAudioFormatDescriptionRef mic_tone_format_ = nullptr;
@@ -1453,6 +1544,9 @@ Result Recorder::save_replay(const std::string& path, double* seconds) {
 }
 Result Recorder::set_overlay(std::size_t index, bool visible, std::optional<Area> area) {
     return impl_->capture.set_overlay(index, visible, area);
+}
+Result Recorder::set_volume(AudioInput input, double gain_db, bool muted) {
+    return impl_->capture.set_volume(input, gain_db, muted);
 }
 
 } // namespace rec

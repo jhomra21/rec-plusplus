@@ -11,6 +11,14 @@
 
 namespace rec::app {
 namespace {
+int volume(const std::string& text) {
+    try {
+        return std::clamp(std::stoi(text), kVolumeMin, kVolumeMax);
+    } catch (...) {
+        return 0;
+    }
+}
+
 std::uint32_t number(const std::string& text, std::uint32_t fallback) {
     try {
         return static_cast<std::uint32_t>(std::stoul(text));
@@ -71,6 +79,10 @@ Settings load_settings(const std::string& path) {
         else if (key == "system_audio") s.system_audio = yes;
         else if (key == "microphone") s.microphone = yes;
         else if (key == "microphone_device" && !value.empty()) s.microphone_device = value;
+        else if (key == "system_volume") s.system_volume = volume(value);
+        else if (key == "mic_volume") s.mic_volume = volume(value);
+        else if (key == "system_muted") s.system_muted = yes;
+        else if (key == "mic_muted") s.mic_muted = yes;
         else if (key == "stream") s.stream = yes;
         else if (key == "destination" && (value == "twitch" || value == "youtube" || value == "custom")) s.destination = value;
         else if (key == "server") s.server = value;
@@ -106,6 +118,8 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nresolution=" << s.resolution << "\nfps=" << s.fps << "\ncodec=" << s.codec
             << "\ncursor=" << s.cursor << "\nsystem_audio=" << s.system_audio
             << "\nmicrophone=" << s.microphone << "\nmicrophone_device=" << s.microphone_device
+            << "\nsystem_volume=" << s.system_volume << "\nmic_volume=" << s.mic_volume
+            << "\nsystem_muted=" << s.system_muted << "\nmic_muted=" << s.mic_muted
             << "\nstream=" << s.stream << "\ndestination=" << s.destination << "\nserver=" << s.server
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
@@ -225,6 +239,10 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
     o.fps = s.fps;
     o.codec = s.codec == "h264" ? Codec::h264 : s.codec == "hevc" ? Codec::hevc : Codec::automatic;
     o.cursor = s.cursor;
+    o.system_gain_db = std::clamp(s.system_volume, kVolumeMin, kVolumeMax);
+    o.mic_gain_db = std::clamp(s.mic_volume, kVolumeMin, kVolumeMax);
+    o.system_muted = s.system_muted;
+    o.mic_muted = s.mic_muted;
     if (test_pattern) {
         o.test_pattern = true;
         o.test_tone = s.system_audio;
@@ -278,6 +296,9 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
         stream_error_.clear();
         saved_.clear();
         last_ = {};
+        rate_bytes_ = 0;
+        rate_time_ = std::chrono::steady_clock::now();
+        stream_kbps_ = 0;
     }
     worker_ = std::thread([this, recorder = std::make_unique<Recorder>(o)]() mutable { run(std::move(recorder)); });
     return {};
@@ -364,6 +385,12 @@ Result Session::set_scene(const std::string& scene) {
     return set;
 }
 
+Result Session::set_volume(AudioInput input, int volume, bool muted) {
+    std::lock_guard lock(mutex_);
+    if ((state_ != State::recording && state_ != State::paused) || stop_requested_) return {"not recording"};
+    return recorder_->set_volume(input, std::clamp(volume, kVolumeMin, kVolumeMax), muted);
+}
+
 Status Session::status() {
     bool ended = false;
     Status s;
@@ -373,6 +400,12 @@ Status Session::status() {
         if (active) {
             last_ = recorder_->stats();
             if (stream_error_.empty()) stream_error_ = recorder_->stream_failure();
+            const auto now = std::chrono::steady_clock::now();
+            if (const std::chrono::duration<double> span = now - rate_time_; span.count() >= 1) {
+                stream_kbps_ = static_cast<double>(last_.stream_bytes - rate_bytes_) * 8 / 1000 / span.count();
+                rate_bytes_ = last_.stream_bytes;
+                rate_time_ = now;
+            }
             ended = recorder_->finished() && !stop_requested_;
         }
         s.state = state_;
@@ -386,12 +419,16 @@ Status Session::status() {
         s.seconds = options_.fps ? static_cast<double>(st.written) / options_.fps : 0;
         s.dropped = st.dropped;
         s.audio_dropped = st.audio_dropped + st.mic_dropped;
+        s.system_audio = options_.system_audio || options_.test_tone;
+        s.microphone = options_.microphone || options_.test_mic;
         s.system_peak = active ? st.system_peak : 0;
         s.mic_peak = active ? st.mic_peak : 0;
         s.live = active && st.streaming;
         s.reconnecting = active && st.stream_reconnecting;
         s.reconnects = st.stream_reconnects;
         s.stream_dropped = st.stream_dropped;
+        s.stream_kbps = active && st.streaming ? stream_kbps_ : 0;
+        s.stream_queued_ms = active ? st.stream_queued_ms : 0;
         s.replay_seconds = active ? st.replay_seconds : 0;
         s.camera = camera_.has_value();
         s.scene = scene_;

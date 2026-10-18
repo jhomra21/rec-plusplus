@@ -141,6 +141,26 @@ else
   color sample_3 "$artifacts/overlay-camera.probe" white
   "$rec" probe "$artifacts/overlay.mov" --sample 150,100,250,100 | tee "$artifacts/overlay-image.probe"
   for second in 0 1 2 3; do color "sample_$second" "$artifacts/overlay-image.probe" red; done
+  # Volume and mute act on the program audio. A lone tone, its only track, starts muted and is
+  # unmuted 3.5 s in: no beep with the first flash. Mixed with the mic, the tone is turned down
+  # 6 dB, then muted 2.5 s in: the mix has no beeps after that.
+  { sleep 3.5; echo 'unmute system'; sleep 5; } |
+    "$rec" record --test-pattern --test-tone --mute-system -f 30 -t 6 -o "$artifacts/unmute.mov" \
+    | tee "$artifacts/unmute.record.log"
+  grep -q 'Unmuted system audio' "$artifacts/unmute.record.log"
+  "$rec" probe "$artifacts/unmute.mov" | tee "$artifacts/unmute.probe"
+  grep -qx 'audio_tracks=1' "$artifacts/unmute.probe"
+  within "$(value av_sync_events "$artifacts/unmute.probe")" 1 5
+  within "$(value beeps "$artifacts/unmute.probe" | cut -d, -f1)" 0.9 6
+  { sleep 1; echo 'volume system -6'; sleep 1.5; echo 'mute system'; sleep 5; } |
+    "$rec" record --test-pattern --test-tone --test-mic -f 30 -t 5 -o "$artifacts/mute.mov" \
+    | tee "$artifacts/mute.record.log"
+  grep -q 'Set system audio to -6.0 dB' "$artifacts/mute.record.log"
+  grep -q 'Muted system audio' "$artifacts/mute.record.log"
+  "$rec" probe "$artifacts/mute.mov" | tee "$artifacts/mute.probe"
+  grep -qx 'audio_tracks=3' "$artifacts/mute.probe"
+  within "$(value av_sync_events "$artifacts/mute.probe")" 1 3
+  within "$(value beeps "$artifacts/mute.probe" | awk -F, '{ print $NF }')" 0 3.5
   # Crash safety: a recording killed mid-write still decodes up to its last movie fragment.
   "$rec" record --test-pattern --test-tone -f 30 -t 0 --codec h264 -o "$artifacts/crash.mov" \
     </dev/null >"$artifacts/crash.record.log" 2>&1 &
@@ -166,7 +186,7 @@ else
     --stream rtmp://127.0.0.1:1935/live/smokekey1 -o "$artifacts/stream-local.mov" | tee "$artifacts/stream.record.log"
   grep -q 'Streaming to rtmp://127.0.0.1:1935/live/\*\*\*\*' "$artifacts/stream.record.log"
   grep -q 'Streamed 120 frames' "$artifacts/stream.record.log"
-  grep -q 'skipped 0' "$artifacts/stream.record.log"
+  grep -q 'kb/s), skipped 0' "$artifacts/stream.record.log"
   if grep -q smokekey1 "$artifacts/stream.record.log"; then echo 'the stream key was printed' >&2; exit 1; fi
   "$rec" probe "$artifacts/stream-local.mov" | tee "$artifacts/stream-local.probe"
   grep -qx 'audio_tracks=2' "$artifacts/stream-local.probe"

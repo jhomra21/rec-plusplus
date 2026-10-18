@@ -14,6 +14,9 @@
 #include <shlobj.h>
 #include <shobjidl.h>
 #include <wincred.h>
+// Defines the accessibility annotation GUIDs (CLSID_AccPropServices, PROPID_ACC_*) here.
+#include <initguid.h>
+#include <oleacc.h>
 
 #include "app/session.hpp"
 
@@ -42,7 +45,8 @@ constexpr UINT kTrayId = 1;
 constexpr int kPickRegion = 0x7001;
 
 enum Control : int {
-    kStatus = 100, kDetail, kLive, kSystemLabel, kSystemMeter, kMicLabel, kMicMeter,
+    kStatus = 100, kDetail, kLive, kSystemLabel, kSystemMeter, kSystemVolume, kSystemVolumeText, kSystemMute,
+    kMicLabel, kMicMeter, kMicVolume, kMicVolumeText, kMicMute,
     kRecord, kPause, kSaveReplay,
     kCaptureHeader, kSourceLabel, kSource, kSystemAudio, kMicrophone, kMicDevice, kCursor,
     kQualityHeader, kResolutionLabel, kResolution, kFpsLabel, kFps, kCodecLabel, kCodec, kFormatLabel, kFormat,
@@ -53,7 +57,10 @@ enum Control : int {
     kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast,
 };
 
-enum Command : UINT { kMenuRecord = 1000, kMenuPause, kMenuShow, kMenuFolder, kMenuQuit, kMenuReplay, kMenuScene = 1010 };
+enum Command : UINT {
+    kMenuRecord = 1000, kMenuPause, kMenuShow, kMenuFolder, kMenuQuit, kMenuReplay, kMenuMuteSystem, kMenuMuteMic,
+    kMenuScene = 1010
+};
 
 using rec::app::choice_index;
 using rec::app::kCameraSizes;
@@ -105,6 +112,8 @@ std::wstring duration_label(std::uint32_t seconds) {
     return seconds < 60 ? std::to_wstring(seconds) + L" seconds"
                         : std::to_wstring(seconds / 60) + (seconds == 60 ? L" minute" : L" minutes");
 }
+
+std::wstring decibels(int db) { return (db > 0 ? L"+" : L"") + std::to_wstring(db) + L" dB"; }
 
 std::wstring clock(double seconds) {
     const auto whole = static_cast<long long>(seconds);
@@ -395,6 +404,13 @@ private:
         case WM_COMMAND:
             command(LOWORD(w), HIWORD(w));
             return 0;
+        case WM_HSCROLL: {
+            const int id = GetDlgCtrlID(reinterpret_cast<HWND>(l));
+            if (id == kSystemVolume || id == kMicVolume)
+                change_volume(id == kSystemVolume ? rec::AudioInput::system : rec::AudioInput::microphone,
+                              LOWORD(w) == TB_ENDTRACK);
+            return 0;
+        }
         case WM_TIMER:
             if (w == kPollTimer) refresh();
             return 0;
@@ -426,6 +442,13 @@ private:
             ShutdownBlockReasonDestroy(window_);
             return 0;
         case WM_DESTROY:
+            if (access_) {
+                const MSAAPROPID props[]{PROPID_ACC_NAME, PROPID_ACC_VALUE};
+                for (int slider : {kSystemVolume, kMicVolume})
+                    access_->ClearHwndProps(get(slider), OBJID_CLIENT, CHILDID_SELF, props, 2);
+                access_->Release();
+                access_ = nullptr;
+            }
             UnregisterHotKey(window_, kHotkey);
             UnregisterHotKey(window_, kReplayHotkey);
             Shell_NotifyIconW(NIM_DELETE, &tray_);
@@ -469,7 +492,8 @@ private:
     HWND get(int id) const { return GetDlgItem(window_, id); }
     // Status texts can contain "&"; field labels use it for their access key.
     HWND label(int id, const wchar_t* text) {
-        const bool plain = id == kStatus || id == kDetail || id == kLive || id == kFolder || id == kImageFile;
+        const bool plain = id == kStatus || id == kDetail || id == kLive || id == kFolder || id == kImageFile ||
+                           id == kSystemVolumeText || id == kMicVolumeText;
         return add(id, WC_STATICW, text, SS_LEFT | (plain ? SS_NOPREFIX : 0));
     }
     HWND combo(int id) { return add(id, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP); }
@@ -484,10 +508,17 @@ private:
         label(kStatus, L"Ready to record");
         label(kDetail, L"");
         label(kLive, L"");
-        label(kSystemLabel, L"System audio level");
+        // Each source: its level before volume, the volume, and mute.
+        label(kSystemLabel, L"System audio");
         add(kSystemMeter, PROGRESS_CLASSW, L"", PBS_SMOOTH);
-        label(kMicLabel, L"Microphone level");
+        add(kSystemVolume, TRACKBAR_CLASSW, L"System audio volume", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
+        label(kSystemVolumeText, L"");
+        check(kSystemMute, L"Mute system");
+        label(kMicLabel, L"Microphone");
         add(kMicMeter, PROGRESS_CLASSW, L"", PBS_SMOOTH);
+        add(kMicVolume, TRACKBAR_CLASSW, L"Microphone volume", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
+        label(kMicVolumeText, L"");
+        check(kMicMute, L"Mute mic");
         button(kRecord, L"&Start Recording", BS_DEFPUSHBUTTON);
         button(kPause, L"&Pause");
         button(kSaveReplay, L"Save Rep&lay");
@@ -565,6 +596,17 @@ private:
             SendMessageW(replay, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(duration_label(seconds).c_str()));
         for (auto rate : kFrameRates) SendMessageW(fps, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>((std::to_wstring(rate) + L" fps").c_str()));
         for (int meter : {kSystemMeter, kMicMeter}) SendMessageW(get(meter), PBM_SETRANGE32, 0, 1000);
+        for (int slider : {kSystemVolume, kMicVolume}) {
+            SendMessageW(get(slider), TBM_SETRANGEMIN, FALSE, rec::app::kVolumeMin);
+            SendMessageW(get(slider), TBM_SETRANGEMAX, FALSE, rec::app::kVolumeMax);
+            SendMessageW(get(slider), TBM_SETPAGESIZE, 0, 6);
+        }
+        // Screen readers would name a slider after the row label and read its position as a
+        // percentage; annotate the name and the value in dB instead.
+        if (SUCCEEDED(CoCreateInstance(CLSID_AccPropServices, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&access_)))) {
+            access_->SetHwndPropStr(get(kSystemVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"System audio volume");
+            access_->SetHwndPropStr(get(kMicVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Microphone volume");
+        }
 
         show_settings();
         make_fonts();
@@ -600,6 +642,19 @@ private:
             y += h + gap;
         };
         const auto header = [&](int id) { y += px(10); line(id, px(20)); };
+        // A source's name, level meter, volume slider, its value and mute.
+        const auto level = [&](int label_id, int meter_id, int slider_id, int value_id, int mute_id) {
+            const int slider = px(180), value = px(50), mute = px(110);
+            const int meter = width - label_width - slider - value - mute - 3 * gap;
+            place(label_id, x, y + px(4), label_width - gap, px(20));
+            place(meter_id, x + label_width, y + px(7), meter, px(12));
+            int left = x + label_width + meter + gap;
+            place(slider_id, left, y, slider, px(26));
+            left += slider + gap;
+            place(value_id, left, y + px(4), value, px(20));
+            place(mute_id, left + value + gap, y + px(2), mute, px(22));
+            y += px(26) + gap;
+        };
         // A checkbox with its device list or setting beside it.
         const auto beside = [&](int check_id, int control_id) {
             place(check_id, x, y, label_width - gap, px(22));
@@ -608,11 +663,11 @@ private:
         };
 
         line(kStatus, px(34));
-        place(kDetail, x, y, width - px(80), px(20));
-        place(kLive, x + width - px(70), y, px(70), px(20));
+        place(kDetail, x, y, width - px(190), px(20));
+        place(kLive, x + width - px(180), y, px(180), px(20));
         y += px(20) + gap;
-        pair(kSystemLabel, kSystemMeter, px(14));
-        pair(kMicLabel, kMicMeter, px(14));
+        level(kSystemLabel, kSystemMeter, kSystemVolume, kSystemVolumeText, kSystemMute);
+        level(kMicLabel, kMicMeter, kMicVolume, kMicVolumeText, kMicMute);
         place(kRecord, x, y, width - 2 * (px(140) + gap), px(40));
         place(kPause, x + width - 2 * px(140) - gap, y, px(140), px(40));
         place(kSaveReplay, x + width - px(140), y, px(140), px(40));
@@ -704,6 +759,8 @@ private:
         for (std::size_t i = 0; i < microphones_.size(); ++i)
             if (microphones_[i].id == s.microphone_device) mic = static_cast<int>(i) + 1;
         select(kMicDevice, mic);
+        show_volume(rec::AudioInput::system);
+        show_volume(rec::AudioInput::microphone);
         set_check(kCursor, s.cursor);
         select(kResolution, choice_index(kResolutions, s.resolution));
         select(kFps, static_cast<int>(std::find(kFrameRates.begin(), kFrameRates.end(), s.fps) - kFrameRates.begin()) % static_cast<int>(kFrameRates.size()));
@@ -727,6 +784,42 @@ private:
         show_image();
         show_server();
         SetWindowTextW(get(kFolder), wide(s.folder).c_str());
+    }
+
+    void show_volume(rec::AudioInput input) {
+        const bool system = input == rec::AudioInput::system;
+        const int volume = system ? settings_.system_volume : settings_.mic_volume;
+        SendMessageW(get(system ? kSystemVolume : kMicVolume), TBM_SETPOS, TRUE, volume);
+        show_decibels(system, volume);
+        set_check(system ? kSystemMute : kMicMute, system ? settings_.system_muted : settings_.mic_muted);
+    }
+
+    void show_decibels(bool system, int volume) {
+        const auto text = decibels(volume);
+        SetWindowTextW(get(system ? kSystemVolumeText : kMicVolumeText), text.c_str());
+        HWND slider = get(system ? kSystemVolume : kMicVolume);
+        if (access_ && SUCCEEDED(access_->SetHwndPropStr(slider, OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_VALUE, text.c_str())))
+            NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, slider, OBJID_CLIENT, CHILDID_SELF);
+    }
+
+    // Reads a source's slider and mute box, and applies them at once while recording.
+    void change_volume(rec::AudioInput input, bool save) {
+        const bool system = input == rec::AudioInput::system;
+        int& volume = system ? settings_.system_volume : settings_.mic_volume;
+        bool& muted = system ? settings_.system_muted : settings_.mic_muted;
+        volume = static_cast<int>(SendMessageW(get(system ? kSystemVolume : kMicVolume), TBM_GETPOS, 0, 0));
+        muted = checked(system ? kSystemMute : kMicMute);
+        show_decibels(system, volume);
+        const auto s = session_.status();
+        if ((s.state == State::recording || s.state == State::paused) && (system ? s.system_audio : s.microphone)) {
+            if (auto changed = session_.set_volume(input, volume, muted); !changed) {
+                note_ = L"Volume not changed: " + wide(changed.error);
+                note_attention_ = true;
+                note_until_ = GetTickCount64() + 5000;
+            }
+        }
+        if (save) rec::app::save_settings(settings_path_, settings_);
+        refresh();
     }
 
     void show_image() {
@@ -912,6 +1005,13 @@ private:
         case kStream: case kSystemAudio: case kMicrophone: case kCamera: case kImage:
             if (code == BN_CLICKED) refresh();
             return;
+        case kSystemMute: case kMicMute:
+            if (code == BN_CLICKED) change_volume(id == kSystemMute ? rec::AudioInput::system : rec::AudioInput::microphone, true);
+            return;
+        case kMenuMuteSystem: case kMenuMuteMic:
+            set_check(id == kMenuMuteSystem ? kSystemMute : kMicMute, !checked(id == kMenuMuteSystem ? kSystemMute : kMicMute));
+            change_volume(id == kMenuMuteSystem ? rec::AudioInput::system : rec::AudioInput::microphone, true);
+            return;
         default:
             if (id >= kMenuScene && id < kMenuScene + static_cast<int>(kScenes.size())) change_scene(kScenes[id - kMenuScene].value);
             return;
@@ -1095,6 +1195,13 @@ private:
         AppendMenuW(menu, MF_STRING | (active ? 0 : MF_GRAYED), kMenuPause, state == State::paused ? L"Resume" : L"Pause");
         AppendMenuW(menu, MF_STRING | (active && session_.status().replay ? 0 : MF_GRAYED), kMenuReplay,
                     L"Save Replay\tCtrl+Alt+Shift+R");
+        if (const auto status = session_.status(); active && (status.system_audio || status.microphone)) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            if (status.system_audio)
+                AppendMenuW(menu, MF_STRING | (checked(kSystemMute) ? MF_CHECKED : 0), kMenuMuteSystem, L"Mute System Audio");
+            if (status.microphone)
+                AppendMenuW(menu, MF_STRING | (checked(kMicMute) ? MF_CHECKED : 0), kMenuMuteMic, L"Mute Microphone");
+        }
         if (const auto status = session_.status(); active && status.camera) {
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             for (std::size_t i = 0; i < kScenes.size(); ++i)
@@ -1159,6 +1266,12 @@ private:
             if (s.audio_dropped) { detail += L", audio drops " + std::to_wstring(s.audio_dropped); attention_ = true; }
             if (s.streaming && !s.stream_error.empty()) { detail += L". Stream lost: " + wide(s.stream_error); attention_ = true; }
             else if (s.stream_dropped) { detail += L", stream skipped " + std::to_wstring(s.stream_dropped); attention_ = true; }
+            if (s.live && s.stream_queued_ms > 1000) {
+                wchar_t behind[48];
+                std::swprintf(behind, 48, L", stream %.1f s behind", s.stream_queued_ms / 1000.0);
+                detail += behind;
+                attention_ = true;
+            }
             if (s.reconnects) detail += L", stream reconnected " + std::to_wstring(s.reconnects) + (s.reconnects == 1 ? L" time" : L" times");
             if (s.replay) detail += L", replay " + std::to_wstring(static_cast<int>(s.replay_seconds)) + L" s";
         }
@@ -1168,7 +1281,15 @@ private:
         }
         set_text(kStatus, status);
         set_text(kDetail, detail);
-        set_text(kLive, !active ? L"" : s.live ? L"\u25CF LIVE" : s.reconnecting ? L"Reconnecting..." : L"");
+        std::wstring live;
+        if (active && s.live) {
+            wchar_t rate[48];
+            std::swprintf(rate, 48, L"\u25CF LIVE  %.1f Mb/s", s.stream_kbps / 1000.0);
+            live = rate;
+        } else if (active && s.reconnecting) {
+            live = L"Reconnecting...";
+        }
+        set_text(kLive, live);
         // Hide the last level once recording ends; polling stops with it.
         if (!active) system_shown_ = mic_shown_ = 0;
         meter(kSystemMeter, s.system_peak, system_shown_);
@@ -1188,6 +1309,9 @@ private:
                        kService, kKey, kBitrate, kReplay, kReplayLength, kChangeFolder})
             EnableWindow(get(id), editable);
         EnableWindow(get(kMicDevice), editable && checked(kMicrophone));
+        // Volume and mute change during a recording that has the source.
+        for (int id : {kSystemVolume, kSystemMute}) EnableWindow(get(id), editable ? checked(kSystemAudio) : active && s.system_audio);
+        for (int id : {kMicVolume, kMicMute}) EnableWindow(get(id), editable ? checked(kMicrophone) : active && s.microphone);
         for (int id : {kCamera, kImage, kBrowseImage}) EnableWindow(get(id), editable);
         for (int id : {kCameraDevice, kCorner, kCameraSize}) EnableWindow(get(id), editable && checked(kCamera));
         // The scene is the one setting that changes during a recording, when it draws a camera.
@@ -1214,6 +1338,7 @@ private:
     UINT dpi_ = 96;
     UINT taskbar_created_ = 0;
     HFONT font_ = nullptr, bold_ = nullptr, title_ = nullptr;
+    IAccPropServices* access_ = nullptr;
     HICON idle_icon_ = nullptr, recording_icon_ = nullptr;
     NOTIFYICONDATAW tray_{};
     std::vector<std::pair<int, HWND>> controls_;
@@ -1257,7 +1382,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         return 0;
     }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    INITCOMMONCONTROLSEX controls{sizeof controls, ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS};
+    INITCOMMONCONTROLSEX controls{sizeof controls, ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_BAR_CLASSES};
     InitCommonControlsEx(&controls);
     const int code = App().run(instance, show);
     CoUninitialize();

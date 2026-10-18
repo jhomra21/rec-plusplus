@@ -544,7 +544,7 @@ struct AudioSource {
     int stream = -1;                    // Stem stream in the sink writer, or -1.
     std::uint32_t stem_channels = 2;
     std::int64_t offset = 0;            // 100 ns units.
-    float gain = 1;
+    core::Fader fader;                  // Volume and mute of the program audio.
     std::int64_t next = INT64_MIN;      // Next 48 kHz sample index; keeps the source continuous.
     std::atomic<std::uint64_t> written{0}, dropped{0};
     mutable std::atomic<float> peak{0};  // Level meter; stats() takes it.
@@ -704,8 +704,8 @@ public:
             options_.test_pattern ? 0.0 : output_latency_seconds() * 1000.0);
         audio_[kSystem].offset = static_cast<std::int64_t>(std::llround(system_offset_ms_ * kTicks / 1000.0));
         audio_[kMic].offset = static_cast<std::int64_t>(std::llround(options_.mic_offset_ms * kTicks / 1000.0));
-        audio_[kSystem].gain = static_cast<float>(std::pow(10.0, options_.system_gain_db / 20.0));
-        audio_[kMic].gain = static_cast<float>(std::pow(10.0, options_.mic_gain_db / 20.0));
+        audio_[kSystem].fader.reset(core::gain_of(options_.system_gain_db, options_.system_muted));
+        audio_[kMic].fader.reset(core::gain_of(options_.mic_gain_db, options_.mic_muted));
 
         if (options_.test_pattern) {
             size_ = {(options_.width ? options_.width : 1920u) & ~1u, (options_.height ? options_.height : 1080u) & ~1u};
@@ -855,6 +855,7 @@ public:
             stats.stream_frames = live.frames;
             stats.stream_dropped = live.dropped;
             stats.stream_bytes = live.bytes;
+            stats.stream_queued_ms = live.queued_ms;
             stats.replay_seconds = live.replay_seconds;
         }
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
@@ -870,6 +871,14 @@ public:
     Result set_overlay(std::size_t index, bool visible, const std::optional<Area>& area) {
         if (!overlays_) return {"no overlay " + std::to_string(index + 1)};
         return overlays_->set(index, visible, area);
+    }
+    Result set_volume(AudioInput input, double gain_db, bool muted) {
+        if (!(gain_db >= -60 && gain_db <= 24)) return {"volume must be between -60 and 24 dB"};
+        auto& source = audio_[input == AudioInput::system ? kSystem : kMic];
+        if (!recording_.load() || !source.enabled)
+            return {input == AudioInput::system ? "system audio is not being recorded" : "the microphone is not being recorded"};
+        source.fader.set(core::gain_of(gain_db, muted));
+        return {};
     }
 
     Result pause() {
@@ -1381,14 +1390,23 @@ private:
         if (start >= audio_cap_) return;
         frames = static_cast<std::size_t>(std::min<std::int64_t>(static_cast<std::int64_t>(frames), audio_cap_ - start));
         if (!frames) return;
+        // Meters show the source before its volume, so a muted microphone still shows it works.
         core::raise_peak(source.peak, data, frames * 2);
+        const float* program = data;
+        if (const auto ramp = source.fader.next(); !ramp.unity()) {
+            program_.assign(data, data + frames * 2);
+            ramp.apply(program_.data(), frames);
+            program = program_.data();
+        }
+        // With one source its track is the program; with two, the stems stay as captured.
+        const bool alone = !(audio_[kSystem].enabled && audio_[kMic].enabled);
         bool ok = true;
         if (source.stream >= 0) {
             if (start > floor) ok = write_pcm(source.stream, nullptr, static_cast<std::size_t>(start - floor), source.stem_channels, floor);
-            ok = ok && write_pcm(source.stream, data, frames, source.stem_channels, start);
+            ok = ok && write_pcm(source.stream, alone ? program : data, frames, source.stem_channels, start);
         }
-        if (mixing_) mixer_.add(kind, start, data, frames, source.gain);
-        else if (live_) live_->audio(start, data, frames);
+        if (mixing_) mixer_.add(kind, start, program, frames);
+        else if (live_) live_->audio(start, program, frames);
         source.next = start + static_cast<std::int64_t>(frames);
         if (ok) source.written.fetch_add(1);
         else source.dropped.fetch_add(1);
@@ -1571,7 +1589,7 @@ private:
     bool mixing_ = false;
     core::Mixer mixer_;
     AudioChunk chunk_;
-    std::vector<float> mixed_;
+    std::vector<float> mixed_, program_;
     std::uint64_t synthetic_samples_ = 0;
     std::uint64_t video_end_slot_ = 0;
     core::PauseTimeline timeline_;
@@ -1791,6 +1809,9 @@ Result Recorder::save_replay(const std::string& path, double* seconds) {
 }
 Result Recorder::set_overlay(std::size_t index, bool visible, std::optional<Area> area) {
     return impl_->capture.set_overlay(index, visible, area);
+}
+Result Recorder::set_volume(AudioInput input, double gain_db, bool muted) {
+    return impl_->capture.set_volume(input, gain_db, muted);
 }
 
 } // namespace rec

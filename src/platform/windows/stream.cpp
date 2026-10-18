@@ -260,6 +260,7 @@ public:
         c.frames = frames_sent_.load();
         c.dropped = dropped_.load() + publisher_.dropped_frames();
         c.bytes = publisher_.bytes();
+        c.queued_ms = publisher_.queued_ms();
         c.reconnecting = publisher_.reconnecting() && !broken_.load();
         c.reconnects = publisher_.reconnects();
         c.replay_seconds = replay_ ? replay_->seconds() : 0;

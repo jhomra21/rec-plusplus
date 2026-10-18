@@ -67,6 +67,8 @@ public:
     std::uint32_t reconnects() const noexcept { return reconnects_.load(); }
     std::uint64_t bytes() const noexcept { return bytes_.load(); }
     std::uint64_t dropped_frames() const noexcept { return dropped_.load(); }
+    // Media time between the oldest unsent message and the newest queued one.
+    std::uint32_t queued_ms() const;
     std::string failure() const;
     // The URL without its stream key, safe to print.
     static std::string redact(const std::string& url);

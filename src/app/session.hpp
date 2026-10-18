@@ -3,6 +3,7 @@
 #include "rec/rec.hpp"
 
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -36,6 +37,10 @@ struct Settings {
     bool system_audio = true;
     bool microphone = false;
     std::string microphone_device = "default";
+    // Volume in dB (kVolumeMin to kVolumeMax) and mute of each source in the program audio
+    // (mix, stream, replay); both change while recording.
+    int system_volume = 0, mic_volume = 0;
+    bool system_muted = false, mic_muted = false;
     bool stream = false;              // Go live while recording.
     std::string destination = "twitch"; // twitch, youtube, custom.
     std::string server;               // Custom destination: rtmp[s]://host[:port]/app.
@@ -63,6 +68,7 @@ inline constexpr std::array<std::uint32_t, 6> kFrameRates{24, 25, 30, 50, 60, 12
 inline constexpr std::array<Choice, 3> kCodecs{{{"auto", "Automatic"}, {"h264", "H.264"}, {"hevc", "HEVC"}}};
 inline constexpr std::array<Choice, 2> kFormats{{{"mp4", "MP4"}, {"mov", "MOV"}}};
 inline constexpr std::array<std::uint32_t, 5> kReplayLengths{15, 30, 60, 120, 300};
+inline constexpr int kVolumeMin = -40, kVolumeMax = 20;
 inline constexpr std::array<Choice, 3> kServices{
     {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
 inline constexpr std::array<Choice, 3> kScenes{
@@ -105,11 +111,14 @@ struct Status {
     double seconds = 0;              // Recorded time, excluding pauses.
     std::uint64_t frames = 0, dropped = 0, audio_dropped = 0;
     float system_peak = 0, mic_peak = 0;  // Since the previous status() call.
+    bool system_audio = false, microphone = false;  // Sources in this recording.
     bool streaming = false;          // A stream was requested for this recording.
     bool live = false;               // Connected and sending.
     bool reconnecting = false;       // Lost the server and trying again.
     std::uint32_t reconnects = 0;
     std::uint64_t stream_dropped = 0;
+    double stream_kbps = 0;          // Send rate over about the last second.
+    std::uint32_t stream_queued_ms = 0;  // Media waiting to be sent; grows when the network falls behind.
     std::string stream_error;        // Why the stream ended; the recording continues.
     bool replay = false;             // This recording keeps a replay buffer.
     double replay_seconds = 0;       // Media the replay buffer holds now.
@@ -144,6 +153,8 @@ public:
     Result save_replay(const std::string& folder, std::string& path, double& seconds);
     // Moves, hides or shows the camera at once (one of kScenes).
     Result set_scene(const std::string& scene);
+    // Changes a source's volume and mute at once; the source must be in this recording.
+    Result set_volume(AudioInput input, int volume, bool muted);
     Status status();
     void wait();  // Blocks until a stop in progress has saved the movie.
 
@@ -164,6 +175,10 @@ private:
     Settings camera_settings_;           // Placement for scene changes.
     std::string scene_;
     Stats last_{};
+    // Stream rate measurement: bytes sent at rate_time_.
+    std::uint64_t rate_bytes_ = 0;
+    std::chrono::steady_clock::time_point rate_time_{};
+    double stream_kbps_ = 0;
 };
 
 // <prefix>-YYYY-MM-DD-HHMMSS.<format> in folder, with -2, -3 ... if that file exists.

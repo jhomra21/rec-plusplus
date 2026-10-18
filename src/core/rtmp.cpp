@@ -331,6 +331,13 @@ std::string RtmpPublisher::failure() const {
     return failure_;
 }
 
+std::uint32_t RtmpPublisher::queued_ms() const {
+    std::lock_guard lock(mutex_);
+    if (queue_.empty()) return 0;
+    const auto oldest = queue_.front().ms;
+    return last_ms_ > oldest ? last_ms_ - oldest : 0;
+}
+
 void RtmpPublisher::fail(std::string text) {
     {
         std::lock_guard lock(mutex_);

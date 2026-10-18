@@ -156,6 +156,40 @@ try {
     Expect-Color $camera 'sample_3' 'white'
     $image = Get-Probe $rec $overlayPath (Join-Path $artifacts 'overlay-image.probe') @('--sample', '150,100,250,100')
     foreach ($second in 0..3) { Expect-Color $image "sample_$second" 'red' }
+    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
+    # is unmuted 3.5 s in: no beep with the first flash. Mixed with the mic, the tone is turned
+    # down 6 dB, then muted 2.5 s in: the mix has no beeps after that.
+    $unmutePath = Join-Path $artifacts 'unmute.mp4'
+    $run = Start-RecProcess $rec @('record', '--test-pattern', '--test-tone', '--mute-system', '-f', '30', '-t', '6', '-o', $unmutePath)
+    Start-Sleep -Milliseconds 3500
+    Send-RecCommand $run 'unmute system'
+    $unmuted = Stop-RecProcess $run
+    Set-Content -Path (Join-Path $artifacts 'unmute.record.log') -Value $unmuted.Text
+    Write-Host $unmuted.Text
+    if ($unmuted.Code -ne 0) { throw "unmute recording failed: $($unmuted.Text)" }
+    Expect-Text $unmuted.Text 'Unmuted system audio'
+    $unmute = Get-Probe $rec $unmutePath (Join-Path $artifacts 'unmute.probe')
+    Expect-Field $unmute 'audio_tracks' '1'
+    Expect-Within $unmute 'av_sync_events' 1 5
+    $unmute['first_beep'] = $unmute['beeps'].Split(',')[0]
+    Expect-Within $unmute 'first_beep' 0.9 6
+    $mutePath = Join-Path $artifacts 'mute.mp4'
+    $run = Start-RecProcess $rec @('record', '--test-pattern', '--test-tone', '--test-mic', '-f', '30', '-t', '5', '-o', $mutePath)
+    Start-Sleep -Milliseconds 1000
+    Send-RecCommand $run 'volume system -6'
+    Start-Sleep -Milliseconds 1500
+    Send-RecCommand $run 'mute system'
+    $muted = Stop-RecProcess $run
+    Set-Content -Path (Join-Path $artifacts 'mute.record.log') -Value $muted.Text
+    Write-Host $muted.Text
+    if ($muted.Code -ne 0) { throw "mute recording failed: $($muted.Text)" }
+    Expect-Text $muted.Text 'Set system audio to -6.0 dB'
+    Expect-Text $muted.Text 'Muted system audio'
+    $mute = Get-Probe $rec $mutePath (Join-Path $artifacts 'mute.probe')
+    Expect-Field $mute 'audio_tracks' '3'
+    Expect-Within $mute 'av_sync_events' 1 3
+    $mute['last_beep'] = $mute['beeps'].Split(',')[-1]
+    Expect-Within $mute 'last_beep' 0 3.5
     # Crash safety: a recording killed mid-write still decodes up to its last fragment.
     $crashPath = Join-Path $artifacts 'crash.mp4'
     $run = Start-RecProcess $rec @('record', '--test-pattern', '--test-tone', '-f', '30', '-t', '0', '--codec', 'h264', '-o', $crashPath)
@@ -182,7 +216,7 @@ try {
             '-r', '720p', '-f', '30', '-t', '4', '--stream', 'rtmp://127.0.0.1:1935/live/smokekey1')
         Expect-Text $live.Log 'Streaming to rtmp://127.0.0.1:1935/live/****'
         Expect-Text $live.Log 'Streamed 120 frames'
-        Expect-Text $live.Log 'skipped 0'
+        Expect-Text $live.Log 'kb/s), skipped 0'
         if ($live.Log.Contains('smokekey1')) { throw 'the stream key was printed' }
         Expect-Field $live.Probe 'audio_tracks' '2'
         # MediaMTX analyzes 2 s of media before it records, so streams here run longer than that.

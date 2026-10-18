@@ -18,6 +18,8 @@ enum class AudioTracks {
     stems  // System and microphone stems, no mix.
 };
 
+enum class AudioInput { system, microphone };
+
 // A rectangle of a display in its pixels, from the display's top-left corner.
 struct Region {
     std::int32_t x = 0;
@@ -66,8 +68,12 @@ struct Options {
     bool microphone = false; // Opt-in ScreenCaptureKit microphone (macOS 15+).
     std::string microphone_device = "default"; // "default", unique ID, or name substring.
     AudioTracks audio_tracks = AudioTracks::both;
-    double system_gain_db = 0; // Mix track only.
-    double mic_gain_db = 0; // Mix track only.
+    // Volume and mute act on the program audio: the mix track, or the only audio track when
+    // one source is recorded, and the stream and replay. Stems keep each source as captured.
+    double system_gain_db = 0; // -60 to 24.
+    double mic_gain_db = 0;
+    bool system_muted = false;
+    bool mic_muted = false;
     std::optional<double> system_audio_offset_ms; // Unset: default output device latency (0 for test tone).
     double mic_offset_ms = 0;
     double duration_seconds = 10.0; // 0 = until stop()
@@ -127,6 +133,8 @@ struct Stats {
     std::uint64_t stream_frames = 0; // Video frames sent to the stream.
     std::uint64_t stream_dropped = 0; // Video frames the stream skipped to keep up.
     std::uint64_t stream_bytes = 0;
+    // Media queued for the server and not yet sent; it grows when the network falls behind.
+    std::uint32_t stream_queued_ms = 0;
     double replay_seconds = 0; // Media the replay buffer holds now.
     std::uint64_t camera_frames = 0; // Frames received from camera overlays.
 };
@@ -190,6 +198,9 @@ public:
     Result save_replay(const std::string& path, double* seconds = nullptr);
     // Shows, hides or moves Options::overlays[index] from the next frame on, while recording.
     Result set_overlay(std::size_t index, bool visible, std::optional<Area> area = std::nullopt);
+    // Changes a source's volume (-60 to 24 dB) and mute in the program audio while
+    // recording, ramped over one audio buffer.
+    Result set_volume(AudioInput input, double gain_db, bool muted);
 
 private:
     class Impl;
