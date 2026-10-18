@@ -14,6 +14,7 @@
 #include "core/preview.hpp"
 #include "core/sync.hpp"
 #include "platform/macos/overlay.hpp"
+#include "platform/macos/screen.h"
 #include "platform/macos/stream.hpp"
 
 #include <algorithm>
@@ -63,21 +64,7 @@ void receive_failure(void* owner, NSError* error);
 @end
 
 namespace rec {
-namespace {
-using core::kMixRate;
-// Video is emitted this far behind real time, so the frame that was on screen at each
-// slot instant has already been delivered. ScreenCaptureKit delivers frames a few
-// milliseconds after their presentation timestamps.
-constexpr auto kEmitDelay = std::chrono::milliseconds(40);
-// A stalled source holds the mix back at most this long; it is then filled with silence.
-constexpr std::int64_t kMixWaitFrames = kMixRate * 3 / 10;
-
-constexpr std::int32_t kNanos = 1000000000;
-
-// Host-clock instants as integer nanoseconds, the unit of the pause timeline.
-std::int64_t nanos(CMTime time) { return CMTimeConvertScale(time, kNanos, kCMTimeRoundingMethod_RoundHalfAwayFromZero).value; }
-std::int64_t now_nanos() { return nanos(CMClockGetTime(CMClockGetHostTimeClock())); }
-
+namespace mac {
 std::string message(NSError* error, const char* fallback) {
     // ScreenCaptureKit reports a missing permission as "The user declined TCCs ...".
     if ([error.domain isEqualToString:SCStreamErrorDomain] && error.code == SCStreamErrorUserDeclined)
@@ -103,9 +90,7 @@ SCShareableContent* shareable(std::string& error) {
     return content;
 }
 
-struct Size { std::uint32_t width, height; };
-
-Size native_size(SCDisplay* display) {
+PixelSize native_size(SCDisplay* display) {
     auto mode = CGDisplayCopyDisplayMode(display.displayID);
     const std::uint32_t w = mode ? static_cast<std::uint32_t>(CGDisplayModeGetPixelWidth(mode)) : display.width;
     const std::uint32_t h = mode ? static_cast<std::uint32_t>(CGDisplayModeGetPixelHeight(mode)) : display.height;
@@ -113,7 +98,6 @@ Size native_size(SCDisplay* display) {
     return {w, h};
 }
 
-// Pixels per point of the display that shows most of a rectangle in global points.
 double pixels_per_point(SCShareableContent* content, CGRect frame) {
     double best = 0, scale = 1;
     for (SCDisplay* display in content.displays) {
@@ -126,6 +110,43 @@ double pixels_per_point(SCShareableContent* content, CGRect frame) {
     }
     return scale;
 }
+
+Result wait_capture(SCStream* stream, bool start) {
+    __block NSError* reported = nil;
+    dispatch_semaphore_t done = dispatch_semaphore_create(0);
+    void (^completion)(NSError*) = ^(NSError* error) {
+        reported = error;
+        dispatch_semaphore_signal(done);
+    };
+    if (start) [stream startCaptureWithCompletionHandler:completion];
+    else [stream stopCaptureWithCompletionHandler:completion];
+    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC)))
+        return {start ? "screen capture start timed out" : "screen capture stop timed out"};
+    return reported ? Result{message(reported, "screen capture failed")} : Result{};
+}
+} // namespace mac
+
+namespace {
+using core::kMixRate;
+using mac::message;
+using mac::native_size;
+using mac::pixels_per_point;
+using mac::shareable;
+using mac::wait_capture;
+// Video is emitted this far behind real time, so the frame that was on screen at each
+// slot instant has already been delivered. ScreenCaptureKit delivers frames a few
+// milliseconds after their presentation timestamps.
+constexpr auto kEmitDelay = std::chrono::milliseconds(40);
+// A stalled source holds the mix back at most this long; it is then filled with silence.
+constexpr std::int64_t kMixWaitFrames = kMixRate * 3 / 10;
+
+constexpr std::int32_t kNanos = 1000000000;
+
+// Host-clock instants as integer nanoseconds, the unit of the pause timeline.
+std::int64_t nanos(CMTime time) { return CMTimeConvertScale(time, kNanos, kCMTimeRoundingMethod_RoundHalfAwayFromZero).value; }
+std::int64_t now_nanos() { return nanos(CMClockGetTime(CMClockGetHostTimeClock())); }
+
+struct Size { std::uint32_t width, height; };
 
 // Normal app windows (layer 0) that are on screen, not rec's own.
 bool listable(SCWindow* window) {
@@ -151,20 +172,6 @@ bool window_gone(CGWindowID window) {
     const bool gone = !found || CFArrayGetCount(found) == 0;
     if (found) CFRelease(found);
     return gone;
-}
-
-Result wait_capture(SCStream* stream, bool start) {
-    __block NSError* reported = nil;
-    dispatch_semaphore_t done = dispatch_semaphore_create(0);
-    void (^completion)(NSError*) = ^(NSError* error) {
-        reported = error;
-        dispatch_semaphore_signal(done);
-    };
-    if (start) [stream startCaptureWithCompletionHandler:completion];
-    else [stream stopCaptureWithCompletionHandler:completion];
-    if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC)))
-        return {start ? "screen capture start timed out" : "screen capture stop timed out"};
-    return reported ? Result{message(reported, "screen capture failed")} : Result{};
 }
 
 template <class T>
@@ -641,12 +648,12 @@ public:
                 captured_.store(1);
                 active_.store(true);
             }
-            if (!options_.overlays.empty()) {
-                overlays_ = std::make_unique<mac::Overlays>();
-                if (auto started = overlays_->start(size_.width, size_.height, options_.overlays); !started) {
-                    stop();
-                    return started;
-                }
+            // The compositor always runs, so the screen can move and layers can show while
+            // recording. Without anything to draw it passes frames through.
+            overlays_ = std::make_unique<mac::Overlays>();
+            if (auto started = overlays_->start(size_.width, size_.height, options_); !started) {
+                overlays_.reset();
+                if (layered()) { stop(); return started; }
             }
             if (options_.preview_width) {
                 const auto size = core::preview_size(size_.width, size_.height, options_.preview_width);
@@ -846,6 +853,10 @@ public:
         if (!overlays_) return {"no overlay " + std::to_string(index + 1)};
         return overlays_->set(index, visible, area);
     }
+    Result set_screen(bool visible, const std::optional<Area>& area) {
+        if (!overlays_) return {"this recording draws the capture as is; start it with a screen area or an overlay to change it"};
+        return overlays_->set_screen(visible, area);
+    }
     Result set_volume(AudioInput input, double gain_db, bool muted) {
         if (!(gain_db >= -60 && gain_db <= 24)) return {"volume must be between -60 and 24 dB"};
         auto& source = audio_[input == AudioInput::system ? kSystem : kMic];
@@ -869,6 +880,12 @@ public:
     }
 
 private:
+    // Frames need composing: overlays, or the main capture moved or hidden.
+    bool layered() const {
+        const auto& a = options_.screen_area;
+        return !options_.overlays.empty() || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 || a.height < 1;
+    }
+
     void fail(std::string text) {
         {
             std::lock_guard lock(mutex_);
@@ -1620,6 +1637,7 @@ Result Recorder::save_replay(const std::string& path, double* seconds) {
 Result Recorder::set_overlay(std::size_t index, bool visible, std::optional<Area> area) {
     return impl_->capture.set_overlay(index, visible, area);
 }
+Result Recorder::set_screen(bool visible, std::optional<Area> area) { return impl_->capture.set_screen(visible, area); }
 Result Recorder::set_volume(AudioInput input, double gain_db, bool muted) {
     return impl_->capture.set_volume(input, gain_db, muted);
 }

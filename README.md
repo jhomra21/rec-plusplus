@@ -64,13 +64,19 @@ Recordings are written in fragments, so a crash, kill or power loss keeps everyt
 
 ### Cameras and images
 
-`--camera DEVICE` and `--image FILE` draw a camera or a picture over the recording, on the GPU, before encoding, so the file, the stream and the replay buffer all get it. Up to four can be layered, first at the bottom. Add `@X,Y,WIDTH,HEIGHT` as fractions of the frame to place one; a camera defaults to the bottom-right quarter (`0.73,0.715,0.25,0.25`) and fills its area, cropping the edges, while an image defaults to the whole frame and keeps its shape. PNG transparency is kept. `rec devices` lists cameras; `default` is the first one and `test` is a synthetic green camera with a moving white bar:
+`--camera DEVICE` and `--image FILE` draw a camera or a picture over the recording, on the GPU, before encoding, so the file, the stream and the replay buffer all get it. Up to 15 can be layered, first at the bottom. Add `@X,Y,WIDTH,HEIGHT` as fractions of the frame to place one; a camera defaults to the bottom-right quarter (`0.73,0.715,0.25,0.25`) and fills its area, cropping the edges, while an image defaults to the whole frame and keeps its shape. PNG transparency is kept. `rec devices` lists cameras; `default` is the first one and `test` is a synthetic green camera with a moving white bar:
 
 ```sh
 ./build/rec record --camera default --image logo.png@0.02,0.02,0.15,0.1 -t 0 -o talk.mov
 ```
 
-While recording, keys `1` to `4`, or `show N` and `hide N` on stdin, show and hide each overlay. `rec probe FILE --sample X,Y,WIDTH,HEIGHT` prints the mean colour of a pixel rectangle at the start of each second (`sample_0=R,G,B`), which the smoke scripts use to check where overlays landed. On macOS the first use asks for camera access.
+`--add-display N[:X,Y,W,H]` and `--add-window ID|TEXT` add another display (optionally a region of it, in its pixels) or a window as a live layer, with the same `@X,Y,WIDTH,HEIGHT` placement; they keep their shape, letterboxed in black. `--screen-area X,Y,W,H` puts the recorded screen itself in part of the frame (black around it), and `--hide-screen` starts with it hidden:
+
+```sh
+./build/rec record --screen-area 0,0,0.5,1 --add-window Safari@0.5,0,0.5,1 -t 0 -o side-by-side.mov
+```
+
+While recording, keys `1` to `9`, or `show N|screen` and `hide N|screen` on stdin, show and hide each layer, and `move N|screen X,Y,W,H` moves one. `rec probe FILE --sample X,Y,WIDTH,HEIGHT` prints the mean colour of a pixel rectangle at the start of each second (`sample_0=R,G,B`), which the smoke scripts use to check where overlays landed. On macOS the first use asks for camera access.
 
 ### Replay buffer
 

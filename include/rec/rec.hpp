@@ -37,15 +37,18 @@ struct Area {
     double height = 1;
 };
 
-// A picture drawn over the capture in every frame: an image file or a camera. Overlays
-// draw in order, later ones on top.
+// A picture drawn over the capture in every frame: an image file, a camera, or another
+// display or window captured live. Overlays draw in order, later ones on top.
 struct Overlay {
-    enum class Kind { image, camera };
+    enum class Kind { image, camera, display, window };
     Kind kind = Kind::image;
     // image: a PNG, JPEG, BMP or GIF file. camera: "default", an ID or part of a name from
     // list_cameras(), or "test" for a synthetic camera (green with a moving white bar).
     std::string source;
-    // An image keeps its aspect ratio inside the area; a camera is cropped to fill it.
+    std::uint32_t display = 1; // display: 1-based index from list_displays().
+    std::uint64_t window = 0; // window: id from list_windows().
+    std::optional<Region> region; // display: only this part of it.
+    // A camera is cropped to fill the area; the others keep their aspect ratio inside it.
     Area area;
     bool visible = true;
 };
@@ -83,7 +86,11 @@ struct Options {
     // Keep the last N seconds (5 to 300) of the stream encode in memory for save_replay();
     // 0 = off. Without stream_url the stream encoders run for the replay alone.
     std::uint32_t replay_seconds = 0;
-    std::vector<Overlay> overlays; // At most 4. Without any, frames are not composited.
+    // Where the capture above (display, window, region or test pattern) sits in the frame,
+    // keeping its aspect ratio, and whether it shows. The rest of the frame is black.
+    Area screen_area;
+    bool screen_visible = true;
+    std::vector<Overlay> overlays; // At most 15, drawn over the capture.
     // Make preview() frames up to this many pixels wide, in the output's shape; 0 = no preview.
     std::uint32_t preview_width = 0;
     // Capture and draw the overlays for preview() only: no file, audio, stream or replay, and
@@ -212,6 +219,8 @@ public:
     Result save_replay(const std::string& path, double* seconds = nullptr);
     // Shows, hides or moves Options::overlays[index] from the next frame on, while recording.
     Result set_overlay(std::size_t index, bool visible, std::optional<Area> area = std::nullopt);
+    // Shows, hides or moves the main capture (Options::screen_area) from the next frame on.
+    Result set_screen(bool visible, std::optional<Area> area = std::nullopt);
     // Changes a source's volume (-60 to 24 dB) and mute in the program audio while
     // recording, ramped over one audio buffer.
     Result set_volume(AudioInput input, double gain_db, bool muted);

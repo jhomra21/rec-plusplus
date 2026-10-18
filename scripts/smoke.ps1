@@ -156,7 +156,41 @@ try {
     Expect-Color $camera 'sample_3' 'white'
     $image = Get-Probe $rec $overlayPath (Join-Path $artifacts 'overlay-image.probe') @('--sample', '150,100,250,100')
     foreach ($second in 0..3) { Expect-Color $image "sample_$second" 'red' }
-    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
+    # Scene layers: the test pattern in the bottom middle, a blue window as a window layer top
+    # left, and the part of the display it covers top right. Mid-recording "hide 1" hides the
+    # window layer and "move screen" moves the pattern to the bottom left.
+    Expect-Failure 'the screen area must be' @('record', '--test-pattern', '--screen-area', '0.5,0.5,0.6,0.5')
+    Expect-Failure 'needs a display number' @('record', '--test-pattern', '--add-display', 'main')
+    Expect-Failure 'display 9 not found' @('record', '--test-pattern', '-t', '1', '--add-display', '9', '-o', (Join-Path $artifacts 'no-display.mp4'))
+    $blue = Show-ColorWindow 'rec-scene-blue' 100 100 640 360 'Blue' $tmp
+    try {
+        $scenePath = Join-Path $artifacts 'scene.mp4'
+        $run = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '5', '--screen-area', '0.25,0.5,0.5,0.5',
+            '--add-window', 'rec-scene-blue@0,0,0.5,0.5', '--add-display', '1:200,150,400,225@0.5,0,0.5,0.5', '-o', $scenePath)
+        Start-Sleep -Milliseconds 2500
+        Send-RecCommand $run 'hide 1'
+        Send-RecCommand $run 'move screen 0,0.5,0.5,0.5'
+        $scened = Stop-RecProcess $run
+    } finally {
+        Stop-Process -Id $blue.Id -Force -ErrorAction SilentlyContinue
+    }
+    Set-Content -Path (Join-Path $artifacts 'scene.record.log') -Value $scened.Text
+    Write-Host $scened.Text
+    if ($scened.Code -ne 0) { throw "scene recording failed: $($scened.Text)" }
+    Expect-Text $scened.Text 'Hiding window 1'
+    Expect-Text $scened.Text 'Moved the screen to 0,0.5,0.5,0.5'
+    Expect-Text $scened.Text 'written 150, dropped 0'
+    $window = Get-Probe $rec $scenePath (Join-Path $artifacts 'scene-window.probe') @('--sample', '280,170,400,200')
+    $display = Get-Probe $rec $scenePath (Join-Path $artifacts 'scene-display.probe') @('--sample', '1240,170,400,200')
+    $before = Get-Probe $rec $scenePath (Join-Path $artifacts 'scene-screen-before.probe') @('--sample', '1000,700,400,250')
+    $after = Get-Probe $rec $scenePath (Join-Path $artifacts 'scene-screen-after.probe') @('--sample', '100,700,300,250')
+    foreach ($second in 0..1) { Expect-Color $window "sample_$second" 'blue' }
+    Expect-Color $window 'sample_4' 'black'
+    foreach ($second in 0..4) { Expect-Color $display "sample_$second" 'blue' }
+    Expect-Color $before 'sample_0' 'white'
+    Expect-Color $before 'sample_4' 'black'
+    Expect-Color $after 'sample_0' 'black'
+    Expect-Color $after 'sample_4' 'white'    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
     # is unmuted 3.5 s in: no beep with the first flash. Mixed with the mic, the tone is turned
     # down 6 dB, then muted 2.5 s in: the mix has no beeps after that.
     $unmutePath = Join-Path $artifacts 'unmute.mp4'

@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <csignal>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
@@ -39,10 +40,12 @@ std::atomic_bool interrupted{false};
 
 extern "C" void on_signal(int) { interrupted.store(true); }
 
-enum class Command { toggle, pause, resume, stop, save_replay, show, hide, flip, audio };
+enum class Command { toggle, pause, resume, stop, save_replay, show, hide, flip, move, audio };
+constexpr std::size_t kScreen = SIZE_MAX;  // show, hide and move the main capture.
 struct Posted {
     Command command;
-    std::size_t overlay = 0;  // show, hide and flip: 0-based.
+    std::size_t overlay = 0;  // show, hide, flip and move: 0-based, or kScreen.
+    std::optional<rec::Area> area;  // move.
     // audio: the source, and its new mute (none: toggle) or volume.
     rec::AudioInput input = rec::AudioInput::system;
     std::optional<bool> muted;
@@ -58,7 +61,23 @@ void post(Command command, std::size_t overlay = 0) {
 
 void post_audio(rec::AudioInput input, std::optional<bool> muted, std::optional<double> gain_db = std::nullopt) {
     std::lock_guard lock(commands_mutex);
-    commands.push_back({Command::audio, 0, input, muted, gain_db});
+    commands.push_back({Command::audio, 0, std::nullopt, input, muted, gain_db});
+}
+
+void post_move(std::size_t layer, rec::Area area) {
+    std::lock_guard lock(commands_mutex);
+    commands.push_back({Command::move, layer, area});
+}
+
+bool area(std::string_view s, rec::Area& a);
+
+// "screen", or an overlay number from 1.
+std::optional<std::size_t> layer_index(std::string_view text) {
+    if (text == "screen") return kScreen;
+    std::size_t n = 0;
+    const auto [p, ec] = std::from_chars(text.data(), text.data() + text.size(), n);
+    if (ec != std::errc{} || p != text.data() + text.size() || n < 1 || n > 15) return std::nullopt;
+    return n - 1;
 }
 
 // "system" or "mic" at the start of text.
@@ -95,11 +114,12 @@ void restore_terminal() {
 }
 #endif
 
-// Keys in a terminal: p or space toggles pause, s saves the replay, 1 to 4 show or hide an
+// Keys in a terminal: p or space toggles pause, s saves the replay, 1 to 9 show or hide an
 // overlay, m and a mute or unmute the microphone and system audio, q stops. Piped stdin
-// takes one command per line (pause, resume, toggle, save, show N, hide N, mute SOURCE,
-// unmute SOURCE, volume SOURCE DB, stop), so scripts can drive a recording. The reader thread is detached: a
-// pending read must not keep the process alive after the movie is saved.
+// takes one command per line (pause, resume, toggle, save, show N|screen, hide N|screen,
+// move N|screen X,Y,W,H, mute SOURCE, unmute SOURCE, volume SOURCE DB, stop), so scripts can
+// drive a recording. The reader thread is detached: a pending read must not keep the
+// process alive after the movie is saved.
 void watch_input() {
     if (keyboard()) {
 #ifndef _WIN32
@@ -123,7 +143,7 @@ void watch_input() {
                 if (key == EOF) return;
                 if (key == 'p' || key == 'P' || key == ' ') post(Command::toggle);
                 else if (key == 's' || key == 'S') post(Command::save_replay);
-                else if (key >= '1' && key <= '4') post(Command::flip, static_cast<std::size_t>(key - '1'));
+                else if (key >= '1' && key <= '9') post(Command::flip, static_cast<std::size_t>(key - '1'));
                 else if (key == 'm' || key == 'M') post_audio(rec::AudioInput::microphone, std::nullopt);
                 else if (key == 'a' || key == 'A') post_audio(rec::AudioInput::system, std::nullopt);
                 else if (key == 'q' || key == 'Q') post(Command::stop);
@@ -143,9 +163,15 @@ void watch_input() {
             else if (line == "resume") post(Command::resume);
             else if (line == "toggle") post(Command::toggle);
             else if (line == "save") post(Command::save_replay);
-            else if ((line.rfind("show ", 0) == 0 || line.rfind("hide ", 0) == 0) && line.size() == 6 && line[5] >= '1' &&
-                     line[5] <= '4')
-                post(line[0] == 's' ? Command::show : Command::hide, static_cast<std::size_t>(line[5] - '1'));
+            else if ((line.rfind("show ", 0) == 0 || line.rfind("hide ", 0) == 0) && layer_index(std::string_view(line).substr(5)))
+                post(line[0] == 's' ? Command::show : Command::hide, *layer_index(std::string_view(line).substr(5)));
+            else if (line.rfind("move ", 0) == 0) {
+                const auto space = line.find(' ', 5);
+                const auto layer = space == std::string::npos ? std::nullopt : layer_index(std::string_view(line).substr(5, space - 5));
+                rec::Area to;
+                if (layer && area(std::string_view(line).substr(space + 1), to)) post_move(*layer, to);
+                else std::cerr << "Use: move N|screen X,Y,W,H (fractions of the frame)\n";
+            }
             else if (line.rfind("mute ", 0) == 0 && audio_input(line.substr(5)))
                 post_audio(*audio_input(line.substr(5)), true);
             else if (line.rfind("unmute ", 0) == 0 && audio_input(line.substr(7)))
@@ -213,15 +239,21 @@ void usage() {
                  "  --camera DEVICE[@X,Y,W,H]      Show a camera (default, or an ID or name from devices; test for a\n"
                  "                                 synthetic one) over the capture, by default in the bottom-right corner\n"
                  "  --image FILE[@X,Y,W,H]         Show a PNG or JPEG over the capture (default: the whole frame)\n"
-                 "                                 X,Y,W,H are fractions of the frame, e.g. 0.73,0.715,0.25,0.25\n"
+                 "  --add-display N[:X,Y,W,H][@X,Y,W,H]\n"
+                 "                                 Show another display live, or the part of it after : in its pixels\n"
+                 "  --add-window ID|TEXT[@X,Y,W,H] Show a window live (as --window finds it)\n"
+                 "                                 X,Y,W,H after @ are fractions of the frame, e.g. 0.73,0.715,0.25,0.25\n"
+                 "  --screen-area X,Y,W,H          Where the capture itself sits in the frame (default: all of it)\n"
+                 "  --hide-screen                  Start with the capture hidden, so only overlays show\n"
                  "  --test-pattern                 Synthetic video that flashes once a second\n"
                  "  --test-tone                    Add a beep with each flash as system audio\n"
                  "  --test-mic                     Add a quiet synthetic microphone\n\n"
-                 "While recording, press p or space to pause and resume, s to save the replay, 1 to 4 to show or\n"
-                 "hide a camera or image (in the order given), m or a to mute or unmute the microphone or system\n"
+                 "Up to 15 cameras, images, displays and windows draw over the capture, later ones on top.\n"
+                 "While recording, press p or space to pause and resume, s to save the replay, 1 to 9 to show or\n"
+                 "hide an overlay (in the order given), m or a to mute or unmute the microphone or system\n"
                  "audio, q or Ctrl-C to stop.\n"
-                 "With stdin piped, send lines: pause, resume, toggle, save, show N, hide N, mute system|mic,\n"
-                 "unmute system|mic, volume system|mic DB, stop.\n"
+                 "With stdin piped, send lines: pause, resume, toggle, save, show N|screen, hide N|screen,\n"
+                 "move N|screen X,Y,W,H, mute system|mic, unmute system|mic, volume system|mic DB, stop.\n"
                  "rec probe --sample reports the mean color of a rectangle (video pixels) once a second.\n";
 }
 
@@ -313,6 +345,7 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
         if (arg == "--system-audio") { o.system_audio = true; continue; }
         if (arg == "--mute-system") { o.system_muted = true; continue; }
         if (arg == "--mute-mic") { o.mic_muted = true; continue; }
+        if (arg == "--hide-screen") { o.screen_visible = false; continue; }
         if (i + 1 >= argc) { error = "missing value for " + std::string(arg); return false; }
         std::string_view value(argv[++i]);
         double real = 0;
@@ -359,7 +392,7 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
         } else if (arg == "--camera" || arg == "--image") {
             const bool camera = arg == "--camera";
             if (value.empty()) { error = camera ? "--camera needs a device: default, test, or an ID or name from `rec devices`" : "--image needs a file"; return false; }
-            if (o.overlays.size() == 4) { error = "at most 4 cameras and images"; return false; }
+            if (o.overlays.size() == 15) { error = "at most 15 overlays"; return false; }
             const auto at = value.rfind('@');
             rec::Area checked;
             if (at != std::string_view::npos && !area(value.substr(at + 1), checked) &&
@@ -368,6 +401,36 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
             }
             o.overlays.push_back(overlay(camera ? rec::Overlay::Kind::camera : rec::Overlay::Kind::image, value,
                                          camera ? rec::Area{0.73, 0.715, 0.25, 0.25} : rec::Area{}));
+        } else if (arg == "--add-display" || arg == "--add-window") {
+            if (o.overlays.size() == 15) { error = "at most 15 overlays"; return false; }
+            rec::Overlay layer = overlay(rec::Overlay::Kind::display, value, rec::Area{});
+            const auto at = value.rfind('@');
+            if (layer.source.size() == value.size() && at != std::string_view::npos &&
+                value.substr(at + 1).find(',') != std::string_view::npos) {
+                error = "the area after @ must be X,Y,WIDTH,HEIGHT as fractions of the frame, inside it"; return false;
+            }
+            const std::string spec = std::move(layer.source);
+            std::string_view what = spec;
+            layer.source.clear();
+            if (arg == "--add-window") {
+                layer.kind = rec::Overlay::Kind::window;
+                if (!find_window(what, layer.window, error)) return false;
+            } else {
+                if (const auto colon = what.find(':'); colon != std::string_view::npos) {
+                    rec::Region r;
+                    if (!region(what.substr(colon + 1), r)) {
+                        error = "the region after : must be X,Y,WIDTH,HEIGHT in display pixels, at least 2x2"; return false;
+                    }
+                    layer.region = r;
+                    what = what.substr(0, colon);
+                }
+                if (!integer(what, layer.display) || layer.display == 0) { error = "--add-display needs a display number"; return false; }
+            }
+            o.overlays.push_back(layer);
+        } else if (arg == "--screen-area") {
+            if (!area(value, o.screen_area)) {
+                error = "the screen area must be X,Y,WIDTH,HEIGHT as fractions of the frame, inside it"; return false;
+            }
         } else if (arg == "--mic") {
             if (value.empty()) { error = "--mic needs a device: default, or an ID or name from `rec devices`"; return false; }
             o.microphone = true;
@@ -566,6 +629,12 @@ int main(int argc, char** argv) {
     unsigned replays = 0;
     std::vector<bool> visible;
     for (const auto& o : options.overlays) visible.push_back(o.visible);
+    bool screen_visible = options.screen_visible;
+    const auto layer_name = [&](std::size_t n) {
+        if (n == kScreen) return std::string("the screen");
+        static const char* const kinds[] = {"image ", "camera ", "display ", "window "};
+        return kinds[static_cast<int>(options.overlays[n].kind)] + std::to_string(n + 1);
+    };
     // Volume and mute per source: system audio, then the microphone.
     double gains[2]{options.system_gain_db, options.mic_gain_db};
     bool mutes[2]{options.system_muted, options.mic_muted};
@@ -583,17 +652,25 @@ int main(int argc, char** argv) {
         while (next_command(posted)) {
             const Command command = posted.command;
             if (command == Command::stop) { interrupted.store(true); break; }
-            if (command == Command::show || command == Command::hide || command == Command::flip) {
+            if (command == Command::show || command == Command::hide || command == Command::flip || command == Command::move) {
                 if (live) std::cout << "\r\033[K";
                 const std::size_t n = posted.overlay;
-                if (n >= visible.size()) {
-                    std::cerr << "No overlay " << n + 1 << "; add one with --camera or --image\n";
+                if (n != kScreen && n >= visible.size()) {
+                    std::cerr << "No overlay " << n + 1 << "; add one with --camera, --image, --add-display or --add-window\n";
                 } else {
-                    const bool show = command == Command::show || (command == Command::flip && !visible[n]);
-                    if (auto changed = recorder.set_overlay(n, show); changed) {
-                        visible[n] = show;
-                        std::cout << (show ? "Showing " : "Hiding ") << (options.overlays[n].kind == rec::Overlay::Kind::camera ? "camera " : "image ")
-                                  << n + 1 << " at " << clock_text(recorded()) << '\n';
+                    const bool was = n == kScreen ? screen_visible : static_cast<bool>(visible[n]);
+                    const bool show = command == Command::move ? was : command == Command::show || (command == Command::flip && !was);
+                    const auto changed = n == kScreen ? recorder.set_screen(show, posted.area) : recorder.set_overlay(n, show, posted.area);
+                    if (changed) {
+                        if (n == kScreen) screen_visible = show;
+                        else visible[n] = show;
+                        if (command == Command::move) {
+                            const auto& a = *posted.area;
+                            std::cout << "Moved " << layer_name(n) << " to " << a.x << ',' << a.y << ',' << a.width << ',' << a.height;
+                        } else {
+                            std::cout << (show ? "Showing " : "Hiding ") << layer_name(n);
+                        }
+                        std::cout << " at " << clock_text(recorded()) << '\n';
                     } else {
                         std::cerr << changed.error << '\n';
                     }

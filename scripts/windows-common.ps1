@@ -58,7 +58,7 @@ function Expect-Within($probe, [string]$key, [double]$low, [double]$high) {
     if ($number -lt $low -or $number -gt $high) { throw "$key=$value is outside [$low, $high]" }
 }
 
-# A sample_N=R,G,B probe field: green, red or white, with room for encoding error.
+# A sample_N=R,G,B probe field: green, red, white, blue or black, with room for encoding error.
 function Expect-Color($probe, [string]$key, [string]$color) {
     $value = $probe[$key]
     if (-not $value) { throw "$key is missing" }
@@ -67,10 +67,38 @@ function Expect-Color($probe, [string]$key, [string]$color) {
         'green' { $g -gt 120 -and $g -gt $r + 60 -and $g -gt $b + 60 }
         'red' { $r -gt 170 -and $r -gt $g + 100 -and $r -gt $b + 100 }
         'white' { $r -gt 190 -and $g -gt 190 -and $b -gt 190 }
+        'blue' { $b -gt 170 -and $b -gt $r + 100 -and $b -gt $g + 100 }
+        'black' { $r -lt 40 -and $g -lt 40 -and $b -lt 40 }
     }
     if (-not $ok) { throw "$key=$value is not $color" }
 }
 
+# A borderless, topmost window of one color at x,y in physical pixels of the main display,
+# in its own process. Stop it with Stop-Process.
+function Show-ColorWindow([string]$title, [int]$x, [int]$y, [int]$width, [int]$height, [string]$color, [string]$dir) {
+    $script = Join-Path $dir "$title.ps1"
+    Set-Content -Path $script -Value @"
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type -Name Dpi -Namespace Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
+[Native.Dpi]::SetProcessDPIAware() | Out-Null
+`$form = New-Object Windows.Forms.Form
+`$form.Text = '$title'
+`$form.FormBorderStyle = 'None'
+`$form.StartPosition = 'Manual'
+`$form.Bounds = New-Object Drawing.Rectangle $x, $y, $width, $height
+`$form.TopMost = `$true
+`$form.BackColor = [Drawing.Color]::$color
+[Windows.Forms.Application]::Run(`$form)
+"@
+    $process = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script) -PassThru -WindowStyle Hidden
+    for ($i = 0; $i -lt 100; $i++) {
+        $process.Refresh()
+        if ($process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq $title) { Start-Sleep -Milliseconds 300; return $process }
+        Start-Sleep -Milliseconds 100
+    }
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    throw "the $title window did not open"
+}
 function Expect-Text([string]$text, [string]$expected) {
     if (-not $text.Contains($expected)) { throw "expected '$expected' in: $text" }
 }

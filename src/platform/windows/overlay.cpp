@@ -5,6 +5,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <unknwn.h>
 
 #include <d3d11_4.h>
 #include <d3dcompiler.h>
@@ -15,6 +16,14 @@
 #include <wincodec.h>
 #include <wrl/client.h>
 
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <winrt/Windows.Graphics.DirectX.h>
+
+#include "platform/windows/displays.hpp"
 #include "platform/windows/overlay.hpp"
 #include "core/overlay.hpp"
 
@@ -26,15 +35,19 @@
 #include <cstring>
 #include <mutex>
 #include <thread>
+#include <utility>
 
 namespace rec::win {
 namespace {
 using Microsoft::WRL::ComPtr;
+namespace wgc = winrt::Windows::Graphics::Capture;
+namespace wgdx = winrt::Windows::Graphics::DirectX;
 
 // Overlay pixels are premultiplied BGRA. They are converted to BT.709 studio-range YCbCr
 // before blending (ONE, INV_SRC_ALPHA): the conversion is affine, so blending the converted
 // values equals converting the blended RGB. Luma and chroma are drawn into the NV12
-// frame's two planes in separate passes.
+// frame's two planes in separate passes. The main capture is already NV12; its planes are
+// sampled directly when it is drawn smaller than the frame.
 constexpr char kShaders[] = R"(
 cbuffer Placement : register(b0) {
     float4 dest;    // left, top, right, bottom in clip space
@@ -67,6 +80,10 @@ float4 chroma(Vertex v) : SV_Target {
     float2 uv = float2((c.b - y) / 1.8556, (c.r - y) / 1.5748);
     return float4(c.a * 128.0 / 255 + 224.0 / 255 * uv, 0, c.a);
 }
+Texture2D<float> plane_y : register(t1);
+Texture2D<float2> plane_uv : register(t2);
+float4 screen_luma(Vertex v) : SV_Target { return float4(plane_y.Sample(smooth, v.uv), 0, 0, 1); }
+float4 screen_chroma(Vertex v) : SV_Target { return float4(plane_uv.Sample(smooth, v.uv), 0, 1); }
 )";
 
 struct Constants {
@@ -299,6 +316,136 @@ private:
     std::thread thread_;
 };
 
+// The newest frame of a display or window, captured with Windows.Graphics.Capture on the
+// recording device. The callback only retains the frame (replacing the older one, which
+// returns to the two-buffer pool); draw() copies it into the layer's texture and closes it.
+class ScreenFeed {
+public:
+    ~ScreenFeed() { stop(); }
+
+    Result open(const wgdx::Direct3D11::IDirect3DDevice& device, const Overlay& overlay, bool cursor) {
+        device_ = device;
+        const bool window = overlay.kind == Overlay::Kind::window;
+        const auto name = window ? std::string("the window") : "display " + std::to_string(overlay.display);
+        try {
+            auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
+            if (window) {
+                const auto handle = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(overlay.window));
+                if (!IsWindow(handle)) return {"window not found; run `rec windows`"};
+                if (IsIconic(handle)) return {"the window is minimized; restore it, then retry"};
+                winrt::check_hresult(interop->CreateForWindow(handle, winrt::guid_of<wgc::GraphicsCaptureItem>(), winrt::put_abi(item_)));
+            } else {
+                const auto list = monitors();
+                if (overlay.display > list.size()) return {name + " not found; run `rec devices`"};
+                winrt::check_hresult(interop->CreateForMonitor(list[overlay.display - 1].handle, winrt::guid_of<wgc::GraphicsCaptureItem>(),
+                                                               winrt::put_abi(item_)));
+            }
+        } catch (winrt::hresult_error const& e) {
+            return {failed(("could not capture " + name).c_str(), e.code())};
+        }
+        pool_size_ = item_.Size();
+        if (pool_size_.Width < 2 || pool_size_.Height < 2) return {name + " has no usable size"};
+        if (overlay.region) {
+            const auto& r = *overlay.region;
+            if (r.x + static_cast<std::int64_t>(r.width) > pool_size_.Width || r.y + static_cast<std::int64_t>(r.height) > pool_size_.Height)
+                return {"the region does not fit " + name + " (" + std::to_string(pool_size_.Width) + "x" +
+                        std::to_string(pool_size_.Height) + ")"};
+            region_ = r;
+        }
+        try {
+            try {
+                wgc::GraphicsCaptureAccess::RequestAccessAsync(wgc::GraphicsCaptureAccessKind::Borderless).get();
+            } catch (...) {
+            }
+            pool_ = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(device_, wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, pool_size_);
+            accepting_ = true;
+            token_ = pool_.FrameArrived({this, &ScreenFeed::on_frame});
+            session_ = pool_.CreateCaptureSession(item_);
+            try { session_.IsCursorCaptureEnabled(cursor); } catch (...) {}
+            try { session_.IsBorderRequired(false); } catch (...) {}
+        } catch (winrt::hresult_error const& e) {
+            return {failed(("could not capture " + name).c_str(), e.code())};
+        }
+        return {};
+    }
+
+    Result start() {
+        try {
+            session_.StartCapture();
+        } catch (winrt::hresult_error const& e) {
+            return {failed("could not start a screen capture", e.code())};
+        }
+        return {};
+    }
+
+    void stop() {
+        wgc::Direct3D11CaptureFrame held{nullptr};
+        {
+            std::lock_guard lock(mutex_);
+            accepting_ = false;
+            held = std::exchange(latest_, nullptr);
+        }
+        try {
+            if (held) held.Close();
+            if (pool_) pool_.FrameArrived(token_);
+            if (session_) session_.Close();
+            if (pool_) pool_.Close();
+        } catch (...) {
+        }
+        session_ = nullptr;
+        pool_ = nullptr;
+        item_ = nullptr;
+    }
+
+    // The newest frame, when one arrived since the last call. The caller closes it.
+    wgc::Direct3D11CaptureFrame take() {
+        std::lock_guard lock(mutex_);
+        return std::exchange(latest_, nullptr);
+    }
+
+    const std::optional<Region>& region() const { return region_; }
+
+private:
+    void on_frame(wgc::Direct3D11CaptureFramePool const& sender, winrt::Windows::Foundation::IInspectable const&) {
+        try {
+            auto frame = sender.TryGetNextFrame();
+            if (!frame) return;
+            const auto content = frame.ContentSize();
+            wgc::Direct3D11CaptureFrame replaced{nullptr};
+            bool resized = false;
+            {
+                std::lock_guard lock(mutex_);
+                if (!accepting_) { frame.Close(); return; }
+                resized = content.Width != pool_size_.Width || content.Height != pool_size_.Height;
+                // A resized pool starts from the next frame, so none from the old one is held.
+                if (resized) {
+                    pool_size_ = content;
+                    replaced = std::exchange(latest_, nullptr);
+                } else {
+                    replaced = std::exchange(latest_, frame);
+                }
+            }
+            if (replaced) replaced.Close();
+            if (resized) {
+                frame.Close();
+                if (content.Width >= 2 && content.Height >= 2)
+                    sender.Recreate(device_, wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, content);
+            }
+        } catch (...) {
+        }
+    }
+
+    wgdx::Direct3D11::IDirect3DDevice device_{nullptr};
+    wgc::GraphicsCaptureItem item_{nullptr};
+    wgc::Direct3D11CaptureFramePool pool_{nullptr};
+    wgc::GraphicsCaptureSession session_{nullptr};
+    winrt::event_token token_{};
+    std::optional<Region> region_;
+    std::mutex mutex_;  // Guards accepting_, latest_ and pool_size_.
+    bool accepting_ = false;
+    wgc::Direct3D11CaptureFrame latest_{nullptr};
+    winrt::Windows::Graphics::SizeInt32 pool_size_{};
+};
 Result load_image(ID3D11Device* device, const std::string& path, ComPtr<ID3D11Texture2D>& texture, UINT& width, UINT& height) {
     ComPtr<IWICImagingFactory> factory;
     HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
@@ -347,14 +494,42 @@ std::vector<Camera> cameras(std::string& error) {
     return result;
 }
 
+std::vector<Monitor> monitors() {
+    std::vector<Monitor> list;
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR handle, HDC, LPRECT, LPARAM data) -> BOOL {
+        MONITORINFOEXW info{};
+        info.cbSize = sizeof info;
+        if (!GetMonitorInfoW(handle, &info)) return TRUE;
+        DEVMODEW mode{};
+        mode.dmSize = sizeof mode;
+        Monitor monitor;
+        monitor.handle = handle;
+        monitor.device = utf8(info.szDevice);
+        monitor.primary = info.dwFlags & MONITORINFOF_PRIMARY;
+        if (EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode)) {
+            monitor.width = mode.dmPelsWidth;
+            monitor.height = mode.dmPelsHeight;
+        } else {
+            monitor.width = static_cast<std::uint32_t>(info.rcMonitor.right - info.rcMonitor.left);
+            monitor.height = static_cast<std::uint32_t>(info.rcMonitor.bottom - info.rcMonitor.top);
+        }
+        reinterpret_cast<std::vector<Monitor>*>(data)->push_back(monitor);
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&list));
+    std::stable_partition(list.begin(), list.end(), [](const Monitor& m) { return m.primary; });
+    return list;
+}
+
 class Overlays::Impl {
 public:
     struct Layer {
         Overlay overlay;
-        UINT width = 0, height = 0;
+        UINT width = 0, height = 0;  // The picture shown: a screen layer's crop.
         ComPtr<ID3D11Texture2D> texture;
         ComPtr<ID3D11ShaderResourceView> view;
         std::unique_ptr<CameraFeed> camera;
+        std::unique_ptr<ScreenFeed> screen;
+        double crop[4] = {0, 0, 1, 1};  // A screen layer's picture in its texture: u0, v0, u1, v1.
         std::uint64_t seen = 0;
         bool ready = false;  // Has a picture to draw.
     };
@@ -363,24 +538,33 @@ public:
         unsigned subresource = 0;
         ComPtr<ID3D11RenderTargetView> luma, chroma;
     };
+    struct Planes {
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> luma, chroma;
+    };
 
-    Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const std::vector<Overlay>& overlays) {
-        if (auto error = core::check_overlays(overlays); !error.empty()) return {error};
+    Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const Options& options) {
+        if (auto error = core::check_overlays(options.overlays); !error.empty()) return {error};
+        if (!core::valid(options.screen_area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
         device_ = device;
         width_ = width;
         height_ = height;
+        screen_area_ = options.screen_area;
+        screen_visible_ = options.screen_visible;
         UINT support = 0;
         if (FAILED(device->CheckFormatSupport(DXGI_FORMAT_NV12, &support)) || !(support & D3D11_FORMAT_SUPPORT_RENDER_TARGET))
             return {"this graphics driver cannot draw overlays into video frames"};
         if (auto made = create_pipeline(); !made) return made;
-        for (const auto& overlay : overlays) {
+        for (const auto& overlay : options.overlays) {
             Layer layer;
             layer.overlay = overlay;
-            if (overlay.kind == Overlay::Kind::image) {
+            switch (overlay.kind) {
+            case Overlay::Kind::image:
                 if (auto loaded = load_image(device, overlay.source, layer.texture, layer.width, layer.height); !loaded)
                     return loaded;
                 layer.ready = true;
-            } else {
+                break;
+            case Overlay::Kind::camera: {
                 layer.camera = std::make_unique<CameraFeed>();
                 if (auto opened = layer.camera->open(overlay.source); !opened) return opened;
                 layer.width = layer.camera->width();
@@ -397,13 +581,26 @@ public:
                 desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
                 const HRESULT hr = device->CreateTexture2D(&desc, nullptr, &layer.texture);
                 if (FAILED(hr)) return {failed("could not allocate the camera picture", hr)};
+                break;
             }
-            const HRESULT hr = device->CreateShaderResourceView(layer.texture.Get(), nullptr, &layer.view);
-            if (FAILED(hr)) return {failed("could not use an overlay picture", hr)};
+            case Overlay::Kind::display:
+            case Overlay::Kind::window:
+                if (auto ready = capture_device(); !ready) return ready;
+                layer.screen = std::make_unique<ScreenFeed>();
+                if (auto opened = layer.screen->open(winrt_device_, overlay, options.cursor); !opened) return opened;
+                break;
+            }
+            if (layer.texture) {
+                const HRESULT hr = device->CreateShaderResourceView(layer.texture.Get(), nullptr, &layer.view);
+                if (FAILED(hr)) return {failed("could not use an overlay picture", hr)};
+            }
             layers_.push_back(std::move(layer));
         }
-        for (auto& layer : layers_)
+        for (auto& layer : layers_) {
             if (layer.camera) layer.camera->start();
+            if (layer.screen)
+                if (auto started = layer.screen->start(); !started) return started;
+        }
         return {};
     }
 
@@ -418,6 +615,14 @@ public:
         return {};
     }
 
+    Result set_screen(bool visible, const std::optional<Area>& area) {
+        if (area && !core::valid(*area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
+        std::lock_guard lock(mutex_);
+        if (area) screen_area_ = *area;
+        screen_visible_ = visible;
+        return {};
+    }
+
     std::uint64_t camera_frames() const {
         std::lock_guard lock(mutex_);
         std::uint64_t total = 0;
@@ -426,37 +631,69 @@ public:
         return total;
     }
 
-    bool draw(ID3D11DeviceContext* context, ID3D11Texture2D* frame, unsigned subresource) {
+    bool draw(ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame, unsigned subresource) {
         struct Job { Layer* layer; Area area; };
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
+        Area screen_area;
+        bool screen_visible = true;
         {
             std::lock_guard lock(mutex_);
             for (auto& layer : layers_)
                 if (layer.overlay.visible) jobs[count++] = {&layer, layer.overlay.area};
+            screen_area = screen_area_;
+            screen_visible = screen_visible_;
         }
-        if (!count) return true;
+        const bool whole = screen_visible && screen_area.x <= 0 && screen_area.y <= 0 && screen_area.width >= 1 && screen_area.height >= 1;
+        if (whole) context->CopySubresourceRegion(frame, subresource, 0, 0, 0, screen, 0, nullptr);
+        if (whole && !count) return true;
         ComPtr<ID3D11Multithread> multithread;
         context->QueryInterface(IID_PPV_ARGS(&multithread));
         if (multithread) multithread->Enter();
-        const bool drawn = draw_locked(context, frame, subresource, jobs, count);
+        bool drawn = false;
+        if (Target* target = target_for(frame, subresource)) {
+            begin(context);
+            drawn = true;
+            if (!whole) {
+                const float black[4] = {16.0f / 255, 0, 0, 0}, neutral[4] = {128.0f / 255, 128.0f / 255, 0, 0};
+                context->ClearRenderTargetView(target->luma.Get(), black);
+                context->ClearRenderTargetView(target->chroma.Get(), neutral);
+                if (screen_visible) drawn = draw_screen(context, *target, screen, screen_area);
+            }
+            for (std::size_t i = 0; i < count && drawn; ++i) draw_layer(context, *target, *jobs[i].layer, jobs[i].area);
+            end(context);
+        }
         if (multithread) multithread->Leave();
         return drawn;
     }
 
     void stop() {
         std::lock_guard lock(mutex_);
-        for (auto& layer : layers_)
+        for (auto& layer : layers_) {
             if (layer.camera) layer.camera->stop();
+            if (layer.screen) layer.screen->stop();
+        }
         layers_.clear();
         targets_.clear();
+        planes_.clear();
     }
 
 private:
-    template <class Job>
-    bool draw_locked(ID3D11DeviceContext* context, ID3D11Texture2D* frame, unsigned subresource, Job* jobs, std::size_t count) {
-        Target* target = target_for(frame, subresource);
-        if (!target) return false;
+    Result capture_device() {
+        if (winrt_device_) return {};
+        try {
+            ComPtr<IDXGIDevice> dxgi;
+            device_.As(&dxgi);
+            winrt::com_ptr<::IInspectable> inspectable;
+            winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(), inspectable.put()));
+            winrt_device_ = inspectable.as<wgdx::Direct3D11::IDirect3DDevice>();
+        } catch (winrt::hresult_error const& e) {
+            return {failed("could not share the graphics device with screen capture", e.code())};
+        }
+        return {};
+    }
+
+    void begin(ID3D11DeviceContext* context) {
         context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
         context->IASetInputLayout(nullptr);
         context->VSSetShader(vertex_.Get(), nullptr, 0);
@@ -466,45 +703,119 @@ private:
         context->RSSetState(raster_.Get());
         context->OMSetBlendState(blend_.Get(), nullptr, 0xffffffff);
         context->OMSetDepthStencilState(nullptr, 0);
-        for (std::size_t i = 0; i < count; ++i) {
-            Layer& layer = *jobs[i].layer;
-            if (layer.camera) {
-                layer.camera->upload(layer.seen, [&](const std::uint8_t* pixels, std::size_t row) {
-                    D3D11_MAPPED_SUBRESOURCE mapped{};
-                    if (FAILED(context->Map(layer.texture.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
-                    for (UINT y = 0; y < layer.height; ++y)
-                        std::memcpy(static_cast<std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch,
-                                    pixels + y * row, row);
-                    context->Unmap(layer.texture.Get(), 0);
-                    layer.ready = true;
-                    return true;
-                });
-            }
-            if (!layer.ready) continue;
-            const auto p = core::place(layer.overlay.kind, jobs[i].area, width_, height_, layer.width, layer.height);
-            const Constants constants{
-                {static_cast<float>(2 * p.left / width_ - 1), static_cast<float>(1 - 2 * p.top / height_),
-                 static_cast<float>(2 * p.right / width_ - 1), static_cast<float>(1 - 2 * p.bottom / height_)},
-                {static_cast<float>(p.u0), static_cast<float>(p.v0), static_cast<float>(p.u1), static_cast<float>(p.v1)},
-                layer.camera ? 1.0f : 0.0f,
-                {}};
-            context->UpdateSubresource(constants_.Get(), 0, nullptr, &constants, 0, 0);
-            context->PSSetShaderResources(0, 1, layer.view.GetAddressOf());
-            const D3D11_VIEWPORT full{0, 0, static_cast<float>(width_), static_cast<float>(height_), 0, 1};
-            const D3D11_VIEWPORT half{0, 0, static_cast<float>(width_ / 2), static_cast<float>(height_ / 2), 0, 1};
-            context->OMSetRenderTargets(1, target->luma.GetAddressOf(), nullptr);
-            context->RSSetViewports(1, &full);
-            context->PSSetShader(luma_.Get(), nullptr, 0);
-            context->Draw(4, 0);
-            context->OMSetRenderTargets(1, target->chroma.GetAddressOf(), nullptr);
-            context->RSSetViewports(1, &half);
-            context->PSSetShader(chroma_.Get(), nullptr, 0);
-            context->Draw(4, 0);
-        }
-        ID3D11ShaderResourceView* none = nullptr;
-        context->PSSetShaderResources(0, 1, &none);
+    }
+
+    void end(ID3D11DeviceContext* context) {
+        ID3D11ShaderResourceView* none[3] = {};
+        context->PSSetShaderResources(0, 3, none);
         context->OMSetRenderTargets(0, nullptr, nullptr);
+    }
+
+    // One picture into both planes of the frame.
+    void quad(ID3D11DeviceContext* context, Target& target, const core::Placement& p, const double (&uv)[4], bool opaque,
+              ID3D11PixelShader* luma, ID3D11PixelShader* chroma) {
+        const Constants constants{
+            {static_cast<float>(2 * p.left / width_ - 1), static_cast<float>(1 - 2 * p.top / height_),
+             static_cast<float>(2 * p.right / width_ - 1), static_cast<float>(1 - 2 * p.bottom / height_)},
+            {static_cast<float>(uv[0]), static_cast<float>(uv[1]), static_cast<float>(uv[2]), static_cast<float>(uv[3])},
+            opaque ? 1.0f : 0.0f,
+            {}};
+        context->UpdateSubresource(constants_.Get(), 0, nullptr, &constants, 0, 0);
+        const D3D11_VIEWPORT full{0, 0, static_cast<float>(width_), static_cast<float>(height_), 0, 1};
+        const D3D11_VIEWPORT half{0, 0, static_cast<float>(width_ / 2), static_cast<float>(height_ / 2), 0, 1};
+        context->OMSetRenderTargets(1, target.luma.GetAddressOf(), nullptr);
+        context->RSSetViewports(1, &full);
+        context->PSSetShader(luma, nullptr, 0);
+        context->Draw(4, 0);
+        context->OMSetRenderTargets(1, target.chroma.GetAddressOf(), nullptr);
+        context->RSSetViewports(1, &half);
+        context->PSSetShader(chroma, nullptr, 0);
+        context->Draw(4, 0);
+    }
+
+    // The main capture, already fitted into a whole frame, fitted again into its area.
+    bool draw_screen(ID3D11DeviceContext* context, Target& target, ID3D11Texture2D* screen, const Area& area) {
+        Planes* planes = planes_for(screen);
+        if (!planes) return false;
+        ID3D11ShaderResourceView* views[2] = {planes->luma.Get(), planes->chroma.Get()};
+        context->PSSetShaderResources(1, 2, views);
+        const auto p = core::place(Overlay::Kind::image, area, width_, height_, width_, height_);
+        const double uv[4] = {p.u0, p.v0, p.u1, p.v1};
+        quad(context, target, p, uv, true, screen_luma_.Get(), screen_chroma_.Get());
         return true;
+    }
+
+    void draw_layer(ID3D11DeviceContext* context, Target& target, Layer& layer, const Area& area) {
+        if (layer.camera) {
+            layer.camera->upload(layer.seen, [&](const std::uint8_t* pixels, std::size_t row) {
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                if (FAILED(context->Map(layer.texture.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
+                for (UINT y = 0; y < layer.height; ++y)
+                    std::memcpy(static_cast<std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch,
+                                pixels + y * row, row);
+                context->Unmap(layer.texture.Get(), 0);
+                layer.ready = true;
+                return true;
+            });
+        }
+        if (layer.screen) upload_screen(context, layer);
+        if (!layer.ready) return;
+        const auto p = core::place(layer.overlay.kind, area, width_, height_, layer.width, layer.height);
+        const double* c = layer.crop;
+        const double uv[4] = {c[0] + p.u0 * (c[2] - c[0]), c[1] + p.v0 * (c[3] - c[1]), c[0] + p.u1 * (c[2] - c[0]),
+                              c[1] + p.v1 * (c[3] - c[1])};
+        context->PSSetShaderResources(0, 1, layer.view.GetAddressOf());
+        quad(context, target, p, uv, layer.camera || layer.screen, luma_.Get(), chroma_.Get());
+    }
+
+    // Copies a display's or window's newest frame into the layer's texture.
+    void upload_screen(ID3D11DeviceContext* context, Layer& layer) {
+        auto frame = layer.screen->take();
+        if (!frame) return;
+        try {
+            auto access = frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+            ComPtr<ID3D11Texture2D> surface;
+            winrt::check_hresult(access->GetInterface(IID_PPV_ARGS(&surface)));
+            D3D11_TEXTURE2D_DESC desc;
+            surface->GetDesc(&desc);
+            D3D11_TEXTURE2D_DESC have{};
+            if (layer.texture) layer.texture->GetDesc(&have);
+            if (!layer.texture || have.Width != desc.Width || have.Height != desc.Height) {
+                layer.view.Reset();
+                layer.texture.Reset();
+                layer.ready = false;
+                D3D11_TEXTURE2D_DESC copy = desc;
+                copy.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                copy.MiscFlags = 0;
+                copy.CPUAccessFlags = 0;
+                copy.Usage = D3D11_USAGE_DEFAULT;
+                if (FAILED(device_->CreateTexture2D(&copy, nullptr, &layer.texture)) ||
+                    FAILED(device_->CreateShaderResourceView(layer.texture.Get(), nullptr, &layer.view))) {
+                    layer.texture.Reset();
+                    frame.Close();
+                    return;
+                }
+            }
+            context->CopyResource(layer.texture.Get(), surface.Get());
+            const auto content = frame.ContentSize();
+            const double w = desc.Width, h = desc.Height;
+            double x0 = 0, y0 = 0, x1 = std::min<double>(w, content.Width), y1 = std::min<double>(h, content.Height);
+            if (const auto& r = layer.screen->region()) {
+                x0 = std::min<double>(r->x, x1 - 2);
+                y0 = std::min<double>(r->y, y1 - 2);
+                x1 = std::min<double>(x1, r->x + static_cast<double>(r->width));
+                y1 = std::min<double>(y1, r->y + static_cast<double>(r->height));
+            }
+            layer.width = static_cast<UINT>(std::max(2.0, x1 - x0));
+            layer.height = static_cast<UINT>(std::max(2.0, y1 - y0));
+            layer.crop[0] = x0 / w;
+            layer.crop[1] = y0 / h;
+            layer.crop[2] = x1 / w;
+            layer.crop[3] = y1 / h;
+            layer.ready = true;
+        } catch (...) {
+        }
+        frame.Close();
     }
 
     // Encoder frames come from a fixed pool, so their views are kept.
@@ -533,6 +844,24 @@ private:
         return &targets_.back();
     }
 
+    // The main capture's frames are a fixed set of NV12 textures too.
+    Planes* planes_for(ID3D11Texture2D* screen) {
+        for (auto& planes : planes_)
+            if (planes.texture.Get() == screen) return &planes;
+        if (planes_.size() >= 16) planes_.clear();
+        Planes planes;
+        planes.texture = screen;
+        D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+        view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        view.Texture2D.MipLevels = 1;
+        view.Format = DXGI_FORMAT_R8_UNORM;
+        if (FAILED(device_->CreateShaderResourceView(screen, &view, &planes.luma))) return nullptr;
+        view.Format = DXGI_FORMAT_R8G8_UNORM;
+        if (FAILED(device_->CreateShaderResourceView(screen, &view, &planes.chroma))) return nullptr;
+        planes_.push_back(std::move(planes));
+        return &planes_.back();
+    }
+
     Result create_pipeline() {
         auto compile = [](const char* entry, const char* profile, ComPtr<ID3DBlob>& code) -> Result {
             ComPtr<ID3DBlob> errors;
@@ -544,13 +873,19 @@ private:
             }
             return {};
         };
-        ComPtr<ID3DBlob> vs, luma, chroma;
+        ComPtr<ID3DBlob> vs, luma, chroma, screen_luma, screen_chroma;
         if (auto c = compile("vs", "vs_4_0", vs); !c) return c;
         if (auto c = compile("luma", "ps_4_0", luma); !c) return c;
         if (auto c = compile("chroma", "ps_4_0", chroma); !c) return c;
+        if (auto c = compile("screen_luma", "ps_4_0", screen_luma); !c) return c;
+        if (auto c = compile("screen_chroma", "ps_4_0", screen_chroma); !c) return c;
         HRESULT hr = device_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &vertex_);
         if (SUCCEEDED(hr)) hr = device_->CreatePixelShader(luma->GetBufferPointer(), luma->GetBufferSize(), nullptr, &luma_);
         if (SUCCEEDED(hr)) hr = device_->CreatePixelShader(chroma->GetBufferPointer(), chroma->GetBufferSize(), nullptr, &chroma_);
+        if (SUCCEEDED(hr))
+            hr = device_->CreatePixelShader(screen_luma->GetBufferPointer(), screen_luma->GetBufferSize(), nullptr, &screen_luma_);
+        if (SUCCEEDED(hr))
+            hr = device_->CreatePixelShader(screen_chroma->GetBufferPointer(), screen_chroma->GetBufferSize(), nullptr, &screen_chroma_);
         D3D11_BUFFER_DESC buffer{};
         buffer.ByteWidth = sizeof(Constants);
         buffer.Usage = D3D11_USAGE_DEFAULT;
@@ -582,27 +917,32 @@ private:
     }
 
     ComPtr<ID3D11Device> device_;
+    wgdx::Direct3D11::IDirect3DDevice winrt_device_{nullptr};
     std::uint32_t width_ = 0, height_ = 0;
     ComPtr<ID3D11VertexShader> vertex_;
-    ComPtr<ID3D11PixelShader> luma_, chroma_;
+    ComPtr<ID3D11PixelShader> luma_, chroma_, screen_luma_, screen_chroma_;
     ComPtr<ID3D11Buffer> constants_;
     ComPtr<ID3D11SamplerState> sampler_;
     ComPtr<ID3D11BlendState> blend_;
     ComPtr<ID3D11RasterizerState> raster_;
-    mutable std::mutex mutex_;  // Guards the layer list and each layer's visibility and rectangle.
+    mutable std::mutex mutex_;  // Guards the layer list, each layer's visibility and rectangle, and the screen's.
     std::vector<Layer> layers_;
+    Area screen_area_;
+    bool screen_visible_ = true;
     std::vector<Target> targets_;
+    std::vector<Planes> planes_;
 };
 
 Overlays::Overlays() : impl_(std::make_unique<Impl>()) {}
 Overlays::~Overlays() { impl_->stop(); }
-Result Overlays::start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const std::vector<Overlay>& overlays) {
-    return impl_->start(device, width, height, overlays);
+Result Overlays::start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const Options& options) {
+    return impl_->start(device, width, height, options);
 }
-bool Overlays::draw(ID3D11DeviceContext* context, ID3D11Texture2D* frame, unsigned subresource) {
-    return impl_->draw(context, frame, subresource);
+bool Overlays::draw(ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame, unsigned subresource) {
+    return impl_->draw(context, screen, frame, subresource);
 }
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }
+Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { return impl_->set_screen(visible, area); }
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }
 void Overlays::stop() { impl_->stop(); }
 

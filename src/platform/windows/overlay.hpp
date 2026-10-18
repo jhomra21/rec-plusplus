@@ -15,9 +15,11 @@ struct ID3D11Texture2D;
 
 namespace rec::win {
 
-// Draws image and camera overlays into NV12 frames on the GPU, in place. The recording
-// thread calls draw(); set() may come from any thread. Each camera has a reader thread that
-// only replaces one CPU copy of its newest frame; draw() uploads it when it changed.
+// Composes NV12 frames on the GPU: the main capture in its area, then the image, camera,
+// display and window overlays. The recording thread calls draw(); set() and set_screen()
+// may come from any thread. Each camera has a reader thread that only replaces one CPU copy
+// of its newest frame, and each display or window capture only retains its newest frame;
+// draw() uploads what changed.
 class Overlays {
 public:
     Overlays();
@@ -25,10 +27,14 @@ public:
     Overlays(const Overlays&) = delete;
     Overlays& operator=(const Overlays&) = delete;
 
-    Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const std::vector<Overlay>& overlays);
-    // subresource is the frame's index in a texture array, as IMFDXGIBuffer reports it.
-    bool draw(ID3D11DeviceContext* context, ID3D11Texture2D* frame, unsigned subresource);
+    // Uses options.overlays, screen_area, screen_visible and cursor.
+    Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const Options& options);
+    // Draws into frame, whose index in a texture array is subresource (as IMFDXGIBuffer
+    // reports it). screen is the main capture: an NV12 frame of the same size that can be
+    // sampled per plane.
+    bool draw(ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame, unsigned subresource);
     Result set(std::size_t index, bool visible, const std::optional<Area>& area);
+    Result set_screen(bool visible, const std::optional<Area>& area);
     std::uint64_t camera_frames() const;
     void stop();
 

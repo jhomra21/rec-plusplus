@@ -4,18 +4,24 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 #include "platform/macos/overlay.hpp"
+#include "platform/macos/screen.h"
 #include "core/overlay.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <mutex>
 #include <thread>
 
 namespace rec::mac {
 class CameraFeed;
+class ScreenFeed;
 void receive_camera(CameraFeed* feed, CMSampleBufferRef sample);
+void receive_screen(ScreenFeed* feed, CMSampleBufferRef sample);
 }
 
 @interface RecCameraOutput : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
@@ -29,6 +35,17 @@ void receive_camera(CameraFeed* feed, CMSampleBufferRef sample);
     (void)output;
     (void)connection;
     if (self.feed) rec::mac::receive_camera(self.feed, buffer);
+}
+@end
+
+@interface RecScreenOutput : NSObject <SCStreamOutput>
+@property(nonatomic, assign) rec::mac::ScreenFeed* feed;
+@end
+
+@implementation RecScreenOutput
+- (void)stream:(SCStream*)stream didOutputSampleBuffer:(CMSampleBufferRef)buffer ofType:(SCStreamOutputType)type {
+    (void)stream;
+    if (type == SCStreamOutputTypeScreen && self.feed) rec::mac::receive_screen(self.feed, buffer);
 }
 @end
 
@@ -218,25 +235,148 @@ private:
 
 void receive_camera(CameraFeed* feed, CMSampleBufferRef sample) { feed->receive(CMSampleBufferGetImageBuffer(sample)); }
 
+// The newest frame of a display or window, from its own ScreenCaptureKit stream in BGRA.
+// The callback only retains the newest complete frame.
+class ScreenFeed {
+public:
+    ~ScreenFeed() { stop(); }
+
+    Result open(const Overlay& overlay, bool cursor, std::uint32_t fps) {
+        std::string error;
+        SCShareableContent* content = shareable(error);
+        if (!content) return {error};
+        const bool window = overlay.kind == Overlay::Kind::window;
+        const auto name = window ? std::string("the window") : "display " + std::to_string(overlay.display);
+        SCContentFilter* filter = nil;
+        SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];
+        double width = 0, height = 0;
+        if (window) {
+            SCWindow* found = nil;
+            for (SCWindow* candidate in content.windows)
+                if (candidate.windowID == overlay.window) { found = candidate; break; }
+            if (!found) return {"window not found; run `rec windows`"};
+            if (!found.onScreen) return {"the window is not on screen; show it (not minimized, on this Space), then retry"};
+            const double scale = pixels_per_point(content, found.frame);
+            width = found.frame.size.width * scale;
+            height = found.frame.size.height * scale;
+            filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:found];
+        } else {
+            if (overlay.display == 0 || overlay.display > content.displays.count) return {name + " not found; run `rec devices`"};
+            SCDisplay* display = content.displays[overlay.display - 1];
+            const auto native = native_size(display);
+            width = native.width;
+            height = native.height;
+            if (overlay.region) {
+                const auto& r = *overlay.region;
+                if (r.x + static_cast<std::int64_t>(r.width) > native.width || r.y + static_cast<std::int64_t>(r.height) > native.height)
+                    return {"the region does not fit " + name + " (" + std::to_string(native.width) + "x" +
+                            std::to_string(native.height) + ")"};
+                // The source rectangle is in points; the region is in pixels.
+                const double scale = display.width > 0 ? static_cast<double>(native.width) / display.width : 1.0;
+                config.sourceRect = CGRectMake(r.x / scale, r.y / scale, r.width / scale, r.height / scale);
+                width = r.width;
+                height = r.height;
+            }
+            filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+        }
+        if (width < 2 || height < 2) return {name + " has no usable size"};
+        config.width = static_cast<size_t>(std::lround(width)) & ~static_cast<size_t>(1);
+        config.height = static_cast<size_t>(std::lround(height)) & ~static_cast<size_t>(1);
+        config.pixelFormat = kCVPixelFormatType_32BGRA;
+        config.minimumFrameInterval = CMTimeMake(1, static_cast<int32_t>(std::clamp<std::uint32_t>(fps, 1, 60)));
+        config.queueDepth = 3;
+        config.showsCursor = cursor;
+        config.scalesToFit = YES;
+        config.preservesAspectRatio = YES;
+        receiver_ = [[RecScreenOutput alloc] init];
+        receiver_.feed = this;
+        queue_ = dispatch_queue_create("rec.overlay.screen", DISPATCH_QUEUE_SERIAL);
+        stream_ = [[SCStream alloc] initWithFilter:filter configuration:config delegate:nil];
+        NSError* added = nil;
+        if (![stream_ addStreamOutput:receiver_ type:SCStreamOutputTypeScreen sampleHandlerQueue:queue_ error:&added]) {
+            stream_ = nil;
+            return {message(added, ("could not capture " + name).c_str())};
+        }
+        return {};
+    }
+
+    Result start() {
+        if (auto started = wait_capture(stream_, true); !started) return started;
+        running_ = true;
+        return {};
+    }
+
+    void stop() {
+        if (stream_) {
+            if (running_) wait_capture(stream_, false);
+            [stream_ removeStreamOutput:receiver_ type:SCStreamOutputTypeScreen error:nil];
+            // Let a callback already on the queue finish before the feed goes away.
+            if (queue_) dispatch_sync(queue_, ^{});
+            receiver_.feed = nullptr;
+            stream_ = nil;
+            receiver_ = nil;
+            queue_ = nil;
+            running_ = false;
+        }
+        std::lock_guard lock(mutex_);
+        if (latest_) { CVPixelBufferRelease(latest_); latest_ = nullptr; }
+    }
+
+    void receive(CMSampleBufferRef sample) {
+        CFArrayRef attachments = CMSampleBufferGetSampleAttachmentsArray(sample, false);
+        if (attachments && CFArrayGetCount(attachments) > 0) {
+            NSDictionary* info = (__bridge NSDictionary*)CFArrayGetValueAtIndex(attachments, 0);
+            NSNumber* status = info[SCStreamFrameInfoStatus];
+            if (status && status.integerValue != SCFrameStatusComplete) return;
+        }
+        CVPixelBufferRef pixel = CMSampleBufferGetImageBuffer(sample);
+        if (!pixel) return;
+        CVPixelBufferRetain(pixel);
+        std::lock_guard lock(mutex_);
+        if (latest_) CVPixelBufferRelease(latest_);
+        latest_ = pixel;
+    }
+
+    // Retained; the caller releases it.
+    CVPixelBufferRef latest() {
+        std::lock_guard lock(mutex_);
+        if (latest_) CVPixelBufferRetain(latest_);
+        return latest_;
+    }
+
+private:
+    SCStream* __strong stream_ = nil;
+    RecScreenOutput* __strong receiver_ = nil;
+    dispatch_queue_t queue_ = nullptr;
+    bool running_ = false;
+    std::mutex mutex_;
+    CVPixelBufferRef latest_ = nullptr;
+};
+
+void receive_screen(ScreenFeed* feed, CMSampleBufferRef sample) { feed->receive(sample); }
 class Overlays::Impl {
 public:
     struct Layer {
         Overlay overlay;
         CIImage* __strong image = nil;
         std::unique_ptr<CameraFeed> camera;
+        std::unique_ptr<ScreenFeed> screen;
     };
 
     ~Impl() { stop(); }
 
-    Result start(std::uint32_t width, std::uint32_t height, const std::vector<Overlay>& overlays) {
-        if (auto error = core::check_overlays(overlays); !error.empty()) return {error};
+    Result start(std::uint32_t width, std::uint32_t height, const Options& options) {
+        if (auto error = core::check_overlays(options.overlays); !error.empty()) return {error};
+        if (!core::valid(options.screen_area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
         width_ = width;
         height_ = height;
+        screen_area_ = options.screen_area;
+        screen_visible_ = options.screen_visible;
         // No color management: pixels keep their values, as the capture and the encoder see them.
-        NSDictionary* options = @{kCIContextWorkingColorSpace: [NSNull null], kCIContextOutputColorSpace: [NSNull null],
-                                  kCIContextCacheIntermediates: @NO};
+        NSDictionary* context_options = @{kCIContextWorkingColorSpace: [NSNull null], kCIContextOutputColorSpace: [NSNull null],
+                                          kCIContextCacheIntermediates: @NO};
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
-        context_ = device ? [CIContext contextWithMTLDevice:device options:options] : [CIContext contextWithOptions:options];
+        context_ = device ? [CIContext contextWithMTLDevice:device options:context_options] : [CIContext contextWithOptions:context_options];
         if (!context_) return {"could not set up overlay drawing"};
         NSDictionary* attributes = @{
             (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
@@ -247,10 +387,11 @@ public:
         };
         if (CVPixelBufferPoolCreate(kCFAllocatorDefault, nullptr, (__bridge CFDictionaryRef)attributes, &pool_) != kCVReturnSuccess)
             return {"could not allocate composited frames"};
-        for (const auto& overlay : overlays) {
+        for (const auto& overlay : options.overlays) {
             Layer layer;
             layer.overlay = overlay;
-            if (overlay.kind == Overlay::Kind::image) {
+            switch (overlay.kind) {
+            case Overlay::Kind::image: {
                 NSString* path = [NSString stringWithUTF8String:overlay.source.c_str()];
                 if (path) layer.image = [CIImage imageWithContentsOfURL:[NSURL fileURLWithPath:path]
                                                                 options:@{kCIImageColorSpace: [NSNull null]}];
@@ -258,14 +399,25 @@ public:
                     return {"could not open the image " + overlay.source};
                 if (layer.image.extent.size.width > 8192 || layer.image.extent.size.height > 8192)
                     return {"the image " + overlay.source + " must be at most 8192x8192"};
-            } else {
+                break;
+            }
+            case Overlay::Kind::camera:
                 layer.camera = std::make_unique<CameraFeed>();
                 if (auto opened = layer.camera->open(overlay.source); !opened) return opened;
+                break;
+            case Overlay::Kind::display:
+            case Overlay::Kind::window:
+                layer.screen = std::make_unique<ScreenFeed>();
+                if (auto opened = layer.screen->open(overlay, options.cursor, options.fps); !opened) return opened;
+                break;
             }
             layers_.push_back(std::move(layer));
         }
-        for (auto& layer : layers_)
+        for (auto& layer : layers_) {
             if (layer.camera) layer.camera->start();
+            if (layer.screen)
+                if (auto started = layer.screen->start(); !started) return started;
+        }
         return {};
     }
 
@@ -273,44 +425,42 @@ public:
         struct Job { Layer* layer; Area area; };
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
+        Area screen_area;
+        bool screen_visible = true;
         {
             std::lock_guard lock(mutex_);
             for (auto& layer : layers_)
                 if (layer.overlay.visible) jobs[count++] = {&layer, layer.overlay.area};
+            screen_area = screen_area_;
+            screen_visible = screen_visible_;
         }
-        if (!count) return CVPixelBufferRetain(base);
+        const bool whole = screen_visible && screen_area.x <= 0 && screen_area.y <= 0 && screen_area.width >= 1 && screen_area.height >= 1;
+        if (whole && !count) return CVPixelBufferRetain(base);
         @autoreleasepool {
             CVPixelBufferRef out = nullptr;
             if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool_, &out) != kCVReturnSuccess) return nullptr;
             CVBufferPropagateAttachments(base, out);
-            CIImage* result = [CIImage imageWithCVPixelBuffer:base];
-            const double frame_height = height_;
+            const CGRect frame = CGRectMake(0, 0, width_, height_);
+            CIImage* result = nil;
+            if (whole) {
+                result = [CIImage imageWithCVPixelBuffer:base];
+            } else {
+                result = [[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0]] imageByCroppingToRect:frame];
+                if (screen_visible)
+                    result = [placed([CIImage imageWithCVPixelBuffer:base], Overlay::Kind::image, screen_area) imageByCompositingOverImage:result];
+            }
             for (std::size_t i = 0; i < count; ++i) {
                 Layer& layer = *jobs[i].layer;
                 CIImage* picture = layer.image;
-                if (layer.camera) {
-                    CVPixelBufferRef pixel = layer.camera->latest();
+                if (layer.camera || layer.screen) {
+                    CVPixelBufferRef pixel = layer.camera ? layer.camera->latest() : layer.screen->latest();
                     if (!pixel) continue;
                     picture = [CIImage imageWithCVPixelBuffer:pixel options:@{kCIImageColorSpace: [NSNull null]}];
                     CVPixelBufferRelease(pixel);
                 }
-                const CGRect extent = picture.extent;
-                const double pw = extent.size.width, ph = extent.size.height;
-                const auto p = core::place(layer.overlay.kind, jobs[i].area, width_, height_,
-                                           static_cast<std::uint32_t>(pw), static_cast<std::uint32_t>(ph));
-                // Core Image puts the origin at the bottom left.
-                const CGRect shown = CGRectMake(extent.origin.x + p.u0 * pw, extent.origin.y + (1 - p.v1) * ph,
-                                                (p.u1 - p.u0) * pw, (p.v1 - p.v0) * ph);
-                const CGRect target = CGRectMake(p.left, frame_height - p.bottom, p.right - p.left, p.bottom - p.top);
-                CGAffineTransform move = CGAffineTransformMakeTranslation(-shown.origin.x, -shown.origin.y);
-                move = CGAffineTransformConcat(move, CGAffineTransformMakeScale(target.size.width / shown.size.width,
-                                                                                target.size.height / shown.size.height));
-                move = CGAffineTransformConcat(move, CGAffineTransformMakeTranslation(target.origin.x, target.origin.y));
-                CIImage* placed = [[[picture imageByCroppingToRect:shown] imageByApplyingTransform:move highQualityDownsample:YES]
-                    imageByCroppingToRect:target];
-                result = [placed imageByCompositingOverImage:result];
+                result = [placed(picture, layer.overlay.kind, jobs[i].area) imageByCompositingOverImage:result];
             }
-            [context_ render:result toCVPixelBuffer:out bounds:CGRectMake(0, 0, width_, height_) colorSpace:nil];
+            [context_ render:result toCVPixelBuffer:out bounds:frame colorSpace:nil];
             return out;
         }
     }
@@ -326,6 +476,14 @@ public:
         return {};
     }
 
+    Result set_screen(bool visible, const std::optional<Area>& area) {
+        if (area && !core::valid(*area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
+        std::lock_guard lock(mutex_);
+        if (area) screen_area_ = *area;
+        screen_visible_ = visible;
+        return {};
+    }
+
     std::uint64_t camera_frames() const {
         std::lock_guard lock(mutex_);
         std::uint64_t total = 0;
@@ -336,28 +494,50 @@ public:
 
     void stop() {
         std::lock_guard lock(mutex_);
-        for (auto& layer : layers_)
+        for (auto& layer : layers_) {
             if (layer.camera) layer.camera->stop();
+            if (layer.screen) layer.screen->stop();
+        }
         layers_.clear();
         if (pool_) { CVPixelBufferPoolRelease(pool_); pool_ = nullptr; }
         context_ = nil;
     }
 
 private:
+    // A picture scaled and cropped into its area, as core::place lays it out.
+    CIImage* placed(CIImage* picture, Overlay::Kind kind, const Area& area) const {
+        const CGRect extent = picture.extent;
+        const double pw = extent.size.width, ph = extent.size.height;
+        const auto p = core::place(kind, area, width_, height_, static_cast<std::uint32_t>(pw), static_cast<std::uint32_t>(ph));
+        // Core Image puts the origin at the bottom left.
+        const CGRect shown = CGRectMake(extent.origin.x + p.u0 * pw, extent.origin.y + (1 - p.v1) * ph,
+                                        (p.u1 - p.u0) * pw, (p.v1 - p.v0) * ph);
+        const CGRect target = CGRectMake(p.left, height_ - p.bottom, p.right - p.left, p.bottom - p.top);
+        CGAffineTransform move = CGAffineTransformMakeTranslation(-shown.origin.x, -shown.origin.y);
+        move = CGAffineTransformConcat(move, CGAffineTransformMakeScale(target.size.width / shown.size.width,
+                                                                        target.size.height / shown.size.height));
+        move = CGAffineTransformConcat(move, CGAffineTransformMakeTranslation(target.origin.x, target.origin.y));
+        return [[[picture imageByCroppingToRect:shown] imageByApplyingTransform:move highQualityDownsample:YES]
+            imageByCroppingToRect:target];
+    }
+
     std::uint32_t width_ = 0, height_ = 0;
     CIContext* __strong context_ = nil;
     CVPixelBufferPoolRef pool_ = nullptr;
-    mutable std::mutex mutex_;  // Guards the layer list and each layer's visibility and area.
+    mutable std::mutex mutex_;  // Guards the layer list, each layer's visibility and area, and the screen's.
     std::vector<Layer> layers_;
+    Area screen_area_;
+    bool screen_visible_ = true;
 };
 
 Overlays::Overlays() : impl_(std::make_unique<Impl>()) {}
 Overlays::~Overlays() = default;
-Result Overlays::start(std::uint32_t width, std::uint32_t height, const std::vector<Overlay>& overlays) {
-    return impl_->start(width, height, overlays);
+Result Overlays::start(std::uint32_t width, std::uint32_t height, const Options& options) {
+    return impl_->start(width, height, options);
 }
 CVPixelBufferRef Overlays::compose(CVPixelBufferRef base) { return impl_->compose(base); }
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }
+Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { return impl_->set_screen(visible, area); }
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }
 void Overlays::stop() { impl_->stop(); }
 

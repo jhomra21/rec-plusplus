@@ -35,6 +35,7 @@
 #include "core/overlay.hpp"
 #include "core/pause.hpp"
 #include "core/sync.hpp"
+#include "platform/windows/displays.hpp"
 #include "platform/windows/overlay.hpp"
 #include "platform/windows/stream.hpp"
 
@@ -57,6 +58,8 @@ namespace rec {
 namespace {
 using Microsoft::WRL::ComPtr;
 using core::kMixRate;
+using win::Monitor;
+using win::monitors;
 namespace wgc = winrt::Windows::Graphics::Capture;
 namespace wgdx = winrt::Windows::Graphics::DirectX;
 
@@ -125,12 +128,6 @@ Size output_size(const Options& options, std::uint32_t native_w, std::uint32_t n
             std::max(2u, static_cast<std::uint32_t>(native_h * factor) & ~1u)};
 }
 
-struct Monitor {
-    HMONITOR handle = nullptr;
-    std::string device;
-    std::uint32_t width = 0, height = 0;
-    bool primary = false;
-};
 
 std::string process_name(HWND window) {
     DWORD pid = 0;
@@ -179,32 +176,6 @@ RECT fit(LONG source_w, LONG source_h, std::uint32_t width, std::uint32_t height
     return {x, y, x + w, y + h};
 }
 
-// Primary display first, so display 1 is the main display as on macOS.
-std::vector<Monitor> monitors() {
-    std::vector<Monitor> list;
-    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR handle, HDC, LPRECT, LPARAM data) -> BOOL {
-        MONITORINFOEXW info{};
-        info.cbSize = sizeof info;
-        if (!GetMonitorInfoW(handle, &info)) return TRUE;
-        DEVMODEW mode{};
-        mode.dmSize = sizeof mode;
-        Monitor monitor;
-        monitor.handle = handle;
-        monitor.device = utf8(info.szDevice);
-        monitor.primary = info.dwFlags & MONITORINFOF_PRIMARY;
-        if (EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode)) {
-            monitor.width = mode.dmPelsWidth;
-            monitor.height = mode.dmPelsHeight;
-        } else {
-            monitor.width = static_cast<std::uint32_t>(info.rcMonitor.right - info.rcMonitor.left);
-            monitor.height = static_cast<std::uint32_t>(info.rcMonitor.bottom - info.rcMonitor.top);
-        }
-        reinterpret_cast<std::vector<Monitor>*>(data)->push_back(monitor);
-        return TRUE;
-    }, reinterpret_cast<LPARAM>(&list));
-    std::stable_partition(list.begin(), list.end(), [](const Monitor& m) { return m.primary; });
-    return list;
-}
 
 ComPtr<IMMDeviceEnumerator> device_enumerator() {
     ComPtr<IMMDeviceEnumerator> enumerator;
@@ -723,18 +694,20 @@ public:
             pattern_[0] = pattern_frame(size_, false);
             pattern_[1] = pattern_frame(size_, true);
             if (!pattern_[0] || !pattern_[1]) { stop(); return {"synthetic frame allocation failed"}; }
-            if (!options_.overlays.empty() || options_.preview_width)
+            if (layered() || options_.preview_width)
                 if (auto created = create_pattern_device(); !created) { stop(); return created; }
             captured_.store(1);
         } else {
             if (auto opened = open_audio(); !opened) { stop(); return opened; }
             if (auto started = start_capture(); !started) { stop(); return started; }
         }
-        if (!options_.overlays.empty()) {
+        // With a GPU the compositor always runs, so the screen can move and layers can show
+        // while recording. A driver that cannot draw into NV12 still records a plain capture.
+        if (device_) {
             overlays_ = std::make_unique<win::Overlays>();
-            if (auto started = overlays_->start(device_.Get(), size_.width, size_.height, options_.overlays); !started) {
-                stop();
-                return started;
+            if (auto started = overlays_->start(device_.Get(), size_.width, size_.height, options_); !started) {
+                overlays_.reset();
+                if (layered()) { stop(); return started; }
             }
         }
         if (options_.preview_width && device_) {
@@ -910,6 +883,10 @@ public:
         if (!overlays_) return {"no overlay " + std::to_string(index + 1)};
         return overlays_->set(index, visible, area);
     }
+    Result set_screen(bool visible, const std::optional<Area>& area) {
+        if (!overlays_) return {"this recording draws the capture as is; start it with a screen area or an overlay to change it"};
+        return overlays_->set_screen(visible, area);
+    }
     Result set_volume(AudioInput input, double gain_db, bool muted) {
         if (!(gain_db >= -60 && gain_db <= 24)) return {"volume must be between -60 and 24 dB"};
         auto& source = audio_[input == AudioInput::system ? kSystem : kMic];
@@ -933,6 +910,12 @@ public:
     }
 
 private:
+    // Frames need composing: overlays, or the main capture moved or hidden.
+    bool layered() const {
+        const auto& a = options_.screen_area;
+        return !options_.overlays.empty() || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 || a.height < 1;
+    }
+
     void fail(std::string text) {
         {
             std::lock_guard lock(mutex_);
@@ -991,7 +974,8 @@ private:
         desc.Format = DXGI_FORMAT_NV12;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        // Sampled per plane when the compositor draws the frame smaller.
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         for (int i = 0; i < 2; ++i) {
             BYTE* data = nullptr;
             if (FAILED(pattern_[i]->Lock(&data, nullptr, nullptr))) return {"synthetic frame allocation failed"};
@@ -1146,7 +1130,7 @@ private:
         desc.Format = DXGI_FORMAT_NV12;
         desc.SampleDesc.Count = 1;
         desc.Usage = D3D11_USAGE_DEFAULT;
-        desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC view{};
         view.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
         for (auto& slot : slots_) {
@@ -1340,9 +1324,15 @@ private:
         return {};
     }
 
+    // The frame as encoded: the slot composed with the layers, or the slot as is.
+    bool compose(int frame, ID3D11Texture2D* target, unsigned subresource) {
+        if (overlays_) return overlays_->draw(context_.Get(), slots_[frame].texture.Get(), target, subresource);
+        context_->CopySubresourceRegion(target, subresource, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
+        return true;
+    }
+
     void draw_preview(int frame) {
-        context_->CopySubresourceRegion(composed_.Get(), 0, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
-        if (overlays_ && !overlays_->draw(context_.Get(), composed_.Get(), 0)) {
+        if (!compose(frame, composed_.Get(), 0)) {
             fail("could not draw the overlays");
             return;
         }
@@ -1372,8 +1362,7 @@ private:
                 fail("could not map an encoder frame");
                 return Write::failed;
             }
-            context_->CopySubresourceRegion(target.Get(), subresource, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
-            if (overlays_ && !overlays_->draw(context_.Get(), target.Get(), subresource)) {
+            if (!compose(frame, target.Get(), subresource)) {
                 fail("could not draw the overlays");
                 return Write::failed;
             }
@@ -1872,6 +1861,7 @@ Result Recorder::save_replay(const std::string& path, double* seconds) {
     if (seconds) *seconds = saved;
     return result;
 }
+Result Recorder::set_screen(bool visible, std::optional<Area> area) { return impl_->capture.set_screen(visible, area); }
 Result Recorder::set_overlay(std::size_t index, bool visible, std::optional<Area> area) {
     return impl_->capture.set_overlay(index, visible, area);
 }

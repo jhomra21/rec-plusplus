@@ -27,7 +27,7 @@ within() {
   awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v != "" && v + 0 >= lo && v + 0 <= hi) }' \
     || { echo "$1 is outside [$2, $3]" >&2; exit 1; }
 }
-# color KEY FILE green|red|white: a sample_N=R,G,B probe field, with room for encoding error.
+# color KEY FILE green|red|white|black: a sample_N=R,G,B probe field, with room for encoding error.
 color() {
   awk -F= -v key="$1" -v want="$3" '$1 == key {
       split($2, c, ",")
@@ -35,6 +35,7 @@ color() {
       if (want == "green") ok = c[2] > 120 && c[2] > c[1] + 60 && c[2] > c[3] + 60
       if (want == "red") ok = c[1] > 170 && c[1] > c[2] + 100 && c[1] > c[3] + 100
       if (want == "white") ok = c[1] > 190 && c[2] > 190 && c[3] > 190
+      if (want == "black") ok = c[1] < 40 && c[2] < 40 && c[3] < 40
       print key "=" $2
     }
     END { exit !(found && ok) }' "$2" || { echo "$1 is not $3" >&2; exit 1; }
@@ -141,6 +142,27 @@ else
   color sample_3 "$artifacts/overlay-camera.probe" white
   "$rec" probe "$artifacts/overlay.mov" --sample 150,100,250,100 | tee "$artifacts/overlay-image.probe"
   for second in 0 1 2 3; do color "sample_$second" "$artifacts/overlay-image.probe" red; done
+  # Scene layers: the pattern in the bottom middle on black and the test camera top left.
+  # Mid-recording "hide 1" hides the camera and "move screen" moves the pattern to the bottom
+  # left. Display and window layers need Screen Recording permission, which CI runners lack.
+  expect_failure 'the screen area must be' record --test-pattern --screen-area 0.5,0.5,0.6,0.5
+  expect_failure 'needs a display number' record --test-pattern --add-display main
+  { sleep 2.5; echo 'hide 1'; echo 'move screen 0,0.5,0.5,0.5'; sleep 5; } |
+    "$rec" record --test-pattern -r 1080p -f 30 -t 5 --screen-area 0.25,0.5,0.5,0.5 --camera test@0,0,0.5,0.5 \
+      -o "$artifacts/scene.mov" | tee "$artifacts/scene.record.log"
+  grep -q 'Hiding camera 1' "$artifacts/scene.record.log"
+  grep -q 'Moved the screen to 0,0.5,0.5,0.5' "$artifacts/scene.record.log"
+  grep -q 'written 150, dropped 0' "$artifacts/scene.record.log"
+  "$rec" probe "$artifacts/scene.mov" --sample 280,170,400,200 | tee "$artifacts/scene-camera.probe"
+  "$rec" probe "$artifacts/scene.mov" --sample 1000,700,400,250 | tee "$artifacts/scene-screen-before.probe"
+  "$rec" probe "$artifacts/scene.mov" --sample 100,700,300,250 | tee "$artifacts/scene-screen-after.probe"
+  color sample_0 "$artifacts/scene-camera.probe" green
+  color sample_1 "$artifacts/scene-camera.probe" green
+  color sample_4 "$artifacts/scene-camera.probe" black
+  color sample_0 "$artifacts/scene-screen-before.probe" white
+  color sample_4 "$artifacts/scene-screen-before.probe" black
+  color sample_0 "$artifacts/scene-screen-after.probe" black
+  color sample_4 "$artifacts/scene-screen-after.probe" white
   # Volume and mute act on the program audio. A lone tone, its only track, starts muted and is
   # unmuted 3.5 s in: no beep with the first flash. Mixed with the mic, the tone is turned down
   # 6 dB, then muted 2.5 s in: the mix has no beeps after that.

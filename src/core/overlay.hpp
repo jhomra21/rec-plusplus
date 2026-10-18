@@ -11,7 +11,8 @@
 
 namespace rec::core {
 
-inline constexpr std::size_t kMaxOverlays = 4;
+// With the main capture, 16 layers. Each display or window layer is its own capture.
+inline constexpr std::size_t kMaxOverlays = 15;
 
 // Where a picture lands in the frame: destination edges in output pixels and the part of
 // the picture shown, in 0-1 texture coordinates.
@@ -20,7 +21,7 @@ struct Placement {
     double u0 = 0, v0 = 0, u1 = 1, v1 = 1;
 };
 
-// An image keeps its aspect ratio inside the rectangle; a camera is cropped to fill it.
+// A camera is cropped to fill the rectangle; any other picture keeps its aspect ratio inside it.
 inline Placement place(Overlay::Kind kind, const Area& area, std::uint32_t frame_width, std::uint32_t frame_height,
                        std::uint32_t picture_width, std::uint32_t picture_height) {
     const double x = area.x * frame_width, y = area.y * frame_height;
@@ -58,8 +59,25 @@ inline std::string check_area(std::size_t index, const Area& a) {
 inline std::string check_overlays(const std::vector<Overlay>& overlays) {
     if (overlays.size() > kMaxOverlays) return "at most " + std::to_string(kMaxOverlays) + " overlays";
     for (std::size_t i = 0; i < overlays.size(); ++i) {
-        if (overlays[i].source.empty())
-            return "overlay " + std::to_string(i + 1) + (overlays[i].kind == Overlay::Kind::camera ? " needs a camera" : " needs an image file");
+        const auto& o = overlays[i];
+        const auto name = "overlay " + std::to_string(i + 1);
+        switch (o.kind) {
+        case Overlay::Kind::image:
+            if (o.source.empty()) return name + " needs an image file";
+            break;
+        case Overlay::Kind::camera:
+            if (o.source.empty()) return name + " needs a camera";
+            break;
+        case Overlay::Kind::display:
+            if (!o.display) return name + " needs a display number";
+            if (o.region && (o.region->x < 0 || o.region->y < 0 || o.region->width < 2 || o.region->height < 2))
+                return name + ": the region must be at least 2x2 pixels inside the display";
+            break;
+        case Overlay::Kind::window:
+            if (!o.window) return name + " needs a window";
+            if (o.region) return name + ": a region applies to a display";
+            break;
+        }
         if (auto error = check_area(i, overlays[i].area); !error.empty()) return error;
     }
     return {};
