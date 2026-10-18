@@ -53,8 +53,10 @@ public:
         if (auto made = create_video(); !made) { release(); return made; }
         if (auto made = create_audio(); !made) { release(); return made; }
         ring_.assign(kAudioFrames * 2, 0.0f);
-        if (settings_.replay_seconds)
+        if (settings_.replay_seconds) {
             replay_ = std::make_unique<core::ReplayBuffer>(settings_.replay_seconds, settings_.width, settings_.height, settings_.fps);
+            replay_->set_priming(static_cast<std::uint32_t>(leading_));
+        }
         core::StreamInfo info{settings_.width, settings_.height, settings_.fps, settings_.video_kbps, settings_.audio_kbps};
         if (!settings_.url.empty())
             if (auto error = publisher_.open(settings_.url, info); !error.empty()) { release(); return {error}; }

@@ -269,10 +269,16 @@ double ReplayBuffer::seconds() const {
     return video_.size() < 2 ? 0.0 : (video_.back().ms - video_.front().ms) / 1000.0;
 }
 
+void ReplayBuffer::set_priming(std::uint32_t frames) {
+    std::lock_guard lock(mutex_);
+    priming_ = frames;
+}
+
 std::string ReplayBuffer::save(const std::string& path, double& seconds) const {
     seconds = 0;
     std::deque<Packet> video, audio;
     Bytes avc, aac;
+    std::uint32_t priming = 0;
     {
         std::lock_guard lock(mutex_);
         if (video_.size() < 2 || avc_config_.empty()) return "the replay buffer is still empty";
@@ -280,6 +286,7 @@ std::string ReplayBuffer::save(const std::string& path, double& seconds) const {
         audio = audio_;
         avc = avc_config_;
         aac = aac_config_;
+        priming = priming_;
     }
     if (aac.empty()) audio.clear();
     const std::uint32_t start = video.front().ms;
@@ -297,8 +304,13 @@ std::string ReplayBuffer::save(const std::string& path, double& seconds) const {
         a.deltas.push_back(kAacFrame);
     }
     if (!audio.empty()) {
-        if (audio.front().ms >= start) a.delay_ms = audio.front().ms - start;
-        else a.skip = (start - audio.front().ms) * kAudioRate / 1000;
+        // Skipping the priming too drops that much real audio, as an empty edit, but keeps
+        // every player's timing the same.
+        const auto priming_ms = (priming * 1000 + kAudioRate / 2) / kAudioRate;
+        a.skip = priming;
+        a.delay_ms = priming_ms;
+        if (audio.front().ms >= start) a.delay_ms += audio.front().ms - start;
+        else a.skip += (start - audio.front().ms) * kAudioRate / 1000;
     }
 
     const std::filesystem::path target(reinterpret_cast<const char8_t*>(path.c_str()));
