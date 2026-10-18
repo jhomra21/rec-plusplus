@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rec/rec.hpp"
+#include "core/preview.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -39,4 +40,22 @@ private:
 // Media Foundation video capture devices. The caller has started Media Foundation and COM.
 std::vector<Camera> cameras(std::string& error);
 
+// Scales NV12 frames into small BGRA pictures on the GPU for the preview. The recording
+// thread calls render() with each frame it wants shown, after the overlays are drawn.
+class FramePreview {
+public:
+    FramePreview();
+    ~FramePreview();
+    FramePreview(const FramePreview&) = delete;
+    FramePreview& operator=(const FramePreview&) = delete;
+
+    // width and height are the frames'; size is the preview's.
+    Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, core::PreviewSize size);
+    // Publishes the picture rendered on the previous call to out.
+    void render(ID3D11DeviceContext* context, ID3D11Texture2D* frame, unsigned subresource, core::PreviewBuffer& out);
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
 } // namespace rec::win

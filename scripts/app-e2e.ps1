@@ -9,7 +9,8 @@
 #   3. Go live to a local MediaMTX server while recording; the server's copy decodes.
 #   4. Closing the window while recording keeps recording; the next stop saves the movie.
 #   5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
-#   6. A camera and an image are drawn; the scene moves the camera while recording.
+#   6. A camera and an image are drawn; the scene moves the camera while recording. The
+#      preview shows the same picture.
 #   7. Volume and mute change the mix while recording, from the window and the menu.
 #   8. Settings persist without the stream key, which Credential Manager holds.
 #   9. Quit Rec from the notification-area menu while recording saves the movie, then exits.
@@ -32,6 +33,11 @@ public static class AppWindow {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+  [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern int MapWindowPoints(IntPtr from, IntPtr to, ref RECT r, uint count);
+  [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   public static Accessibility.IAccessible Of(IntPtr h) {
     Guid iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71"); object o;
     Marshal.ThrowExceptionForHR(AccessibleObjectFromWindow(h, 0xFFFFFFFC, ref iid, out o));
@@ -41,8 +47,10 @@ public static class AppWindow {
 }
 '@
 
+# Window sizes in pixels, as the window draws itself.
+[AppWindow]::SetProcessDPIAware() | Out-Null
 # MSAA roles.
-$PushButton = 43; $CheckButton = 44; $Text = 42; $ComboBox = 46; $Slider = 51
+$PushButton = 43; $CheckButton = 44; $Text = 42; $ComboBox = 46; $Slider = 51; $Client = 10
 $appHome = Join-Path $Artifacts 'app-home'
 $folder = Join-Path $appHome 'recordings'
 $server = 'rtmp://127.0.0.1:1935/live'
@@ -76,9 +84,16 @@ function Find($ui, [string]$name, [int]$role) {
     throw "no control named '$name' with role $role"
 }
 function Press($ui, [string]$name) { (Find $ui $name $PushButton).Item.accDoDefaultAction(0) }
+# The click arrives as a posted message, so a press sent right after it could be handled
+# first; wait until the box shows the new state.
 function Set-Check($ui, [string]$name, [bool]$on) {
     $box = (Find $ui $name $CheckButton).Item
     if ((($box.accState(0) -band 0x10) -ne 0) -ne $on) { $box.accDoDefaultAction(0) }
+    $deadline = (Get-Date).AddSeconds(5)
+    while ((($box.accState(0) -band 0x10) -ne 0) -ne $on) {
+        if ((Get-Date) -gt $deadline) { throw "'$name' did not change" }
+        Start-Sleep -Milliseconds 50
+    }
     Start-Sleep -Milliseconds 100
 }
 function Set-Field($ui, [string]$name, [string]$value) {
@@ -102,6 +117,36 @@ function Wait-Status($ui, [string]$prefix, [int]$seconds = 20) {
         Start-Sleep -Milliseconds 100
     }
     throw "status is '$(Text-Of $ui 100)' ($(Text-Of $ui 101)), expected '$prefix...'"
+}
+# The preview as the window shows it (the window's composed picture, cropped), saved as a PNG.
+function Snapshot-Preview($ui, [string]$path) {
+    $handle = (Find $ui 'Preview' $Client).Handle
+    $client = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($ui.Window, [ref]$client) | Out-Null
+    $window = New-Object System.Drawing.Bitmap $client.Right, $client.Bottom
+    $graphics = [System.Drawing.Graphics]::FromImage($window)
+    $dc = $graphics.GetHdc()
+    [AppWindow]::PrintWindow($ui.Window, $dc, 3) | Out-Null  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+    $graphics.ReleaseHdc($dc)
+    $graphics.Dispose()
+    $rect = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($handle, [ref]$rect) | Out-Null
+    [AppWindow]::MapWindowPoints($handle, $ui.Window, [ref]$rect, 2) | Out-Null
+    $bitmap = $window.Clone((New-Object System.Drawing.Rectangle $rect.Left, $rect.Top, ($rect.Right - $rect.Left), ($rect.Bottom - $rect.Top)), $window.PixelFormat)
+    $window.Dispose()
+    $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    return $bitmap
+}
+# The mean color of part of a picture, given in fractions of its size, as Expect-Color reads it.
+function Picture-Color($bitmap, [double]$x, [double]$y, [double]$w, [double]$h) {
+    $r = 0; $g = 0; $b = 0
+    foreach ($i in 0..9) {
+        foreach ($j in 0..9) {
+            $p = $bitmap.GetPixel([int](($x + $w * ($i + 0.5) / 10) * $bitmap.Width), [int](($y + $h * ($j + 0.5) / 10) * $bitmap.Height))
+            $r += $p.R; $g += $p.G; $b += $p.B
+        }
+    }
+    return @{ color = "$([int]($r / 100)),$([int]($g / 100)),$([int]($b / 100))" }
 }
 function Newest-Movie {
     $file = Get-ChildItem $folder -Filter '*.mp4' | Sort-Object LastWriteTime | Select-Object -Last 1
@@ -251,13 +296,25 @@ try {
     # then hidden from the notification-area menu, all during one recording. The image is a
     # transparent 1080p PNG with a red block in its top-left corner.
     Set-Check $ui 'Keep the last' $false
+    # Step 4 hid the window; the preview draws only while it shows.
+    [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1002, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Show Rec"
     Set-Check $ui 'Camera' $true
     Set-Check $ui 'Image overlay' $true
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
-    Start-Sleep -Milliseconds 2500
+    Start-Sleep -Milliseconds 2000
+    # The preview: the camera in the bottom-right corner and the image's red block top left.
+    $picture = Snapshot-Preview $ui (Join-Path $Artifacts 'app-preview-corner.png')
+    Expect-Color (Picture-Color $picture 0.76 0.75 0.18 0.18) 'color' 'green'
+    Expect-Color (Picture-Color $picture 0.02 0.03 0.15 0.15) 'color' 'red'
+    $picture.Dispose()
+    Start-Sleep -Milliseconds 500
     Choose-Last $ui 'Scene'  # Camera only
-    Start-Sleep -Milliseconds 2500
+    Start-Sleep -Milliseconds 1500
+    $picture = Snapshot-Preview $ui (Join-Path $Artifacts 'app-preview-camera.png')
+    Expect-Color (Picture-Color $picture 0.35 0.4 0.3 0.2) 'color' 'green'
+    $picture.Dispose()
+    Start-Sleep -Milliseconds 1000
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1011, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Screen only"
     Start-Sleep -Milliseconds 2500
     Press $ui 'Stop Recording'
@@ -273,7 +330,7 @@ try {
     Expect-Color $center 'sample_4' 'green'
     Expect-Color $corner 'sample_6' 'white'
     foreach ($second in 0..6) { Expect-Color $logo "sample_$second" 'red' }
-    Write-Host "6. camera and image: $($corner['frames']) frames, corner, full frame, hidden"
+    Write-Host "6. camera and image: $($corner['frames']) frames, corner, full frame, hidden; the preview matched"
 
     # 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
     # unmuted from the notification-area menu 4.5 s in. The mix loses the beeps at 3 and 4 s.

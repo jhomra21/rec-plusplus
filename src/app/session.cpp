@@ -265,6 +265,7 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
     }
     o.stream_kbps = s.stream_kbps;
     if (s.replay) o.replay_seconds = s.replay_seconds;
+    o.preview_width = kPreviewWidth;
     std::optional<std::size_t> camera;
     if (s.camera) {
         camera = o.overlays.size();
@@ -313,6 +314,7 @@ void Session::run(std::unique_ptr<Recorder> recorder) {
             state_ = State::idle;
         } else {
             recorder_ = recorder.get();
+            recorder_->show_preview(preview_shown_);
             state_ = State::recording;
         }
     }
@@ -389,6 +391,17 @@ Result Session::set_volume(AudioInput input, int volume, bool muted) {
     std::lock_guard lock(mutex_);
     if ((state_ != State::recording && state_ != State::paused) || stop_requested_) return {"not recording"};
     return recorder_->set_volume(input, std::clamp(volume, kVolumeMin, kVolumeMax), muted);
+}
+
+bool Session::preview(PreviewFrame& frame) {
+    std::lock_guard lock(mutex_);
+    return recorder_ && recorder_->preview(frame);
+}
+
+void Session::show_preview(bool on) {
+    std::lock_guard lock(mutex_);
+    preview_shown_ = on;
+    if (recorder_) recorder_->show_preview(on);
 }
 
 Status Session::status() {

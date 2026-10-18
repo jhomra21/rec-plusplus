@@ -84,6 +84,8 @@ struct Options {
     // 0 = off. Without stream_url the stream encoders run for the replay alone.
     std::uint32_t replay_seconds = 0;
     std::vector<Overlay> overlays; // At most 4. Without any, frames are not composited.
+    // Make preview() frames up to this many pixels wide, in the output's shape; 0 = no preview.
+    std::uint32_t preview_width = 0;
 };
 
 struct Display {
@@ -159,6 +161,14 @@ struct Probe {
     std::vector<Color> samples;
 };
 
+// A small copy of the frame as it is encoded, overlays included, for showing while recording.
+struct PreviewFrame {
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::vector<std::uint8_t> pixels; // BGRA, top row first, width * 4 bytes a row.
+    std::uint64_t number = 0; // Grows with each new frame; 0 before the first.
+};
+
 struct Result {
     std::string error;
     explicit operator bool() const noexcept { return error.empty(); }
@@ -201,6 +211,12 @@ public:
     // Changes a source's volume (-60 to 24 dB) and mute in the program audio while
     // recording, ramped over one audio buffer.
     Result set_volume(AudioInput input, double gain_db, bool muted);
+    // Copies the newest preview frame (at most 30 a second, with Options::preview_width set)
+    // into frame when it is newer than frame.number. Returns whether frame changed.
+    bool preview(PreviewFrame& frame) const;
+    // Stops or resumes making preview frames, for example while the preview is hidden. On
+    // at start.
+    void show_preview(bool on) noexcept;
 
 private:
     class Impl;

@@ -38,7 +38,7 @@ using rec::app::Status;
 
 constexpr UINT kSessionChanged = WM_APP + 1;
 constexpr UINT kTrayMessage = WM_APP + 2;
-constexpr UINT_PTR kPollTimer = 1;
+constexpr UINT_PTR kPollTimer = 1, kPreviewTimer = 2;
 constexpr int kHotkey = 1, kReplayHotkey = 2;
 constexpr UINT kTrayId = 1;
 // Sent as the WM_COMMAND code for the Source list once its selection change is handled.
@@ -54,7 +54,7 @@ enum Control : int {
     kReplayHeader, kReplay, kReplayLength,
     kCameraHeader, kCamera, kCameraDevice, kPositionLabel, kCorner, kSizeLabel, kCameraSize, kSceneLabel, kScene,
     kImage, kImageFile, kBrowseImage,
-    kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast,
+    kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast, kPreview,
 };
 
 enum Command : UINT {
@@ -354,6 +354,12 @@ public:
         wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
         wc.lpszClassName = L"RecWindow";
         RegisterClassExW(&wc);
+        WNDCLASSEXW preview{sizeof preview};
+        preview.lpfnWndProc = &App::preview_procedure;
+        preview.hInstance = instance;
+        preview.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        preview.lpszClassName = L"RecPreview";
+        RegisterClassExW(&preview);
         window_ = CreateWindowExW(WS_EX_CONTROLPARENT, wc.lpszClassName, L"Rec",
                                   WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 480, 760, nullptr, nullptr, instance, this);
@@ -377,6 +383,62 @@ private:
         }
         auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
         return app ? app->handle(message, w, l) : DefWindowProcW(window, message, w, l);
+    }
+
+    static LRESULT CALLBACK preview_procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
+        auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(GetParent(window), GWLP_USERDATA));
+        switch (message) {
+        case WM_ERASEBKGND:
+            return 1;
+        case WM_PAINT: {
+            PAINTSTRUCT paint;
+            HDC dc = BeginPaint(window, &paint);
+            if (app) app->paint_preview(window, dc);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_PRINTCLIENT:
+            if (app) app->paint_preview(window, reinterpret_cast<HDC>(w));
+            return 0;
+        default:
+            return DefWindowProcW(window, message, w, l);
+        }
+    }
+
+    // The newest frame in the output's shape, centered on dark gray.
+    void paint_preview(HWND window, HDC dc) {
+        RECT area;
+        GetClientRect(window, &area);
+        const int saved = SaveDC(dc);
+        if (frame_.number) {
+            const int width = area.right, height = area.bottom;
+            int w = width, h = static_cast<int>(static_cast<long long>(width) * frame_.height / frame_.width);
+            if (h > height) {
+                h = height;
+                w = static_cast<int>(static_cast<long long>(height) * frame_.width / frame_.height);
+            }
+            const int x = (width - w) / 2, y = (height - h) / 2;
+            BITMAPINFO info{};
+            info.bmiHeader.biSize = sizeof info.bmiHeader;
+            info.bmiHeader.biWidth = static_cast<LONG>(frame_.width);
+            info.bmiHeader.biHeight = -static_cast<LONG>(frame_.height);
+            info.bmiHeader.biPlanes = 1;
+            info.bmiHeader.biBitCount = 32;
+            info.bmiHeader.biCompression = BI_RGB;
+            SetStretchBltMode(dc, HALFTONE);
+            SetBrushOrgEx(dc, 0, 0, nullptr);
+            StretchDIBits(dc, x, y, w, h, 0, 0, static_cast<int>(frame_.width), static_cast<int>(frame_.height),
+                          frame_.pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+            ExcludeClipRect(dc, x, y, x + w, y + h);
+        }
+        FillRect(dc, &area, preview_brush_);
+        if (!frame_.number) {
+            SetBkMode(dc, TRANSPARENT);
+            SetTextColor(dc, RGB(160, 160, 168));
+            SelectObject(dc, font_);
+            DrawTextW(dc, L"The preview shows here while recording", -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        RestoreDC(dc, saved);
     }
 
     LRESULT handle(UINT message, WPARAM w, LPARAM l) {
@@ -413,6 +475,7 @@ private:
         }
         case WM_TIMER:
             if (w == kPollTimer) refresh();
+            else if (w == kPreviewTimer && session_.preview(frame_)) InvalidateRect(get(kPreview), nullptr, FALSE);
             return 0;
         case kSessionChanged:
             refresh();
@@ -452,6 +515,7 @@ private:
             UnregisterHotKey(window_, kHotkey);
             UnregisterHotKey(window_, kReplayHotkey);
             Shell_NotifyIconW(NIM_DELETE, &tray_);
+            DeleteObject(preview_brush_);
             PostQuitMessage(0);
             return 0;
         default:
@@ -494,7 +558,7 @@ private:
     HWND label(int id, const wchar_t* text) {
         const bool plain = id == kStatus || id == kDetail || id == kLive || id == kFolder || id == kImageFile ||
                            id == kSystemVolumeText || id == kMicVolumeText;
-        return add(id, WC_STATICW, text, SS_LEFT | (plain ? SS_NOPREFIX : 0));
+        return add(id, WC_STATICW, text, SS_LEFT | (plain ? SS_NOPREFIX : 0) | (id == kDetail ? SS_ENDELLIPSIS : 0));
     }
     HWND combo(int id) { return add(id, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP); }
     HWND check(int id, const wchar_t* text) { return add(id, WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP); }
@@ -522,6 +586,8 @@ private:
         button(kRecord, L"&Start Recording", BS_DEFPUSHBUTTON);
         button(kPause, L"&Pause");
         button(kSaveReplay, L"Save Rep&lay");
+        add(kPreview, L"RecPreview", L"Preview", 0);
+        preview_brush_ = CreateSolidBrush(RGB(28, 28, 32));
 
         label(kCaptureHeader, L"Capture");
         label(kSourceLabel, L"&Source");
@@ -642,17 +708,16 @@ private:
             y += h + gap;
         };
         const auto header = [&](int id) { y += px(10); line(id, px(20)); };
-        // A source's name, level meter, volume slider, its value and mute.
+        // A source's name and level meter, then its volume slider, value and mute.
         const auto level = [&](int label_id, int meter_id, int slider_id, int value_id, int mute_id) {
-            const int slider = px(180), value = px(50), mute = px(110);
-            const int meter = width - label_width - slider - value - mute - 3 * gap;
-            place(label_id, x, y + px(4), label_width - gap, px(20));
-            place(meter_id, x + label_width, y + px(7), meter, px(12));
-            int left = x + label_width + meter + gap;
-            place(slider_id, left, y, slider, px(26));
-            left += slider + gap;
-            place(value_id, left, y + px(4), value, px(20));
-            place(mute_id, left + value + gap, y + px(2), mute, px(22));
+            const int value = px(50), mute = px(110);
+            place(label_id, x, y, label_width - gap, px(20));
+            place(meter_id, x + label_width, y + px(4), width - label_width, px(12));
+            y += px(22);
+            const int slider = width - value - mute - 2 * gap;
+            place(slider_id, x, y, slider, px(26));
+            place(value_id, x + slider + gap, y + px(4), value, px(20));
+            place(mute_id, x + slider + value + 2 * gap, y + px(2), mute, px(22));
             y += px(26) + gap;
         };
         // A checkbox with its device list or setting beside it.
@@ -662,16 +727,21 @@ private:
             y += row + gap;
         };
 
+        // Status, levels and the record buttons on the left, the preview on the right.
+        width = column;
         line(kStatus, px(34));
-        place(kDetail, x, y, width - px(190), px(20));
-        place(kLive, x + width - px(180), y, px(180), px(20));
-        y += px(20) + gap;
+        line(kDetail, px(20));
+        line(kLive, px(20));
         level(kSystemLabel, kSystemMeter, kSystemVolume, kSystemVolumeText, kSystemMute);
         level(kMicLabel, kMicMeter, kMicVolume, kMicVolumeText, kMicMute);
-        place(kRecord, x, y, width - 2 * (px(140) + gap), px(40));
-        place(kPause, x + width - 2 * px(140) - gap, y, px(140), px(40));
-        place(kSaveReplay, x + width - px(140), y, px(140), px(40));
-        y += px(40) + gap;
+        const int button_width = px(110);
+        place(kRecord, x, y, width - 2 * (button_width + gap), px(40));
+        place(kPause, x + width - 2 * button_width - gap, y, button_width, px(40));
+        place(kSaveReplay, x + width - button_width, y, button_width, px(40));
+        y += px(40);
+        const int preview_height = column * 9 / 16;
+        place(kPreview, margin + column + px(30), margin, column, preview_height);
+        y = std::max(y, margin + preview_height) + gap;
         const int columns_top = y;
 
         width = column;
@@ -1319,6 +1389,19 @@ private:
         EnableWindow(get(kServer), editable);
         EnableWindow(get(kShowLast), !settings_.last_recording.empty());
 
+        // Preview frames are made only while recording with the window on screen.
+        const bool previewing = active && IsWindowVisible(window_) && !IsIconic(window_);
+        if (previewing != previewing_) {
+            session_.show_preview(previewing);
+            if (previewing) SetTimer(window_, kPreviewTimer, 33, nullptr);
+            else KillTimer(window_, kPreviewTimer);
+            previewing_ = previewing;
+        }
+        if (!active && frame_.number) {
+            frame_ = {};
+            InvalidateRect(get(kPreview), nullptr, FALSE);
+        }
+
         const bool poll = s.state != State::idle;
         if (poll && !polling_) SetTimer(window_, kPollTimer, 50, nullptr);
         if (!poll && polling_) KillTimer(window_, kPollTimer);
@@ -1350,6 +1433,9 @@ private:
     ULONGLONG note_until_ = 0;
     bool note_attention_ = false;
     bool polling_ = false;
+    bool previewing_ = false;
+    rec::PreviewFrame frame_;
+    HBRUSH preview_brush_ = nullptr;
     bool quitting_ = false;
     bool attention_ = false;
     State state_ = State::idle;

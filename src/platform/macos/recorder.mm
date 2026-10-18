@@ -6,10 +6,12 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
+#import <VideoToolbox/VideoToolbox.h>
 
 #include "rec/rec.hpp"
 #include "core/mixer.hpp"
 #include "core/pause.hpp"
+#include "core/preview.hpp"
 #include "core/sync.hpp"
 #include "platform/macos/overlay.hpp"
 #include "platform/macos/stream.hpp"
@@ -629,6 +631,14 @@ public:
                     return started;
                 }
             }
+            if (options_.preview_width) {
+                const auto size = core::preview_size(size_.width, size_.height, options_.preview_width);
+                // A preview the system cannot scale still records.
+                if (VTPixelTransferSessionCreate(kCFAllocatorDefault, &transfer_) == noErr &&
+                    CVPixelBufferCreate(kCFAllocatorDefault, size.width, size.height, kCVPixelFormatType_32BGRA,
+                                        nullptr, &preview_pixels_) == kCVReturnSuccess)
+                    preview_.reset(size);
+            }
             if (!options_.stream_url.empty() || options_.replay_seconds) {
                 mac::LiveSettings live;
                 live.url = options_.stream_url;
@@ -702,6 +712,8 @@ public:
                 overlays_->stop();
                 overlays_.reset();
             }
+            if (transfer_) { VTPixelTransferSessionInvalidate(transfer_); CFRelease(transfer_); transfer_ = nullptr; }
+            if (preview_pixels_) { CVPixelBufferRelease(preview_pixels_); preview_pixels_ = nullptr; }
             if (activity_) { [[NSProcessInfo processInfo] endActivity:activity_]; activity_ = nil; }
             recording_.store(false);
             {
@@ -807,6 +819,8 @@ public:
         return {};
     }
 
+    bool preview(PreviewFrame& frame) const { return preview_.take(frame); }
+    void show_preview(bool on) { preview_.show(on); }
     Result pause() {
         if (!recording_.load() || finished_.load()) return {"not recording"};
         if (!timeline_.pause(now_nanos())) return {"already paused"};
@@ -1269,6 +1283,7 @@ private:
                     if (!composed) fail("could not draw the overlays");
                     frame = composed;
                 }
+                if (frame && preview_.due(slot, options_.fps)) render_preview(frame);
                 // Retry the same timestamp for up to 500 ms on transient backpressure.
                 // Never hold a stream callback or create an unbounded frame queue.
                 bool appended = false;
@@ -1307,6 +1322,15 @@ private:
             }
         }
         finished_.store(true);
+    }
+
+    // Scales and converts the frame as encoded into BGRA for the preview.
+    void render_preview(CVPixelBufferRef frame) {
+        if (VTPixelTransferSessionTransferImage(transfer_, frame, preview_pixels_) != noErr) return;
+        if (CVPixelBufferLockBaseAddress(preview_pixels_, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
+        preview_.publish(static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(preview_pixels_)),
+                         CVPixelBufferGetBytesPerRow(preview_pixels_));
+        CVPixelBufferUnlockBaseAddress(preview_pixels_, kCVPixelBufferLock_ReadOnly);
     }
 
     void cleanup_capture() {
@@ -1357,6 +1381,9 @@ private:
     std::unique_ptr<mac::LiveStream> live_;  // Kept after stop() for its counters.
     std::unique_ptr<mac::Overlays> overlays_;
     std::uint64_t camera_frames_ = 0;  // The count when the overlays were released.
+    VTPixelTransferSessionRef transfer_ = nullptr;  // Preview scaling, on the recording thread.
+    CVPixelBufferRef preview_pixels_ = nullptr;
+    core::PreviewBuffer preview_;
 };
 
 namespace {
@@ -1548,5 +1575,7 @@ Result Recorder::set_overlay(std::size_t index, bool visible, std::optional<Area
 Result Recorder::set_volume(AudioInput input, double gain_db, bool muted) {
     return impl_->capture.set_volume(input, gain_db, muted);
 }
+bool Recorder::preview(PreviewFrame& frame) const { return impl_->capture.preview(frame); }
+void Recorder::show_preview(bool on) noexcept { impl_->capture.show_preview(on); }
 
 } // namespace rec

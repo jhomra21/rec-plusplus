@@ -53,7 +53,7 @@ elseif(APPLE)
     add_executable(rec-app MACOSX_BUNDLE src/app/macos/main.mm src/app/session.cpp)
     set_source_files_properties(src/app/macos/main.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_include_directories(rec-app PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    target_link_libraries(rec-app PRIVATE rec "-framework AppKit" "-framework Carbon" "-framework Security")
+    target_link_libraries(rec-app PRIVATE rec "-framework AppKit" "-framework Carbon" "-framework QuartzCore" "-framework Security")
     set_target_properties(rec-app PROPERTIES OUTPUT_NAME Rec
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/support/RecApp-Info.plist")
     # Sign the whole bundle so privacy permissions apply to Rec.app. macOS ties an ad-hoc

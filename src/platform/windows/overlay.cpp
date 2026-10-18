@@ -606,4 +606,145 @@ Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>&
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }
 void Overlays::stop() { impl_->stop(); }
 
+namespace {
+// Studio-range BT.709 NV12 to RGB, drawn over the whole preview with bilinear sampling.
+constexpr char kPreviewShaders[] = R"(
+struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; };
+Vertex vs(uint id : SV_VertexID) {
+    float2 t = float2(id & 1, id >> 1);
+    Vertex v;
+    v.position = float4(t.x * 2 - 1, 1 - t.y * 2, 0, 1);
+    v.uv = t;
+    return v;
+}
+Texture2D luma : register(t0);
+Texture2D chroma : register(t1);
+SamplerState smooth : register(s0);
+float4 ps(Vertex v) : SV_Target {
+    float y = (luma.Sample(smooth, v.uv).r - 16.0 / 255) * 255.0 / 219;
+    float2 c = (chroma.Sample(smooth, v.uv).rg - 128.0 / 255) * 255.0 / 224;
+    return float4(saturate(float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x)), 1);
+}
+)";
+} // namespace
+
+class FramePreview::Impl {
+public:
+    Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, core::PreviewSize size) {
+        size_ = size;
+        auto compile = [](const char* entry, const char* profile, ComPtr<ID3DBlob>& code) -> HRESULT {
+            return D3DCompile(kPreviewShaders, sizeof kPreviewShaders - 1, "preview", nullptr, nullptr, entry, profile,
+                              D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, nullptr);
+        };
+        ComPtr<ID3DBlob> vs, ps;
+        HRESULT hr = compile("vs", "vs_4_0", vs);
+        if (SUCCEEDED(hr)) hr = compile("ps", "ps_4_0", ps);
+        if (SUCCEEDED(hr)) hr = device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &vertex_);
+        if (SUCCEEDED(hr)) hr = device->CreatePixelShader(ps->GetBufferPointer(), ps->GetBufferSize(), nullptr, &pixel_);
+        if (FAILED(hr)) return {failed("could not compile the preview shaders", hr)};
+
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_NV12;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        hr = device->CreateTexture2D(&desc, nullptr, &source_);
+        D3D11_SHADER_RESOURCE_VIEW_DESC view{};
+        view.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+        view.Texture2D.MipLevels = 1;
+        view.Format = DXGI_FORMAT_R8_UNORM;
+        if (SUCCEEDED(hr)) hr = device->CreateShaderResourceView(source_.Get(), &view, &views_[0]);
+        view.Format = DXGI_FORMAT_R8G8_UNORM;
+        if (SUCCEEDED(hr)) hr = device->CreateShaderResourceView(source_.Get(), &view, &views_[1]);
+        if (FAILED(hr)) return {failed("this graphics driver cannot read video frames for the preview", hr)};
+
+        desc.Width = size.width;
+        desc.Height = size.height;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        hr = device->CreateTexture2D(&desc, nullptr, &target_);
+        if (SUCCEEDED(hr)) hr = device->CreateRenderTargetView(target_.Get(), nullptr, &target_view_);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        for (auto& staging : staging_)
+            if (SUCCEEDED(hr)) hr = device->CreateTexture2D(&desc, nullptr, &staging);
+        D3D11_SAMPLER_DESC sampler{};
+        sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler.MaxLOD = D3D11_FLOAT32_MAX;
+        if (SUCCEEDED(hr)) hr = device->CreateSamplerState(&sampler, &sampler_);
+        D3D11_RASTERIZER_DESC raster{};
+        raster.FillMode = D3D11_FILL_SOLID;
+        raster.CullMode = D3D11_CULL_NONE;
+        raster.DepthClipEnable = TRUE;
+        if (SUCCEEDED(hr)) hr = device->CreateRasterizerState(&raster, &raster_);
+        if (FAILED(hr)) return {failed("could not allocate the preview", hr)};
+        return {};
+    }
+
+    // Draws this frame into one staging texture and reads the other, which the GPU filled a
+    // preview frame ago, so the recording thread never waits for the GPU.
+    void render(ID3D11DeviceContext* context, ID3D11Texture2D* frame, unsigned subresource, core::PreviewBuffer& out) {
+        ComPtr<ID3D11Multithread> multithread;
+        context->QueryInterface(IID_PPV_ARGS(&multithread));
+        if (multithread) multithread->Enter();
+        context->CopySubresourceRegion(source_.Get(), 0, 0, 0, 0, frame, subresource, nullptr);
+        context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        context->IASetInputLayout(nullptr);
+        context->VSSetShader(vertex_.Get(), nullptr, 0);
+        context->PSSetShader(pixel_.Get(), nullptr, 0);
+        ID3D11ShaderResourceView* views[] = {views_[0].Get(), views_[1].Get()};
+        context->PSSetShaderResources(0, 2, views);
+        context->PSSetSamplers(0, 1, sampler_.GetAddressOf());
+        context->RSSetState(raster_.Get());
+        context->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+        context->OMSetDepthStencilState(nullptr, 0);
+        const D3D11_VIEWPORT viewport{0, 0, static_cast<float>(size_.width), static_cast<float>(size_.height), 0, 1};
+        context->RSSetViewports(1, &viewport);
+        context->OMSetRenderTargets(1, target_view_.GetAddressOf(), nullptr);
+        context->Draw(4, 0);
+        ID3D11ShaderResourceView* none[] = {nullptr, nullptr};
+        context->PSSetShaderResources(0, 2, none);
+        context->OMSetRenderTargets(0, nullptr, nullptr);
+        context->CopyResource(staging_[next_].Get(), target_.Get());
+        filled_[next_] = true;
+        next_ ^= 1;
+        if (filled_[next_]) {
+            D3D11_MAPPED_SUBRESOURCE mapped{};
+            if (SUCCEEDED(context->Map(staging_[next_].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped))) {
+                out.publish(static_cast<const std::uint8_t*>(mapped.pData), mapped.RowPitch);
+                context->Unmap(staging_[next_].Get(), 0);
+                filled_[next_] = false;
+            }
+        }
+        if (multithread) multithread->Leave();
+    }
+
+private:
+    core::PreviewSize size_{};
+    ComPtr<ID3D11VertexShader> vertex_;
+    ComPtr<ID3D11PixelShader> pixel_;
+    ComPtr<ID3D11Texture2D> source_, target_;
+    ComPtr<ID3D11ShaderResourceView> views_[2];
+    ComPtr<ID3D11RenderTargetView> target_view_;
+    ComPtr<ID3D11Texture2D> staging_[2];
+    bool filled_[2]{};
+    int next_ = 0;
+    ComPtr<ID3D11SamplerState> sampler_;
+    ComPtr<ID3D11RasterizerState> raster_;
+};
+
+FramePreview::FramePreview() : impl_(std::make_unique<Impl>()) {}
+FramePreview::~FramePreview() = default;
+Result FramePreview::start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, core::PreviewSize size) {
+    return impl_->start(device, width, height, size);
+}
+void FramePreview::render(ID3D11DeviceContext* context, ID3D11Texture2D* frame, unsigned subresource, core::PreviewBuffer& out) {
+    impl_->render(context, frame, subresource, out);
+}
 } // namespace rec::win

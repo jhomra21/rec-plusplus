@@ -6,6 +6,7 @@
 #import <AppKit/AppKit.h>
 #import <Carbon/Carbon.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import <QuartzCore/QuartzCore.h>
 #import <Security/Security.h>
 
 #include "app/session.hpp"
@@ -233,6 +234,11 @@ NSString* window_label(const std::string& app, const std::string& title) {
     NSSecureTextField* _key;
     NSStatusItem* _statusItem;
     NSTimer* _timer;
+    NSView* _preview;
+    NSTextField* _previewHint;
+    rec::PreviewFrame _frame;
+    NSTimer* _previewTimer;
+    bool _previewing;
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
@@ -658,15 +664,11 @@ NSString* window_label(const std::string& app, const std::string& title) {
     _detail = [NSTextField wrappingLabelWithString:@""];
     _detail.textColor = NSColor.secondaryLabelColor;
     _detail.maximumNumberOfLines = 2;
-    _detail.preferredMaxLayoutWidth = 820;
+    _detail.preferredMaxLayoutWidth = 440;
     [_detail setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     _live = label(@"");
     _live.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
     _live.textColor = NSColor.systemPurpleColor;
-    [_live setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
-    NSStackView* detailRow = [NSStackView stackViewWithViews:@[_detail, _live]];
-    detailRow.distribution = NSStackViewDistributionFill;
-    detailRow.alignment = NSLayoutAttributeFirstBaseline;
 
     // Each source: its level before volume, the volume, and mute.
     _systemMeter = [self meter:@"System audio level"];
@@ -677,17 +679,36 @@ NSString* window_label(const std::string& app, const std::string& title) {
     _micVolumeText = label(@"0 dB");
     _systemMute = [self check:@"Mute system"];
     _micMute = [self check:@"Mute mic"];
-    const auto levelRow = ^NSStackView*(NSLevelIndicator* meter, NSSlider* slider, NSTextField* value, NSButton* mute) {
-        [slider.widthAnchor constraintEqualToConstant:180].active = YES;
+    // A source's name and meter, then its volume, value and mute below.
+    const auto volumeRow = ^NSStackView*(NSSlider* slider, NSTextField* value, NSButton* mute) {
         [value.widthAnchor constraintEqualToConstant:50].active = YES;
         [mute.widthAnchor constraintEqualToConstant:110].active = YES;
-        NSStackView* row = [NSStackView stackViewWithViews:@[meter, slider, value, mute]];
+        NSStackView* row = [NSStackView stackViewWithViews:@[slider, value, mute]];
         row.distribution = NSStackViewDistributionFill;
         row.spacing = 10;
+        [slider setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
         return row;
     };
-    NSGridView* meters = [self grid:@[@[label(@"System audio"), levelRow(_systemMeter, _systemVolume, _systemVolumeText, _systemMute)],
-                                      @[label(@"Microphone"), levelRow(_micMeter, _micVolume, _micVolumeText, _micMute)]]];
+    NSGridView* meters = [self grid:@[@[label(@"System audio"), _systemMeter], @[volumeRow(_systemVolume, _systemVolumeText, _systemMute)],
+                                      @[label(@"Microphone"), _micMeter], @[volumeRow(_micVolume, _micVolumeText, _micMute)]]];
+
+    // The newest frame as encoded, in the output's shape on dark gray.
+    _preview = [[NSView alloc] init];
+    _preview.wantsLayer = YES;
+    _preview.layer.backgroundColor = [NSColor colorWithWhite:0.11 alpha:1].CGColor;
+    _preview.layer.contentsGravity = kCAGravityResizeAspect;
+    _preview.accessibilityElement = YES;
+    _preview.accessibilityRole = NSAccessibilityImageRole;
+    _preview.accessibilityLabel = @"Preview";
+    _previewHint = label(@"The preview shows here while recording");
+    _previewHint.textColor = [NSColor colorWithWhite:0.65 alpha:1];
+    _previewHint.translatesAutoresizingMaskIntoConstraints = NO;
+    [_preview addSubview:_previewHint];
+    [NSLayoutConstraint activateConstraints:@[
+        [_previewHint.centerXAnchor constraintEqualToAnchor:_preview.centerXAnchor],
+        [_previewHint.centerYAnchor constraintEqualToAnchor:_preview.centerYAnchor],
+        [_preview.heightAnchor constraintEqualToConstant:440 * 9.0 / 16],
+    ]];
 
     _record = [self button:@"Start Recording" action:@selector(toggleRecord:)];
     _record.controlSize = NSControlSizeLarge;
@@ -770,9 +791,9 @@ NSString* window_label(const std::string& app, const std::string& title) {
     NSStackView* folderButtons = [NSStackView stackViewWithViews:@[_changeFolder, _openFolder, _showLast]];
     folderButtons.distribution = NSStackViewDistributionFillEqually;
 
-    // A full-width status area over two columns: what and how to record on the left, where
-    // it goes on the right. One column would be taller than a 13-inch screen.
-    NSArray<NSView*>* top = @[_status, detailRow, meters, buttons];
+    // Status and preview side by side over two columns: what and how to record on the left,
+    // where it goes on the right. One column would be taller than a 13-inch screen.
+    NSArray<NSView*>* status = @[_status, _detail, _live, meters, buttons];
     NSArray<NSView*>* left = @[header(@"Capture"), capture, header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons];
     NSArray<NSView*>* right = @[header(@"Live stream"), live, header(@"Replay"), replay, header(@"Camera and image"), camera];
     const auto column = [](NSArray<NSView*>* views) {
@@ -783,6 +804,10 @@ NSString* window_label(const std::string& app, const std::string& title) {
         for (NSView* view in views) [view.widthAnchor constraintEqualToConstant:440].active = YES;
         return stack;
     };
+    NSStackView* statusColumn = column(status);
+    NSStackView* top = [NSStackView stackViewWithViews:@[statusColumn, column(@[_preview])]];
+    top.alignment = NSLayoutAttributeTop;
+    top.spacing = 30;
     NSStackView* leftColumn = column(left);
     NSStackView* rightColumn = column(right);
     for (NSView* view in @[capture, quality]) [leftColumn setCustomSpacing:18 afterView:view];
@@ -790,13 +815,13 @@ NSString* window_label(const std::string& app, const std::string& title) {
     NSStackView* columns = [NSStackView stackViewWithViews:@[leftColumn, rightColumn]];
     columns.alignment = NSLayoutAttributeTop;
     columns.spacing = 30;
-    NSStackView* stack = [NSStackView stackViewWithViews:[top arrayByAddingObject:columns]];
+    NSStackView* stack = [NSStackView stackViewWithViews:@[top, columns]];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment = NSLayoutAttributeLeading;
     stack.spacing = 8;
     stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
-    [stack setCustomSpacing:18 afterView:buttons];
-    for (NSView* view in top) [view.widthAnchor constraintEqualToConstant:910].active = YES;    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack setCustomSpacing:18 afterView:top];
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
     NSView* content = _window.contentView;
     [content addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
@@ -1156,6 +1181,21 @@ NSString* window_label(const std::string& app, const std::string& title) {
 
 - (void)tick:(NSTimer*)timer { [self refresh]; }
 
+- (void)showPreview:(NSTimer*)timer {
+    if (!_session->preview(_frame)) return;
+    NSData* data = [NSData dataWithBytes:_frame.pixels.data() length:_frame.pixels.size()];
+    CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    CGImageRef image = CGImageCreate(_frame.width, _frame.height, 8, 32, _frame.width * 4, space,
+                                     kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst, provider, nullptr, false,
+                                     kCGRenderingIntentDefault);
+    _preview.layer.contents = (__bridge id)image;
+    _previewHint.hidden = YES;
+    CGImageRelease(image);
+    CGColorSpaceRelease(space);
+    CGDataProviderRelease(provider);
+}
+
 - (void)meter:(NSLevelIndicator*)meter peak:(float)peak shown:(float&)shown {
     // dB scale over the last 60 dB, falling back at about 20 dB a second.
     const float level = peak > 0 ? std::clamp((20.0f * std::log10(peak) + 60.0f) / 60.0f, 0.0f, 1.0f) : 0.0f;
@@ -1243,6 +1283,26 @@ NSString* window_label(const std::string& app, const std::string& title) {
     // The scene is the one setting that changes during a recording, when it draws a camera.
     _scene.enabled = editable ? _camera.state == NSControlStateValueOn : active && s.camera;
     _showLast.enabled = !_settings.last_recording.empty();
+
+    // Preview frames are made only while recording with the window on screen.
+    const bool previewing = active && _window.visible && !_window.miniaturized &&
+                            (_window.occlusionState & NSWindowOcclusionStateVisible);
+    if (previewing != _previewing) {
+        _session->show_preview(previewing);
+        if (previewing) {
+            _previewTimer = [NSTimer timerWithTimeInterval:1.0 / 30 target:self selector:@selector(showPreview:) userInfo:nil repeats:YES];
+            [NSRunLoop.mainRunLoop addTimer:_previewTimer forMode:NSRunLoopCommonModes];
+        } else {
+            [_previewTimer invalidate];
+            _previewTimer = nil;
+        }
+        _previewing = previewing;
+    }
+    if (!active && _frame.number) {
+        _frame = {};
+        _preview.layer.contents = nil;
+        _previewHint.hidden = NO;
+    }
 
     const bool poll = s.state != State::idle;
     if (poll && !_timer) {
@@ -1490,15 +1550,55 @@ NSString* window_label(const std::string& app, const std::string& title) {
             [self->_scene sendAction:self->_scene.action to:self->_scene.target];
         });
     };
+    // The preview's mean color over part of it (fractions of its size), saved as a PNG too.
+    NSString* artifacts = [reportPath stringByDeletingLastPathComponent];
+    const auto preview_color = [&](NSString* name, NSString* want, double x, double y, double w, double h) {
+        __block long r = -1, g = -1, b = -1;
+        ui(^{
+            const rec::PreviewFrame& f = self->_frame;
+            if (!f.number) return;
+            r = g = b = 0;
+            for (int i = 0; i < 10; ++i)
+                for (int j = 0; j < 10; ++j) {
+                    const auto px = static_cast<std::size_t>((x + w * (i + 0.5) / 10) * f.width);
+                    const auto py = static_cast<std::size_t>((y + h * (j + 0.5) / 10) * f.height);
+                    const std::uint8_t* p = f.pixels.data() + (py * f.width + px) * 4;
+                    b += p[0]; g += p[1]; r += p[2];
+                }
+            r /= 100; g /= 100; b /= 100;
+            NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr pixelsWide:f.width
+                pixelsHigh:f.height bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+                colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:f.width * 4 bitsPerPixel:32];
+            for (std::size_t k = 0; k < f.pixels.size(); k += 4) {
+                rep.bitmapData[k] = f.pixels[k + 2];
+                rep.bitmapData[k + 1] = f.pixels[k + 1];
+                rep.bitmapData[k + 2] = f.pixels[k];
+                rep.bitmapData[k + 3] = 255;
+            }
+            [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+                writeToFile:[artifacts stringByAppendingPathComponent:[name stringByAppendingString:@".png"]] atomically:YES];
+        });
+        if (r < 0) fail(@"the preview shows nothing while recording");
+        const bool ok = [want isEqualToString:@"green"] ? g > 120 && g > r + 60 && g > b + 60
+                                                        : r > 170 && r > g + 100 && r > b + 100;
+        if (!ok) fail([NSString stringWithFormat:@"%@: the preview is %ld,%ld,%ld, not %@", name, r, g, b, want]);
+    };
     scene(0);
     press(_record);
     wait_for(recording, 20);
     __block BOOL switchable = NO;
     ui(^{ switchable = self->_scene.enabled; });
     if (!switchable) fail(@"the Scene list is disabled while recording with a camera");
-    usleep(2500000);
+    usleep(2000000);
+    // The preview: the camera in the bottom-right corner, the image's red block top left.
+    preview_color(@"app-preview-corner", @"green", 0.76, 0.75, 0.18, 0.18);
+    preview_color(@"app-preview-corner", @"red", 0.02, 0.03, 0.15, 0.15);
+    usleep(500000);
     scene(2);  // Camera only
-    usleep(2500000);
+    usleep(1500000);
+    preview_color(@"app-preview-camera", @"green", 0.35, 0.4, 0.3, 0.2);
+    note(@"preview=ok");
+    usleep(1000000);
     __block BOOL hidden = NO;
     ui(^{
         NSMenu* menu = self->_statusItem.menu;

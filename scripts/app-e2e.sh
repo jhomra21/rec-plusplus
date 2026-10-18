@@ -9,7 +9,8 @@
 #   4. Go Live to a local MediaMTX server: the server's copy decodes, the key is in the keychain;
 #   5. closing the window keeps recording, and the menu bar item's menu stops it;
 #   6. with the replay buffer on, Save Replay writes the last seconds while recording goes on;
-#   7. a camera and an image are drawn, and the scene moves the camera while recording;
+#   7. a camera and an image are drawn, and the scene moves the camera while recording; the
+#      preview shows the same picture;
 #   8. volume and mute change the mix while recording, from the window and the menu bar item;
 #   9. quitting during a recording saves the movie; settings persist without the stream key.
 # Usage: app-e2e.sh REC REC_APP ARTIFACTS
@@ -77,6 +78,7 @@ fi
 grep -qx 'accessibility=ok' "$report"
 grep -qx 'keychain=ok' "$report"
 grep -qx 'quit=started' "$report"
+grep -qx 'preview=ok' "$report"
 grep -q '^live=● LIVE' "$report"
 
 probe "$(step pause)" app-pause

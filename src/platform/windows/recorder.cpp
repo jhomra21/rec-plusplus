@@ -713,7 +713,7 @@ public:
             pattern_[0] = pattern_frame(size_, false);
             pattern_[1] = pattern_frame(size_, true);
             if (!pattern_[0] || !pattern_[1]) { stop(); return {"synthetic frame allocation failed"}; }
-            if (!options_.overlays.empty())
+            if (!options_.overlays.empty() || options_.preview_width)
                 if (auto created = create_pattern_device(); !created) { stop(); return created; }
             captured_.store(1);
         } else {
@@ -726,6 +726,13 @@ public:
                 stop();
                 return started;
             }
+        }
+        if (options_.preview_width && device_) {
+            const auto size = core::preview_size(size_.width, size_.height, options_.preview_width);
+            previewer_ = std::make_unique<win::FramePreview>();
+            // A driver that cannot draw the preview still records.
+            if (previewer_->start(device_.Get(), size_.width, size_.height, size)) preview_.reset(size);
+            else previewer_.reset();
         }
         if (!options_.stream_url.empty() || options_.replay_seconds) {
             if (options_.stream_kbps < 500 || options_.stream_kbps > 50000) {
@@ -806,6 +813,7 @@ public:
             overlays_->stop();
             overlays_.reset();
         }
+        previewer_.reset();
         for (auto& slot : slots_) slot = {};
         pending_count_ = 0;
         current_ = -1;
@@ -881,6 +889,8 @@ public:
         return {};
     }
 
+    bool preview(PreviewFrame& frame) const { return preview_.take(frame); }
+    void show_preview(bool on) { preview_.show(on); }
     Result pause() {
         if (!recording_.load() || finished_.load()) return {"not recording"};
         if (!timeline_.pause(now_ticks())) return {"already paused"};
@@ -1328,6 +1338,8 @@ private:
                 fail("could not draw the overlays");
                 return Write::failed;
             }
+            if (previewer_ && preview_.due(slot, options_.fps))
+                previewer_->render(context_.Get(), target.Get(), subresource, preview_);
             ComPtr<IMF2DBuffer> planar;
             DWORD length = 0;
             if (SUCCEEDED(buffer.As(&planar)) && SUCCEEDED(planar->GetContiguousLength(&length)))
@@ -1577,6 +1589,8 @@ private:
     std::array<ComPtr<IMFMediaBuffer>, 2> pattern_;
     std::unique_ptr<win::Overlays> overlays_;
     std::uint64_t camera_frames_ = 0;  // The count when the overlays were released.
+    std::unique_ptr<win::FramePreview> previewer_;
+    core::PreviewBuffer preview_;
     ComPtr<IMFVideoSampleAllocatorEx> allocator_;
 
     ComPtr<IMFSinkWriter> writer_;
@@ -1813,5 +1827,7 @@ Result Recorder::set_overlay(std::size_t index, bool visible, std::optional<Area
 Result Recorder::set_volume(AudioInput input, double gain_db, bool muted) {
     return impl_->capture.set_volume(input, gain_db, muted);
 }
+bool Recorder::preview(PreviewFrame& frame) const { return impl_->capture.preview(frame); }
+void Recorder::show_preview(bool on) noexcept { impl_->capture.show_preview(on); }
 
 } // namespace rec

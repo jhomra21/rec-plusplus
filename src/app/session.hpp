@@ -69,6 +69,8 @@ inline constexpr std::array<Choice, 3> kCodecs{{{"auto", "Automatic"}, {"h264", 
 inline constexpr std::array<Choice, 2> kFormats{{{"mp4", "MP4"}, {"mov", "MOV"}}};
 inline constexpr std::array<std::uint32_t, 5> kReplayLengths{15, 30, 60, 120, 300};
 inline constexpr int kVolumeMin = -40, kVolumeMax = 20;
+// Preview frames are made this wide at most: sharp in a half-window view on a 2x display.
+inline constexpr std::uint32_t kPreviewWidth = 960;
 inline constexpr std::array<Choice, 3> kServices{
     {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
 inline constexpr std::array<Choice, 3> kScenes{
@@ -155,6 +157,10 @@ public:
     Result set_scene(const std::string& scene);
     // Changes a source's volume and mute at once; the source must be in this recording.
     Result set_volume(AudioInput input, int volume, bool muted);
+    // Copies the recording's newest preview frame when it is newer than frame.number.
+    bool preview(PreviewFrame& frame);
+    // Whether the interface shows the preview; frames are made only while it does.
+    void show_preview(bool on);
     Status status();
     void wait();  // Blocks until a stop in progress has saved the movie.
 
@@ -171,6 +177,7 @@ private:
     std::thread worker_;
     std::string error_, stream_error_, saved_;
     bool streaming_ = false, replay_ = false;
+    bool preview_shown_ = true;
     std::optional<std::size_t> camera_;  // The camera's overlay index in this recording.
     Settings camera_settings_;           // Placement for scene changes.
     std::string scene_;
