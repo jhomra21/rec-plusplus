@@ -28,7 +28,6 @@ using rec::app::choice_index;
 using rec::app::kCameraSizes;
 using rec::app::kCodecs;
 using rec::app::kCorners;
-using rec::app::kScenes;
 using rec::app::kFormats;
 using rec::app::kFrameRates;
 using rec::app::kResolutions;
@@ -223,7 +222,14 @@ enum class Pointer { down, dragged, up, moved, exited };
 - (void)mouseExited:(NSEvent*)event { [self.delegate preview:self pointer:Pointer::exited event:event]; }
 @end
 
-@interface RecController : NSObject <NSApplicationDelegate, NSMenuDelegate, NSTextFieldDelegate, PreviewDelegate>
+// The source a press in the preview takes hold of, and how.
+struct PreviewHit {
+    rec::app::SourceRef source;
+    rec::app::AreaDrag drag;
+};
+
+@interface RecController
+    : NSObject <NSApplicationDelegate, NSMenuDelegate, NSTextFieldDelegate, NSTableViewDataSource, NSTableViewDelegate, PreviewDelegate>
 - (void)toggleRecord:(id)sender;
 - (void)saveReplay:(id)sender;
 - (void)refresh;
@@ -259,6 +265,12 @@ enum class Pointer { down, dragged, up, moved, exited };
     NSButton *_systemMute, *_micMute;
     NSButton *_record, *_pause, *_saveReplay, *_replay, *_systemAudio, *_microphone, *_cursor, *_stream, *_changeFolder, *_openFolder, *_showLast;
     NSButton *_camera, *_image, *_chooseImage, *_showPreview;
+    NSButton *_newScene, *_deleteScene, *_sourceShown, *_addDisplay, *_addWindow, *_removeSource;
+    NSTextField* _sceneName;
+    NSTableView* _sourcesTable;
+    rec::app::SourceRef _selected;   // The source the Sources list selects.
+    bool _filling;                   // The app, not the person, is setting the Sources list.
+    std::vector<rec::Window> _menuWindows;  // What the Add Window menu offered.
     NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service, *_replayLength;
     NSPopUpButton *_cameraDevice, *_corner, *_cameraSize, *_scene;
     NSTextField *_server, *_bitrate, *_imageFile;
@@ -267,11 +279,11 @@ enum class Pointer { down, dragged, up, moved, exited };
     NSTimer* _timer;
     PreviewView* _preview;
     NSTextField* _previewHint;
-    CALayer* _outline;               // Around the camera while the pointer holds or is over it.
-    rec::app::CameraDrag _drag;
-    rec::Area _outlineArea;          // Where the held camera is going.
-    bool _hover;
-    bool _cameraLive;                // This recording draws a camera.
+    CALayer* _outline;               // Around the source the pointer holds or is over.
+    rec::app::AreaDrag _drag;
+    rec::app::SourceRef _dragged;    // The source _drag holds.
+    rec::Area _outlineArea;          // Where it is going.
+    std::optional<rec::app::SourceRef> _hoverSource;
     State _shownState;
     rec::PreviewFrame _frame;
     NSTimer* _previewTimer;
@@ -571,12 +583,12 @@ enum class Pointer { down, dragged, up, moved, exited };
     replay.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift | NSEventModifierFlagOption;
     replay.enabled = active && _session->status().replay;
     [menu addItem:replay];
-    if (const auto status = _session->status(); active && status.camera) {
+    if (_settings.scenes.size() > 1) {
         [menu addItem:NSMenuItem.separatorItem];
-        for (std::size_t i = 0; i < kScenes.size(); ++i) {
-            NSMenuItem* scene = [self item:ns(kScenes[i].label) action:@selector(chooseScene:) key:@""];
+        for (std::size_t i = 0; i < _settings.scenes.size(); ++i) {
+            NSMenuItem* scene = [self item:ns(_settings.scenes[i].name) action:@selector(chooseScene:) key:@""];
             scene.tag = static_cast<NSInteger>(i);
-            scene.state = status.scene == kScenes[i].value ? NSControlStateValueOn : NSControlStateValueOff;
+            scene.state = _settings.scene == i ? NSControlStateValueOn : NSControlStateValueOff;
             [menu addItem:scene];
         }
     }
@@ -810,11 +822,6 @@ enum class Pointer { down, dragged, up, moved, exited };
     for (const auto& choice : kCorners) [_corner addItemWithTitle:ns(choice.label)];
     _cameraSize = [self popup:@"Camera size"];
     for (const auto& choice : kCameraSizes) [_cameraSize addItemWithTitle:ns(choice.label)];
-    NSStackView* placement = [NSStackView stackViewWithViews:@[_corner, label(@"Size"), _cameraSize]];
-    placement.distribution = NSStackViewDistributionFill;
-    [_corner.widthAnchor constraintEqualToAnchor:_cameraSize.widthAnchor].active = YES;
-    _scene = [self popup:@"Scene"];
-    for (const auto& choice : kScenes) [_scene addItemWithTitle:ns(choice.label)];
     _image = [self check:@"Image overlay"];
     _imageFile = label(@"");
     _imageFile.textColor = NSColor.secondaryLabelColor;
@@ -824,9 +831,40 @@ enum class Pointer { down, dragged, up, moved, exited };
     _chooseImage = [self button:@"Choose…" action:@selector(chooseImage:)];
     NSStackView* imageRow = [NSStackView stackViewWithViews:@[_imageFile, _chooseImage]];
     imageRow.distribution = NSStackViewDistributionFill;
-    NSGridView* camera = [self grid:@[@[_camera, _cameraDevice], @[label(@"Position"), placement], @[label(@"Scene"), _scene],
+    NSGridView* camera = [self grid:@[@[_camera, _cameraDevice], @[label(@"Position"), _corner], @[label(@"Size"), _cameraSize],
                                       @[_image, imageRow]]];
+    [camera columnAtIndex:0].width = 100;
 
+    // The scenes and the sources they arrange.
+    _scene = [self popup:@"Scene"];
+    _newScene = [self button:@"New Scene" action:@selector(newScene:)];
+    _deleteScene = [self button:@"Delete Scene" action:@selector(deleteScene:)];
+    NSStackView* sceneButtons = [NSStackView stackViewWithViews:@[_newScene, _deleteScene]];
+    sceneButtons.distribution = NSStackViewDistributionFillEqually;
+    _sceneName = [self field:@"Scene name" secure:NO];
+    NSGridView* scenes = [self grid:@[@[label(@"Scene"), _scene], @[sceneButtons], @[label(@"Name"), _sceneName]]];
+    [scenes columnAtIndex:0].width = 50;
+    _sourcesTable = [[NSTableView alloc] init];
+    NSTableColumn* sourceColumn = [[NSTableColumn alloc] initWithIdentifier:@"source"];
+    sourceColumn.editable = NO;
+    sourceColumn.resizingMask = NSTableColumnAutoresizingMask;
+    [_sourcesTable addTableColumn:sourceColumn];
+    _sourcesTable.headerView = nil;
+    _sourcesTable.columnAutoresizingStyle = NSTableViewUniformColumnAutoresizingStyle;
+    _sourcesTable.dataSource = self;
+    _sourcesTable.delegate = self;
+    _sourcesTable.accessibilityLabel = @"Sources";
+    NSScrollView* sourcesScroll = [[NSScrollView alloc] init];
+    sourcesScroll.documentView = _sourcesTable;
+    sourcesScroll.hasVerticalScroller = YES;
+    sourcesScroll.borderType = NSBezelBorder;
+    [sourcesScroll.heightAnchor constraintEqualToConstant:120].active = YES;
+    _sourceShown = [self check:@"Show in this scene"];
+    _addDisplay = [self button:@"Add Display…" action:@selector(addSourceMenu:)];
+    _addWindow = [self button:@"Add Window…" action:@selector(addSourceMenu:)];
+    _removeSource = [self button:@"Remove" action:@selector(removeSource:)];
+    NSStackView* sourceButtons = [NSStackView stackViewWithViews:@[_addDisplay, _addWindow, _removeSource]];
+    sourceButtons.distribution = NSStackViewDistributionFillEqually;
     _folder = label(@"");
     _folder.textColor = NSColor.secondaryLabelColor;
     _folder.lineBreakMode = NSLineBreakByTruncatingMiddle;
@@ -839,38 +877,45 @@ enum class Pointer { down, dragged, up, moved, exited };
     folderButtons.distribution = NSStackViewDistributionFillEqually;
 
     // Status and preview side by side over two columns: what and how to record on the left,
-    // where it goes on the right. One column would be taller than a 13-inch screen.
+    // where it goes on the right, and the scenes in a narrower third column. One column would
+    // be taller than a 13-inch screen.
     NSArray<NSView*>* status = @[_status, _detail, _live, meters, buttons];
     NSArray<NSView*>* left = @[header(@"Capture"), capture, header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons];
-    NSArray<NSView*>* right = @[header(@"Live stream"), live, header(@"Replay"), replay, header(@"Camera and image"), camera];
-    const auto column = [](NSArray<NSView*>* views) {
+    NSArray<NSView*>* right = @[header(@"Live stream"), live, header(@"Replay"), replay];
+    NSArray<NSView*>* third = @[header(@"Scenes"), scenes, label(@"Sources"), sourcesScroll, _sourceShown, sourceButtons,
+                                header(@"Camera and image"), camera];
+    const auto column = [](NSArray<NSView*>* views, CGFloat width) {
         NSStackView* stack = [NSStackView stackViewWithViews:views];
         stack.orientation = NSUserInterfaceLayoutOrientationVertical;
         stack.alignment = NSLayoutAttributeLeading;
         stack.spacing = 8;
-        for (NSView* view in views) [view.widthAnchor constraintEqualToConstant:440].active = YES;
+        for (NSView* view in views) [view.widthAnchor constraintEqualToConstant:width].active = YES;
         return stack;
     };
-    NSStackView* statusColumn = column(status);
+    NSStackView* statusColumn = column(status, 440);
     _showPreview = [self check:@"Show preview"];
-    NSStackView* top = [NSStackView stackViewWithViews:@[statusColumn, column(@[_preview, _showPreview])]];
+    NSStackView* top = [NSStackView stackViewWithViews:@[statusColumn, column(@[_preview, _showPreview], 440)]];
     top.alignment = NSLayoutAttributeTop;
     top.spacing = 30;
-    NSStackView* leftColumn = column(left);
-    NSStackView* rightColumn = column(right);
+    NSStackView* leftColumn = column(left, 440);
+    NSStackView* rightColumn = column(right, 440);
+    NSStackView* scenesColumn = column(third, 300);
     for (NSView* view in @[capture, quality]) [leftColumn setCustomSpacing:18 afterView:view];
-    for (NSView* view in @[live, replay]) [rightColumn setCustomSpacing:18 afterView:view];
+    for (NSView* view in @[live]) [rightColumn setCustomSpacing:18 afterView:view];
+    [scenesColumn setCustomSpacing:18 afterView:sourceButtons];
     NSStackView* columns = [NSStackView stackViewWithViews:@[leftColumn, rightColumn]];
     columns.alignment = NSLayoutAttributeTop;
     columns.spacing = 30;
-    NSStackView* stack = [NSStackView stackViewWithViews:@[top, columns]];
-    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
-    stack.alignment = NSLayoutAttributeLeading;
-    stack.spacing = 8;
+    NSStackView* body = [NSStackView stackViewWithViews:@[top, columns]];
+    body.orientation = NSUserInterfaceLayoutOrientationVertical;
+    body.alignment = NSLayoutAttributeLeading;
+    body.spacing = 8;
+    [body setCustomSpacing:18 afterView:top];
+    NSStackView* stack = [NSStackView stackViewWithViews:@[body, scenesColumn]];
+    stack.alignment = NSLayoutAttributeTop;
+    stack.spacing = 30;
     stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
-    [stack setCustomSpacing:18 afterView:top];
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
-    NSView* content = _window.contentView;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;    NSView* content = _window.contentView;
     [content addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
         [stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
@@ -898,9 +943,6 @@ enum class Pointer { down, dragged, up, moved, exited };
     const auto length = std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds);
     [_replayLength selectItemAtIndex:length == rec::app::kReplayLengths.end() ? 1 : length - rec::app::kReplayLengths.begin()];
     _camera.state = s.camera ? NSControlStateValueOn : NSControlStateValueOff;
-    [_corner selectItemAtIndex:choice_index(kCorners, s.camera_corner)];
-    [_cameraSize selectItemAtIndex:choice_index(kCameraSizes, s.camera_size)];
-    [_scene selectItemAtIndex:choice_index(kScenes, s.scene)];
     [self showVolume:rec::AudioInput::system];
     [self showVolume:rec::AudioInput::microphone];
     _image.state = s.image ? NSControlStateValueOn : NSControlStateValueOff;
@@ -911,6 +953,7 @@ enum class Pointer { down, dragged, up, moved, exited };
     _folder.toolTip = ns(s.folder);
     [self showServer];
     [self showDisplays:_displays windows:_windows microphones:_microphones];
+    [self showScenes];
 }
 
 - (void)showVolume:(rec::AudioInput)input {
@@ -1005,9 +1048,6 @@ enum class Pointer { down, dragged, up, moved, exited };
     s.replay_seconds = rec::app::kReplayLengths[std::min(at(_replayLength), rec::app::kReplayLengths.size() - 1)];
     s.camera = _camera.state == NSControlStateValueOn;
     if (!_cameras.empty()) s.camera_device = _cameras[std::min(at(_cameraDevice), _cameras.size() - 1)].id;
-    s.camera_corner = kCorners[at(_corner)].value;
-    s.camera_size = kCameraSizes[at(_cameraSize)].value;
-    s.scene = kScenes[at(_scene)].value;
     s.image = _image.state == NSControlStateValueOn;
     s.preview = _showPreview.state == NSControlStateValueOn;
     const int kbps = _bitrate.intValue;
@@ -1040,8 +1080,22 @@ enum class Pointer { down, dragged, up, moved, exited };
         return;
     }
     if (sender == _scene) {
-        [self setScene:kScenes[static_cast<std::size_t>(std::max<NSInteger>(0, _scene.indexOfSelectedItem))].value];
+        [self changeScene:static_cast<std::size_t>(std::max<NSInteger>(0, _scene.indexOfSelectedItem))];
         return;
+    }
+    if (sender == _corner || sender == _cameraSize) {
+        [self placeCamera];
+        return;
+    }
+    if (sender == _sourceShown) {
+        rec::app::scene_item(rec::app::current_scene(_settings), _selected).visible = _sourceShown.state == NSControlStateValueOn;
+        [self showSceneSources];
+        [self applyScene];
+        return;
+    }
+    if (sender == _camera || sender == _image) {
+        [self readSettings];
+        [self showSceneSources];
     }
     if (sender == _showPreview) [self remember];
     [self refresh];
@@ -1050,25 +1104,185 @@ enum class Pointer { down, dragged, up, moved, exited };
 - (void)windowChanged:(NSNotification*)notification { [self refresh]; }
 
 - (void)chooseScene:(NSMenuItem*)item {
-    if (item.tag >= 0 && item.tag < static_cast<NSInteger>(kScenes.size())) [self setScene:kScenes[static_cast<std::size_t>(item.tag)].value];
+    if (item.tag >= 0) [self changeScene:static_cast<std::size_t>(item.tag)];
 }
 
-// While recording this moves the camera at once; otherwise it is the scene to start with.
-- (void)setScene:(const std::string&)scene {
-    const Status s = _session->status();
-    if ((s.state == State::recording || s.state == State::paused) && s.camera) {
-        if (auto changed = _session->set_scene(scene); !changed) {
-            _note = [@"Scene not changed: " stringByAppendingString:ns(changed.error)];
-            _noteAttention = true;
-            _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
-        }
+// While recording the scene shows at once; otherwise it is the scene to start with, shown
+// in the preview.
+- (void)changeScene:(std::size_t)index {
+    if (index >= _settings.scenes.size()) return;
+    _settings.scene = static_cast<std::uint32_t>(index);
+    [self showScenes];
+    [self applyScene];
+}
+
+// Shows the current scene in the recording or the preview, and saves it.
+- (void)applyScene {
+    if (auto shown = _session->show_scene(_settings); !shown) {
+        _note = [@"Scene not changed: " stringByAppendingString:ns(shown.error)];
+        _noteAttention = true;
+        _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
     }
-    _settings.scene = scene;
-    [_scene selectItemAtIndex:choice_index(kScenes, scene)];
     rec::app::save_settings(_settingsPath, _settings);
     [self refresh];
 }
 
+// The Scene list, the scene's name, its sources and the camera's place.
+- (void)showScenes {
+    [_scene removeAllItems];
+    // Through the menu: addItemWithTitle: would drop a scene whose name repeats.
+    for (const auto& scene : _settings.scenes)
+        [_scene.menu addItem:[[NSMenuItem alloc] initWithTitle:ns(scene.name) action:nil keyEquivalent:@""]];
+    const auto& scene = rec::app::current_scene(_settings);
+    [_scene selectItemAtIndex:static_cast<NSInteger>(_settings.scene)];
+    if (![_sceneName.stringValue isEqualToString:ns(scene.name)]) _sceneName.stringValue = ns(scene.name);
+    [self showSceneSources];
+    [self showCameraPlace];
+}
+
+// Every source, as the scene shows it; the selected one stays selected.
+- (void)showSceneSources {
+    const auto sources = rec::app::scene_sources(_settings);
+    std::size_t chosen = 0;
+    for (std::size_t i = 0; i < sources.size(); ++i)
+        if (sources[i] == _selected) chosen = i;
+    _selected = sources[chosen];
+    _filling = true;
+    [_sourcesTable reloadData];
+    [_sourcesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:chosen] byExtendingSelection:NO];
+    _filling = false;
+    _sourceShown.state = rec::app::scene_item(rec::app::current_scene(_settings), _selected).visible ? NSControlStateValueOn
+                                                                                                     : NSControlStateValueOff;
+}
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView*)table {
+    return static_cast<NSInteger>(rec::app::scene_sources(_settings).size());
+}
+
+- (id)tableView:(NSTableView*)table objectValueForTableColumn:(NSTableColumn*)column row:(NSInteger)row {
+    const auto sources = rec::app::scene_sources(_settings);
+    if (row < 0 || row >= static_cast<NSInteger>(sources.size())) return @"";
+    const auto& source = sources[static_cast<std::size_t>(row)];
+    NSString* name = ns(rec::app::source_name(_settings, source));
+    return rec::app::scene_item(rec::app::current_scene(_settings), source).visible ? name
+                                                                                     : [name stringByAppendingString:@" (hidden)"];
+}
+
+- (void)tableViewSelectionDidChange:(NSNotification*)notification {
+    if (_filling) return;
+    const auto sources = rec::app::scene_sources(_settings);
+    const NSInteger row = _sourcesTable.selectedRow;
+    if (row < 0 || row >= static_cast<NSInteger>(sources.size())) return;
+    _selected = sources[static_cast<std::size_t>(row)];
+    [self showSceneSources];
+    [self refresh];
+}
+
+// The Position and Size lists name the camera's place in this scene when it is a preset.
+- (void)showCameraPlace {
+    const auto& area = rec::app::current_scene(_settings).camera.area;
+    [_corner selectItemAtIndex:choice_index(kCorners, rec::app::corner_of(area))];
+    if (const auto size = rec::app::size_of(area); !size.empty()) [_cameraSize selectItemAtIndex:choice_index(kCameraSizes, size)];
+}
+
+// A preset Position or Size puts the camera there in this scene.
+- (void)placeCamera {
+    const std::string corner = kCorners[static_cast<std::size_t>(std::max<NSInteger>(0, _corner.indexOfSelectedItem))].value;
+    if (corner == "custom") return;
+    const std::string size = kCameraSizes[static_cast<std::size_t>(std::max<NSInteger>(0, _cameraSize.indexOfSelectedItem))].value;
+    rec::app::current_scene(_settings).camera.area = rec::app::corner_area(corner, size);
+    [self showCameraPlace];
+    [self applyScene];
+}
+
+- (void)newScene:(id)sender {
+    if (!rec::app::add_scene(_settings)) return;
+    [self showScenes];
+    [self applyScene];
+}
+
+- (void)deleteScene:(id)sender {
+    rec::app::remove_scene(_settings);
+    [self showScenes];
+    [self applyScene];
+}
+
+- (void)sceneNameChanged {
+    auto& scene = rec::app::current_scene(_settings);
+    scene.name = utf8(_sceneName.stringValue);
+    [_scene itemAtIndex:static_cast<NSInteger>(_settings.scene)].title = ns(scene.name);
+}
+
+- (void)addSourceMenu:(NSButton*)sender {
+    NSMenu* menu = [[NSMenu alloc] initWithTitle:@""];
+    menu.autoenablesItems = NO;
+    if (sender == _addWindow) {
+        _menuWindows = _windows;
+        for (std::size_t i = 0; i < _menuWindows.size(); ++i) {
+            const auto& w = _menuWindows[i];
+            NSString* title = ns(w.title.empty() ? w.app : w.app.empty() ? w.title : w.app + " – " + w.title);
+            NSMenuItem* item = [self item:title action:@selector(addWindowLayer:) key:@""];
+            item.tag = static_cast<NSInteger>(i);
+            [menu addItem:item];
+        }
+        if (_menuWindows.empty()) {
+            NSMenuItem* none = [self item:@"No windows are open" action:nil key:@""];
+            none.enabled = NO;
+            [menu addItem:none];
+        }
+    } else {
+        for (std::size_t i = 0; i < std::max<std::size_t>(1, _displays.size()); ++i) {
+            NSString* title = i < _displays.size()
+                ? [NSString stringWithFormat:@"Display %zu (%ux%u)", i + 1, _displays[i].width, _displays[i].height]
+                : @"Display 1";
+            NSMenuItem* item = [self item:title action:@selector(addDisplayLayer:) key:@""];
+            item.tag = static_cast<NSInteger>(i);
+            [menu addItem:item];
+        }
+    }
+    [menu popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, NSHeight(sender.bounds) + 4) inView:sender];
+}
+
+- (void)addDisplayLayer:(NSMenuItem*)item {
+    rec::app::Layer layer;
+    layer.display = static_cast<std::uint32_t>(std::max<NSInteger>(0, item.tag) + 1);
+    [self addLayer:layer];
+}
+
+- (void)addWindowLayer:(NSMenuItem*)item {
+    if (item.tag < 0 || item.tag >= static_cast<NSInteger>(_menuWindows.size())) return;
+    const auto& w = _menuWindows[static_cast<std::size_t>(item.tag)];
+    rec::app::Layer layer;
+    layer.kind = "window";
+    layer.window_app = w.app;
+    layer.window_title = w.title;
+    [self addLayer:layer];
+}
+
+// A new display or window, shown over the whole frame in this scene and hidden in the others.
+- (void)addLayer:(const rec::app::Layer&)layer {
+    if (_session->status().state != State::idle) return;
+    if (!rec::app::add_layer(_settings, layer)) {
+        _note = [NSString stringWithFormat:@"Scenes hold at most %zu displays and windows", rec::app::kMaxLayers];
+        _noteAttention = true;
+        _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
+        [self refresh];
+        return;
+    }
+    _selected = {rec::app::SourceRef::Kind::layer, _settings.layers.size() - 1};
+    [self showSceneSources];
+    rec::app::save_settings(_settingsPath, _settings);
+    [self refresh];
+}
+
+- (void)removeSource:(id)sender {
+    if (_session->status().state != State::idle || _selected.kind != rec::app::SourceRef::Kind::layer) return;
+    rec::app::remove_layer(_settings, _selected.layer);
+    _selected = {};
+    [self showSceneSources];
+    rec::app::save_settings(_settingsPath, _settings);
+    [self refresh];
+}
 - (void)chooseImage:(id)sender {
     NSOpenPanel* panel = [NSOpenPanel openPanel];
     panel.canChooseDirectories = NO;
@@ -1088,7 +1302,12 @@ enum class Pointer { down, dragged, up, moved, exited };
     }];
 }
 
+- (void)controlTextDidChange:(NSNotification*)notification {
+    if (notification.object == _sceneName) [self sceneNameChanged];
+}
+
 - (void)controlTextDidEndEditing:(NSNotification*)notification {
+    if (notification.object == _sceneName) rec::app::save_settings(_settingsPath, _settings);
     if (notification.object == _server && _settings.destination == "custom") {
         [self readSettings];
         _key.stringValue = ns(load_key(rec::app::server_url(_settings)));
@@ -1264,25 +1483,27 @@ enum class Pointer { down, dragged, up, moved, exited };
     return NSMakeRect(b.origin.x + (b.size.width - w) / 2, b.origin.y + (b.size.height - h) / 2, w, h);
 }
 
-// The camera's area while it can be dragged in the preview: it is in the frame where the
-// settings put it, before Start or in this recording.
-- (std::optional<rec::Area>)draggableCamera {
-    if (!_frame.number || _settings.scene != "screen-camera") return std::nullopt;
-    if (_shownState == State::idle ? _camera.state != NSControlStateValueOn : !_cameraLive) return std::nullopt;
-    return rec::app::camera_area(_settings, _settings.scene);
-}
-
-- (rec::app::CameraDrag)grabAt:(NSPoint)point {
-    const auto area = [self draggableCamera];
+// The source a press at point takes hold of in the preview: the topmost one shown there, in
+// this scene, before Start or in this recording.
+- (std::optional<PreviewHit>)hitAt:(NSPoint)point {
+    if (!_frame.number || (_shownState != State::idle && _shownState != State::recording && _shownState != State::paused))
+        return std::nullopt;
     const NSRect r = [self previewFrameRect];
-    if (!area || r.size.width <= 0) return {};
+    if (r.size.width <= 0) return std::nullopt;
     const double x = (point.x - r.origin.x) / r.size.width, y = 1 - (point.y - r.origin.y) / r.size.height;
-    return rec::app::grab_camera(*area, x, y, 12 / r.size.width, 12 / r.size.height);
+    const double handle_x = 12 / r.size.width, handle_y = 12 / r.size.height;
+    const auto source = rec::app::source_at(_settings, x, y, handle_x, handle_y);
+    if (!source) return std::nullopt;
+    const auto& item = rec::app::scene_item(rec::app::current_scene(_settings), *source);
+    const auto drag = rec::app::grab_area(item.area, x, y, handle_x, handle_y, source->kind == rec::app::SourceRef::Kind::camera);
+    if (drag.grab == rec::app::AreaDrag::Grab::none) return std::nullopt;
+    return PreviewHit{*source, drag};
 }
 
 - (void)showOutline {
-    const auto area = _drag.grab != rec::app::CameraDrag::Grab::none ? std::optional<rec::Area>(_outlineArea)
-                    : _hover ? [self draggableCamera] : std::nullopt;
+    std::optional<rec::Area> area;
+    if (_drag.grab != rec::app::AreaDrag::Grab::none) area = _outlineArea;
+    else if (_hoverSource) area = rec::app::scene_item(rec::app::current_scene(_settings), *_hoverSource).area;
     const NSRect r = [self previewFrameRect];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
@@ -1293,49 +1514,55 @@ enum class Pointer { down, dragged, up, moved, exited };
     [CATransaction commit];
 }
 
-// Dragging the camera in the preview moves it, dragging a corner resizes it; the recording
-// or the preview before Start follows at once.
+// Dragging a source in the preview moves it, dragging a corner resizes it; the recording or
+// the preview before Start follows at once.
 - (void)preview:(NSView*)view pointer:(Pointer)pointer event:(NSEvent*)event {
-    using Grab = rec::app::CameraDrag::Grab;
+    using Grab = rec::app::AreaDrag::Grab;
     const NSPoint point = [view convertPoint:event.locationInWindow fromView:nil];
-    const auto cursor = [](const rec::app::CameraDrag& grab, bool held) {
+    const auto cursor = [](const rec::app::AreaDrag& grab, bool held) {
         [(grab.grab == Grab::none     ? NSCursor.arrowCursor
           : grab.grab == Grab::resize ? NSCursor.crosshairCursor
           : held                      ? NSCursor.closedHandCursor
                                       : NSCursor.openHandCursor) set];
     };
     switch (pointer) {
-    case Pointer::down:
-        _drag = [self grabAt:point];
-        if (_drag.grab == Grab::none) return;
+    case Pointer::down: {
+        const auto hit = [self hitAt:point];
+        if (!hit) return;
+        _drag = hit->drag;
+        _dragged = hit->source;
+        _selected = hit->source;
+        [self showSceneSources];
         _outlineArea = _drag.from;
         cursor(_drag, true);
         break;
+    }
     case Pointer::dragged: {
         const NSRect r = [self previewFrameRect];
         if (_drag.grab == Grab::none || r.size.width <= 0) return;
-        _outlineArea = rec::app::drag_camera(_drag, (point.x - r.origin.x) / r.size.width, 1 - (point.y - r.origin.y) / r.size.height);
-        if (_settings.camera_corner != "custom") [_corner selectItemAtIndex:choice_index(kCorners, "custom")];
-        _settings.camera_corner = "custom";
-        _settings.camera_custom = _outlineArea;
-        _session->place_camera(_settings);
+        _outlineArea = rec::app::drag_area(_drag, (point.x - r.origin.x) / r.size.width, 1 - (point.y - r.origin.y) / r.size.height);
+        rec::app::scene_item(rec::app::current_scene(_settings), _dragged).area = _outlineArea;
+        if (_dragged.kind == rec::app::SourceRef::Kind::camera) [self showCameraPlace];
+        _session->show_scene(_settings);
         break;
     }
-    case Pointer::up:
+    case Pointer::up: {
         if (_drag.grab == Grab::none) return;
         _drag = {};
         rec::app::save_settings(_settingsPath, _settings);
         [self refresh];
-        cursor([self grabAt:point], false);
+        const auto hit = [self hitAt:point];
+        cursor(hit ? hit->drag : rec::app::AreaDrag{}, false);
         break;
+    }
     case Pointer::moved: {
-        const auto grab = [self grabAt:point];
-        _hover = grab.grab != Grab::none;
-        cursor(grab, false);
+        const auto hit = [self hitAt:point];
+        _hoverSource = hit ? std::optional(hit->source) : std::nullopt;
+        cursor(hit ? hit->drag : rec::app::AreaDrag{}, false);
         break;
     }
     case Pointer::exited:
-        _hover = false;
+        _hoverSource.reset();
         if (_drag.grab == Grab::none) [NSCursor.arrowCursor set];
         break;
     }
@@ -1425,15 +1652,17 @@ enum class Pointer { down, dragged, up, moved, exited };
         control.enabled = editable ? _systemAudio.state == NSControlStateValueOn : active && s.system_audio;
     for (NSControl* control in @[_micVolume, _micMute])
         control.enabled = editable ? _microphone.state == NSControlStateValueOn : active && s.microphone;
-    for (NSControl* control in @[_camera, _image, _chooseImage]) control.enabled = editable;
-    for (NSControl* control in @[_cameraDevice, _corner]) control.enabled = editable && _camera.state == NSControlStateValueOn;
+    // Sources are fixed while recording; scenes and where they put the sources are not.
+    for (NSControl* control in @[_camera, _image, _chooseImage, _addDisplay, _addWindow]) control.enabled = editable;
+    _cameraDevice.enabled = editable && _camera.state == NSControlStateValueOn;
+    const bool arranging = editable || active;
+    for (NSControl* control in @[_scene, _newScene, _sceneName, _sourceShown]) control.enabled = arranging;
+    _deleteScene.enabled = arranging && _settings.scenes.size() > 1;
+    _removeSource.enabled = editable && _selected.kind == rec::app::SourceRef::Kind::layer;
+    _corner.enabled = arranging && _settings.camera;
     // A dragged camera is sized by its corners.
-    _cameraSize.enabled = editable && _camera.state == NSControlStateValueOn &&
-                          _corner.indexOfSelectedItem != choice_index(kCorners, "custom");
+    _cameraSize.enabled = arranging && _settings.camera && _corner.indexOfSelectedItem != choice_index(kCorners, "custom");
     _shownState = s.state;
-    _cameraLive = active && s.camera;
-    // The scene is the one setting that changes during a recording, when it draws a camera.
-    _scene.enabled = editable ? _camera.state == NSControlStateValueOn : active && s.camera;
     _showLast.enabled = !_settings.last_recording.empty();
 
     // Preview frames are made only while the window is on screen: the recording's, or before
@@ -1558,6 +1787,8 @@ enum class Pointer { down, dragged, up, moved, exited };
     ui(^{
         for (NSControl* control in @[self->_record, self->_pause, self->_saveReplay, self->_replay, self->_replayLength,
                                      self->_camera, self->_cameraDevice, self->_corner, self->_cameraSize, self->_scene,
+                                     self->_newScene, self->_deleteScene, self->_sceneName, self->_sourcesTable,
+                                     self->_sourceShown, self->_addDisplay, self->_addWindow, self->_removeSource,
                                      self->_image, self->_imageFile, self->_chooseImage, self->_source, self->_systemAudio, self->_microphone,
                                      self->_micDevice, self->_cursor, self->_resolution, self->_fps, self->_codec,
                                      self->_format, self->_stream, self->_service, self->_server, self->_key,
@@ -1743,6 +1974,7 @@ enum class Pointer { down, dragged, up, moved, exited };
     };
     const auto is_color = [](const std::array<long, 3>& c, NSString* want) {
         const auto [r, g, b] = c;
+        if ([want isEqualToString:@"black"]) return r < 40 && g < 40 && b < 40;
         return [want isEqualToString:@"green"] ? g > 120 && g > r + 60 && g > b + 60
                                                : r > 170 && r > g + 100 && r > b + 100;
     };
@@ -1880,6 +2112,42 @@ enum class Pointer { down, dragged, up, moved, exited };
     save_png(resized, @"app-preview-layout");
     save_png(moved, @"app-preview-layout-moved");
     note(@"camera-layout=ok");
+
+    // 6c. Scenes: a new scene, renamed, puts the recorded screen in the bottom-right quarter by
+    // dragging its top-left corner, and hides the camera with Show in this scene. Recording
+    // starts in it and switches back to the first scene at 2 s.
+    set_check(_image, false);  // It fills the frame, so it would take the corner.
+    press(_newScene);
+    __block NSString* sceneTitle;
+    ui(^{
+        self->_sceneName.stringValue = @"Corner screen";
+        [self sceneNameChanged];
+        sceneTitle = self->_scene.titleOfSelectedItem;
+    });
+    if (![sceneTitle isEqualToString:@"Corner screen"]) fail([@"the Scene list shows " stringByAppendingString:sceneTitle ?: @"nothing"]);
+    wait_preview(@"app-scenes", @"green", 0.72, 0.08, 0.22, 0.22);  // The camera, top right as in the first scene.
+    drag(0.004, 0.006, 0.5, 0.5);
+    wait_preview(@"app-scenes", @"black", 0.1, 0.1, 0.3, 0.3);
+    ui(^{
+        const auto sources = rec::app::scene_sources(self->_settings);
+        for (std::size_t i = 0; i < sources.size(); ++i)
+            if (sources[i].kind == rec::app::SourceRef::Kind::camera)
+                [self->_sourcesTable selectRowIndexes:[NSIndexSet indexSetWithIndex:i] byExtendingSelection:NO];
+    });
+    set_check(_sourceShown, false);
+    const auto arranged = wait_preview(@"app-scenes", @"black", 0.72, 0.08, 0.22, 0.22);
+    press(_record);
+    wait_for(recording, 20);
+    recorded(2.0);
+    scene(0);
+    const auto switched = wait_preview(@"app-scenes-switched", @"green", 0.72, 0.08, 0.22, 0.22);
+    recorded(4.5);
+    press(_record);
+    wait_for(@"Ready to record", 30);
+    saved(@"scenes");
+    save_png(arranged, @"app-preview-scenes");
+    save_png(switched, @"app-preview-scenes-switched");
+    note(@"scenes=ok");
 
     // 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
     // unmuted from the menu bar item's menu 4.5 s in. The mix loses the beeps at 3 and 4 s.

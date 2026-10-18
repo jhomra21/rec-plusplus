@@ -12,6 +12,8 @@
 #   7. a camera and an image are drawn, and the scene moves the camera while recording; the
 #      preview shows the same picture, before Start too, and Show preview turns it off;
 #      dragging the camera in the preview moves and resizes it, before Start and while recording;
+#      a new scene places the screen by dragging and hides the camera, and is switched away
+#      from while recording;
 #   8. volume and mute change the mix while recording, from the window and the menu bar item;
 #   9. quitting during a recording saves the movie; settings persist without the stream key.
 # Usage: app-e2e.sh REC REC_APP ARTIFACTS
@@ -33,7 +35,7 @@ within() {
   awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v != "" && v + 0 >= lo && v + 0 <= hi) }' \
     || { echo "$1 is outside [$2, $3]" >&2; exit 1; }
 }
-# color KEY FILE green|red|white: a sample_N=R,G,B probe field, with room for encoding error.
+# color KEY FILE green|red|white|black: a sample_N=R,G,B probe field, with room for encoding error.
 color() {
   awk -F= -v key="$1" -v want="$3" '$1 == key {
       split($2, c, ",")
@@ -41,6 +43,7 @@ color() {
       if (want == "green") ok = c[2] > 120 && c[2] > c[1] + 60 && c[2] > c[3] + 60
       if (want == "red") ok = c[1] > 170 && c[1] > c[2] + 100 && c[1] > c[3] + 100
       if (want == "white") ok = c[1] > 190 && c[2] > 190 && c[3] > 190
+      if (want == "black") ok = c[1] < 40 && c[2] < 40 && c[3] < 40
     }
     END { exit !(found && ok) }' "$2" || { echo "$1 in $2 is not $3" >&2; exit 1; }
 }
@@ -82,6 +85,7 @@ grep -qx 'quit=started' "$report"
 grep -qx 'idle-preview=ok' "$report"
 grep -qx 'preview=ok' "$report"
 grep -qx 'camera-layout=ok' "$report"
+grep -qx 'scenes=ok' "$report"
 grep -q '^live=● LIVE' "$report"
 
 probe "$(step pause)" app-pause
@@ -130,6 +134,17 @@ color sample_1 "$artifacts/app-layout-moved.probe" white
 color sample_4 "$artifacts/app-layout-middle.probe" white
 color sample_4 "$artifacts/app-layout-moved.probe" green
 
+# The scenes step: the screen in the bottom-right quarter without the camera, then the first
+# scene (the whole screen, the camera top right) from 2 s.
+scenes="$(step scenes)"
+[[ -f "$scenes" ]] || { echo "missing movie: $scenes" >&2; exit 1; }
+"$rec" probe "$scenes" --sample 100,100,500,300 | tee "$artifacts/app-scenes-corner.probe"
+"$rec" probe "$scenes" --sample 1380,90,440,250 | tee "$artifacts/app-scenes-camera.probe"
+color sample_1 "$artifacts/app-scenes-corner.probe" black
+color sample_4 "$artifacts/app-scenes-corner.probe" white
+color sample_1 "$artifacts/app-scenes-camera.probe" black
+color sample_4 "$artifacts/app-scenes-camera.probe" green
+
 # System audio at -6 dB, muted 2.5 s in, unmuted 4.5 s in: the mix has no beeps at 3 and 4 s.
 probe "$(step mute)" app-mute
 value beeps "$artifacts/app-mute.probe" | tr , '\n' | awk '
@@ -158,9 +173,11 @@ grep -qx 'fps=30' "$settings"
 grep -qx 'replay=0' "$settings"
 grep -qx 'camera=1' "$settings"
 grep -qx 'camera_device=test' "$settings"
-grep -qx 'scene=screen-camera' "$settings"
-grep -qx 'camera_corner=custom' "$settings"
-grep -qx 'image=1' "$settings"
+grep -qx 'scene=0' "$settings"
+grep -qx 'scene.1.name=Corner screen' "$settings"
+grep -qx 'scene.1.screen=1,0.5,0.5,0.5,0.5' "$settings"
+grep -q '^scene.1.camera=0,' "$settings"
+grep -qx 'image=0' "$settings"
 grep -qx 'preview=1' "$settings"
 grep -qx 'system_volume=-6' "$settings"
 grep -qx 'system_muted=0' "$settings"

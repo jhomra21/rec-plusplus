@@ -12,11 +12,40 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 // The app layer shared by the macOS and Windows interfaces: persisted settings, stream
 // destinations, and one recording session at a time. Platform shells own windows, menus,
 // hotkeys, folders and secret storage; they never talk to rec::Recorder directly.
 namespace rec::app {
+
+// A display or window shown in scenes besides the screen, camera and image.
+struct Layer {
+    std::string kind = "display";     // display or window.
+    std::uint32_t display = 1;
+    std::string region;               // display: x,y,width,height in its pixels; empty for all of it.
+    std::string window_app, window_title;  // window: found again by app and title.
+};
+
+// How a scene shows one source: whether, and where as fractions of the frame.
+struct SceneItem {
+    bool visible = true;
+    Area area;
+};
+
+// A named arrangement of every source. Switching scenes moves, shows and hides them at once;
+// a recording keeps capturing all of them.
+struct Scene {
+    std::string name;
+    SceneItem screen, camera, image;
+    std::vector<SceneItem> layers;    // One per Settings::layers, in order.
+};
+
+// With the camera and the image, the engine's 15 overlays.
+inline constexpr std::size_t kMaxLayers = 13;
+
+// Screen and camera, Screen only, Camera only.
+std::vector<Scene> default_scenes();
 
 struct Settings {
     std::string folder;               // Empty: the platform's movies folder.
@@ -47,14 +76,13 @@ struct Settings {
     std::uint32_t stream_kbps = 6000;
     bool replay = false;              // Keep the last replay_seconds for Save Replay.
     std::uint32_t replay_seconds = 30;
-    bool camera = false;              // Draw a camera over the recording.
+    bool camera = false;              // Use a camera in the scenes.
     std::string camera_device = "default";  // default, test, or a camera ID.
-    std::string camera_corner = "bottom-right";  // One of kCorners; "custom" uses camera_custom.
-    std::string camera_size = "medium";
-    Area camera_custom{0.73, 0.715, 0.25, 0.25};  // Where the camera was dragged, as fractions of the frame.
-    std::string scene = "screen-camera";  // What the camera does; switchable while recording.
-    bool image = false;               // Draw an image (PNG, JPEG) over everything, fitted.
+    bool image = false;               // Use an image (PNG, JPEG) in the scenes, drawn over everything, fitted.
     std::string image_path;
+    std::vector<Layer> layers;        // Drawn above the screen and below the camera, in order.
+    std::vector<Scene> scenes = default_scenes();  // Never empty.
+    std::uint32_t scene = 0;          // The scene shown; switchable while recording.
     bool preview = true;              // Show the scene before recording while the window shows.
     std::string last_recording;
 };
@@ -75,8 +103,6 @@ inline constexpr int kVolumeMin = -40, kVolumeMax = 20;
 inline constexpr std::uint32_t kPreviewWidth = 960;
 inline constexpr std::array<Choice, 3> kServices{
     {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
-inline constexpr std::array<Choice, 3> kScenes{
-    {{"screen-camera", "Screen and camera"}, {"screen", "Screen only"}, {"camera", "Camera only"}}};
 inline constexpr std::array<Choice, 5> kCorners{{{"bottom-right", "Bottom right"},
                                                 {"bottom-left", "Bottom left"},
                                                 {"top-right", "Top right"},
@@ -102,26 +128,63 @@ std::string region_text(const Region& region);
 // The open window that settings.window_app and window_title name: the same title, else the
 // first window of that app.
 std::optional<Window> find_window(const Settings& settings);
+std::optional<Window> find_window(const std::string& app, const std::string& title);
 
-// Where the camera goes in a scene, as fractions of the frame, and whether it shows.
-Area camera_area(const Settings& settings, const std::string& scene);
-bool camera_visible(const std::string& scene);
+// The scene shown (settings.scene, kept in range).
+Scene& current_scene(Settings& settings);
+const Scene& current_scene(const Settings& settings);
+// A copy of the shown scene named "Scene N", shown next. False at 999 scenes.
+bool add_scene(Settings& settings);
+// Removes the shown scene, unless it is the only one.
+void remove_scene(Settings& settings);
+// Adds a source to every scene: shown over the whole frame in the shown scene, hidden in
+// the others. False when there are kMaxLayers already.
+bool add_layer(Settings& settings, const Layer& layer);
+void remove_layer(Settings& settings, std::size_t index);
+// "Display 2", "Display 1, 640x360 at 0,0", or the window's title and app.
+std::string layer_name(const Layer& layer);
 
-// Moving and resizing the camera with the pointer in the preview. Points are fractions of
+// One source in the scenes.
+struct SourceRef {
+    enum class Kind { screen, camera, image, layer };
+    Kind kind = Kind::screen;
+    std::size_t layer = 0;  // Into Settings::layers.
+    bool operator==(const SourceRef&) const = default;
+};
+// The sources settings use, bottom to top as drawn: the recorded screen, the layers, the
+// camera, the image.
+std::vector<SourceRef> scene_sources(const Settings& settings);
+std::string source_name(const Settings& settings, const SourceRef& source);
+SceneItem& scene_item(Scene& scene, const SourceRef& source);
+const SceneItem& scene_item(const Scene& scene, const SourceRef& source);
+// The topmost shown source at x,y in the shown scene (fractions of the frame). A source that
+// fills the frame is taken only by a corner, within handle_x, handle_y.
+std::optional<SourceRef> source_at(const Settings& settings, double x, double y, double handle_x, double handle_y);
+
+// The camera in a corner (one of kCorners but custom) at a size (one of kCameraSizes).
+Area corner_area(const std::string& corner, const std::string& size);
+// The corner and size that place the camera at area, or "custom" and "".
+std::string corner_of(const Area& area);
+std::string size_of(const Area& area);
+
+// Moving and resizing a source with the pointer in the preview. Points are fractions of
 // the frame, x from the left and y from the top.
-struct CameraDrag {
+struct AreaDrag {
     enum class Grab { none, move, resize };
     Grab grab = Grab::none;
-    Area from;               // The camera's area when the drag began.
+    Area from;               // The source's area when the drag began.
     double x = 0, y = 0;     // Where it began.
     bool left = false, top = false;  // The corner held while resizing.
+    bool keep_shape = true;  // A resize keeps the area's aspect ratio.
 };
 // What a press at x,y takes hold of: a corner of area (within handle_x, handle_y of it)
-// resizes the camera, anywhere else inside moves it.
-CameraDrag grab_camera(const Area& area, double x, double y, double handle_x, double handle_y);
-// The camera's area with the pointer now at x,y: it stays inside the frame and keeps its
-// shape; a resize keeps the opposite corner in place, and edges snap to the corner margins.
-Area drag_camera(const CameraDrag& drag, double x, double y);
+// resizes it, anywhere else inside moves it. The camera keeps its shape, since it is cropped
+// to fill its area; the other sources fit inside theirs.
+AreaDrag grab_area(const Area& area, double x, double y, double handle_x, double handle_y, bool keep_shape);
+// The area with the pointer now at x,y: it stays inside the frame and a resize keeps the
+// opposite corner in place. Edges snap to the frame's edges and middle, and to the corner
+// margins.
+Area drag_area(const AreaDrag& drag, double x, double y);
 
 // rtmp:// or rtmps://host/app for the destination; the stream key is appended as the last
 // segment. The Twitch and YouTube presets use RTMPS.
@@ -145,14 +208,19 @@ struct Status {
     std::string stream_error;        // Why the stream ended; the recording continues.
     bool replay = false;             // This recording keeps a replay buffer.
     double replay_seconds = 0;       // Media the replay buffer holds now.
-    bool camera = false;             // This recording draws a camera, so scenes can switch.
-    std::string scene;               // The current scene while a camera is drawn.
+    std::uint32_t scene = 0;         // The scene shown in this recording.
     std::uint64_t camera_frames = 0;
     bool window_closed = false;      // The recorded window closed, which ended the recording.
     bool previewing = false;         // The scene shows before recording (idle_preview()).
     std::string preview_error;       // Why it cannot.
     std::string error;               // Why the last recording failed or ended early.
     std::string saved;               // Movie the last recording saved; empty while one runs.
+};
+
+// Each source's overlay index in one capture.
+struct SourceIndices {
+    std::optional<std::size_t> camera, image;
+    std::vector<std::size_t> layers;
 };
 
 // One recording at a time, owned by a worker thread: start() checks the settings and
@@ -177,11 +245,9 @@ public:
     // Writes the replay buffer to a new replay-YYYY-MM-DD-HHMMSS.mp4 in folder; path and
     // seconds receive where and how much. Takes as long as writing the file.
     Result save_replay(const std::string& folder, std::string& path, double& seconds);
-    // Moves, hides or shows the camera at once (one of kScenes).
-    Result set_scene(const std::string& scene);
-    // Moves the camera to settings' corner, size or custom area at once: in the recording,
-    // or in the preview before Start.
-    Result place_camera(const Settings& settings);
+    // Shows settings' current scene at once: in the recording, or in the preview before
+    // Start. A recording keeps the sources it started with; their placement can change.
+    Result show_scene(const Settings& settings);
     // Changes a source's volume and mute at once; the source must be in this recording.
     Result set_volume(AudioInput input, int volume, bool muted);
     // Copies the recording's newest preview frame when it is newer than frame.number.
@@ -190,8 +256,8 @@ public:
     void show_preview(bool on);
     // Shows the scene before recording: while idle, a capture of settings for preview() only
     // (no file or audio) runs on its own thread; nullptr stops it. Call it whenever the
-    // settings may have changed: a new source or overlay restarts capture, a new camera
-    // placement only moves the camera. A recording stops it first and takes over preview().
+    // settings may have changed: a new source restarts capture, a scene change only moves
+    // the layers. A recording stops it first and takes over preview().
     void idle_preview(const Settings* settings, bool test_pattern = false);
     Status status();
     void wait();  // Blocks until a stop in progress has saved the movie.
@@ -199,7 +265,7 @@ public:
 private:
     void run(std::unique_ptr<Recorder> recorder);
     void run_idle();
-    void place_idle_camera();  // With mutex_ held.
+    void place_idle();  // With mutex_ held.
 
     std::function<void()> changed_;
     std::mutex mutex_;
@@ -212,9 +278,8 @@ private:
     std::string error_, stream_error_, saved_;
     bool streaming_ = false, replay_ = false;
     bool preview_shown_ = true;
-    std::optional<std::size_t> camera_;  // The camera's overlay index in this recording.
-    Settings camera_settings_;           // Placement for scene changes.
-    std::string scene_;
+    SourceIndices indices_;              // This recording's.
+    std::uint32_t scene_ = 0;
     Stats last_{};
     // Stream rate measurement: bytes sent at rate_time_.
     std::uint64_t rate_bytes_ = 0;
@@ -231,7 +296,7 @@ private:
     Recorder* idle_ = nullptr;          // Set while its capture runs.
     bool idle_alive_ = false;           // A capture exists, starting, running or stopping.
     bool closing_ = false;
-    std::optional<std::size_t> idle_camera_;
+    SourceIndices idle_indices_;
     const Recorder* preview_source_ = nullptr;  // Whose frames preview() copied last.
 };
 

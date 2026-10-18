@@ -55,18 +55,21 @@ enum Control : int {
     kCameraHeader, kCamera, kCameraDevice, kPositionLabel, kCorner, kSizeLabel, kCameraSize, kSceneLabel, kScene,
     kImage, kImageFile, kBrowseImage,
     kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast, kPreview, kShowPreview,
+    kScenesHeader, kNewScene, kDeleteScene, kSceneNameLabel, kSceneName, kSourcesLabel, kSceneSources, kSourceShown,
+    kAddDisplay, kAddWindow, kRemoveSource,
 };
 
 enum Command : UINT {
     kMenuRecord = 1000, kMenuPause, kMenuShow, kMenuFolder, kMenuQuit, kMenuReplay, kMenuMuteSystem, kMenuMuteMic,
-    kMenuScene = 1010
+    // The Add Display and Add Window menus, then one command per scene.
+    kMenuAddDisplay = 1100, kMenuAddWindow = 1200, kMenuScene = 2000
 };
+constexpr std::size_t kMaxMenuDisplays = 100, kMaxMenuWindows = 800, kMaxMenuScenes = 999;
 
 using rec::app::choice_index;
 using rec::app::kCameraSizes;
 using rec::app::kCodecs;
 using rec::app::kCorners;
-using rec::app::kScenes;
 using rec::app::kFormats;
 using rec::app::kFrameRates;
 using rec::app::kResolutions;
@@ -106,6 +109,13 @@ std::wstring text_of(HWND control) {
     std::wstring out(static_cast<std::size_t>(GetWindowTextLengthW(control)), L'\0');
     if (!out.empty()) GetWindowTextW(control, out.data(), static_cast<int>(out.size()) + 1);
     return out;
+}
+
+// "App - Title", shortened for a menu or list.
+std::wstring window_label(const std::string& app, const std::string& title) {
+    std::wstring text = wide(title.empty() ? app : app.empty() ? title : app + " - " + title);
+    if (text.size() > 70) text = text.substr(0, 69) + L"\u2026";
+    return text;
 }
 
 std::wstring duration_label(std::uint32_t seconds) {
@@ -430,14 +440,6 @@ private:
         return {x, y, x + w, y + h};
     }
 
-    // The camera's area while it can be dragged in the preview: it is in the frame where the
-    // settings put it, before Start or in this recording.
-    std::optional<rec::Area> draggable_camera() const {
-        if (!frame_.number || settings_.scene != "screen-camera") return std::nullopt;
-        if (state_ == State::idle ? !checked(kCamera) : !camera_live_) return std::nullopt;
-        return rec::app::camera_area(settings_, settings_.scene);
-    }
-
     // The pointer at l in frame fractions, and the corner handle's size in them.
     struct FramePoint { double x, y, handle_x, handle_y; };
     std::optional<FramePoint> frame_point(HWND window, LPARAM l) const {
@@ -447,40 +449,56 @@ private:
         return FramePoint{(GET_X_LPARAM(l) - r.left) / w, (GET_Y_LPARAM(l) - r.top) / h, px(12) / w, px(12) / h};
     }
 
-    rec::app::CameraDrag hit_camera(HWND window, LPARAM l) const {
-        const auto area = draggable_camera();
+    // The source a press at l takes hold of in the preview: the topmost one shown there, in
+    // this scene, before Start or in this recording.
+    struct Hit {
+        rec::app::SourceRef source;
+        rec::app::AreaDrag drag;
+    };
+    std::optional<Hit> hit_source(HWND window, LPARAM l) const {
+        if (!frame_.number || (state_ != State::idle && state_ != State::recording && state_ != State::paused))
+            return std::nullopt;
         const auto p = frame_point(window, l);
-        if (!area || !p) return {};
-        return rec::app::grab_camera(*area, p->x, p->y, p->handle_x, p->handle_y);
+        if (!p) return std::nullopt;
+        const auto source = rec::app::source_at(settings_, p->x, p->y, p->handle_x, p->handle_y);
+        if (!source) return std::nullopt;
+        const auto& item = rec::app::scene_item(rec::app::current_scene(settings_), *source);
+        const auto drag = rec::app::grab_area(item.area, p->x, p->y, p->handle_x, p->handle_y,
+                                              source->kind == rec::app::SourceRef::Kind::camera);
+        if (drag.grab == rec::app::AreaDrag::Grab::none) return std::nullopt;
+        return Hit{*source, drag};
     }
 
-    // Dragging the camera in the preview moves it, dragging a corner resizes it; the
-    // recording or the preview before Start follows at once.
+    // Dragging a source in the preview moves it, dragging a corner resizes it; the recording
+    // or the preview before Start follows at once.
     void preview_mouse(HWND window, UINT message, LPARAM l) {
-        using Grab = rec::app::CameraDrag::Grab;
+        using Grab = rec::app::AreaDrag::Grab;
         switch (message) {
-        case WM_LBUTTONDOWN:
-            drag_ = hit_camera(window, l);
-            if (drag_.grab == Grab::none) return;
+        case WM_LBUTTONDOWN: {
+            const auto hit = hit_source(window, l);
+            if (!hit) return;
+            drag_ = hit->drag;
+            dragged_ = hit->source;
+            select_source(hit->source);
             SetCapture(window);
             outline_ = drag_.from;
             InvalidateRect(window, nullptr, FALSE);
             return;
+        }
         case WM_MOUSEMOVE:
             if (drag_.grab != Grab::none) {
                 const auto p = frame_point(window, l);
                 if (!p) return;
-                outline_ = rec::app::drag_camera(drag_, p->x, p->y);
-                if (settings_.camera_corner != "custom") select(kCorner, choice_index(kCorners, "custom"));
-                settings_.camera_corner = "custom";
-                settings_.camera_custom = outline_;
-                session_.place_camera(settings_);
+                outline_ = rec::app::drag_area(drag_, p->x, p->y);
+                rec::app::scene_item(rec::app::current_scene(settings_), dragged_).area = outline_;
+                if (dragged_.kind == rec::app::SourceRef::Kind::camera) show_camera_place();
+                session_.show_scene(settings_);
                 InvalidateRect(window, nullptr, FALSE);
                 return;
             }
-            if (const bool over = hit_camera(window, l).grab != Grab::none; over != hover_) {
-                hover_ = over;
-                if (over) {
+            if (const auto hit = hit_source(window, l); (hit ? std::optional(hit->source) : std::nullopt) != hover_) {
+                hover_ = hit ? std::optional(hit->source) : std::nullopt;
+                if (hover_) {
                     TRACKMOUSEEVENT track{sizeof track, TME_LEAVE, window, 0};
                     TrackMouseEvent(&track);
                 }
@@ -488,7 +506,7 @@ private:
             }
             return;
         case WM_MOUSELEAVE:
-            hover_ = false;
+            hover_.reset();
             InvalidateRect(window, nullptr, FALSE);
             return;
         case WM_LBUTTONUP:
@@ -506,17 +524,18 @@ private:
     }
 
     bool preview_cursor(HWND window) {
-        using Grab = rec::app::CameraDrag::Grab;
+        using Grab = rec::app::AreaDrag::Grab;
         POINT at;
         GetCursorPos(&at);
         ScreenToClient(window, &at);
-        const auto grab = drag_.grab != Grab::none ? drag_ : hit_camera(window, MAKELPARAM(at.x, at.y));
+        rec::app::AreaDrag grab = drag_;
+        if (grab.grab == Grab::none)
+            if (const auto hit = hit_source(window, MAKELPARAM(at.x, at.y))) grab = hit->drag;
         if (grab.grab == Grab::none) return false;
         const LPCWSTR shape = grab.grab == Grab::move ? IDC_SIZEALL : grab.left == grab.top ? IDC_SIZENWSE : IDC_SIZENESW;
         SetCursor(LoadCursorW(nullptr, shape));
         return true;
     }
-
     // The newest frame in the output's shape, centered on dark gray.
     void paint_preview(HWND window, HDC dc) {
         RECT area;
@@ -536,9 +555,10 @@ private:
             SetBrushOrgEx(dc, 0, 0, nullptr);
             StretchDIBits(dc, x, y, w, h, 0, 0, static_cast<int>(frame_.width), static_cast<int>(frame_.height),
                           frame_.pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
-            // The camera's outline while it is held or the pointer is over it.
-            const auto camera = drag_.grab != rec::app::CameraDrag::Grab::none ? std::optional<rec::Area>(outline_)
-                              : hover_ ? draggable_camera() : std::nullopt;
+            // The outline of the source held or under the pointer.
+            const auto camera = drag_.grab != rec::app::AreaDrag::Grab::none ? std::optional<rec::Area>(outline_)
+                              : hover_ ? std::optional(rec::app::scene_item(rec::app::current_scene(settings_), *hover_).area)
+                                       : std::nullopt;
             if (camera) {
                 RECT box{x + static_cast<int>(std::lround(camera->x * w)), y + static_cast<int>(std::lround(camera->y * h)),
                          x + static_cast<int>(std::lround((camera->x + camera->width) * w)),
@@ -667,7 +687,7 @@ private:
         title_ = CreateFontIndirectW(&title);
         for (auto& [id, hwnd] : controls_) {
             const bool header = id == kCaptureHeader || id == kQualityHeader || id == kStreamHeader || id == kReplayHeader ||
-                                id == kCameraHeader || id == kFolderHeader;
+                                id == kCameraHeader || id == kFolderHeader || id == kScenesHeader;
             const HFONT font = id == kStatus ? title_ : header || id == kLive ? bold_ : font_;
             SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
@@ -755,6 +775,20 @@ private:
         check(kReplay, L"Keep the las&t");
         HWND replay = combo(kReplayLength);
 
+        label(kScenesHeader, L"Scenes");
+        label(kSceneLabel, L"Sce&ne");
+        combo(kScene);
+        button(kNewScene, L"New Scene");
+        button(kDeleteScene, L"Delete Scene");
+        label(kSceneNameLabel, L"Name");
+        edit(kSceneName);
+        label(kSourcesLabel, L"Sources");
+        add(kSceneSources, WC_LISTBOXW, L"", LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE);
+        check(kSourceShown, L"Show in this scene");
+        button(kAddDisplay, L"Add Display...");
+        button(kAddWindow, L"Add Window...");
+        button(kRemoveSource, L"Remove");
+
         label(kCameraHeader, L"Camera and image");
         check(kCamera, L"Cam&era");
         HWND camera = combo(kCameraDevice);
@@ -762,13 +796,9 @@ private:
         HWND corner = combo(kCorner);
         label(kSizeLabel, L"Si&ze");
         HWND size = combo(kCameraSize);
-        label(kSceneLabel, L"Sce&ne");
-        HWND scene = combo(kScene);
         check(kImage, L"Image overla&y");
         label(kImageFile, L"");
         button(kBrowseImage, L"Bro&wse...");
-
-
 
         SendMessageW(mic, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Default microphone"));
         for (const auto& device : microphones_)
@@ -783,7 +813,6 @@ private:
         fill(service, kServices);
         fill(corner, kCorners);
         fill(size, kCameraSizes);
-        fill(scene, kScenes);
         for (const auto& c : cameras_) SendMessageW(camera, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(c.name).c_str()));
         for (auto seconds : rec::app::kReplayLengths)
             SendMessageW(replay, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(duration_label(seconds).c_str()));
@@ -820,8 +849,9 @@ private:
     // left, where it goes on the right. Two columns keep the window shorter than a 1080p
     // screen at 150% scaling.
     void layout() {
-        const int margin = px(20), column = px(440), label_width = px(130), row = px(26), gap = px(8);
-        const int full = 2 * column + px(30);
+        const int margin = px(20), column = px(420), scenes_column = px(290), label_width = px(130), row = px(26),
+                  gap = px(8);
+        const int full = 2 * column + scenes_column + px(60);
         int x = margin, y = margin, width = full;
         const auto place = [&](int id, int left, int top, int w, int h) { MoveWindow(get(id), left, top, w, h, FALSE); };
         const auto line = [&](int id, int h) { place(id, x, y, width, h); y += h + gap; };
@@ -830,7 +860,7 @@ private:
             // A drop-down list's height includes its open list.
             const bool list = control_id == kSource || control_id == kMicDevice || control_id == kResolution ||
                               control_id == kFps || control_id == kCodec || control_id == kFormat || control_id == kService ||
-                              control_id == kReplayLength || control_id == kScene;
+                              control_id == kReplayLength;
             place(control_id, x + label_width, y, width - label_width, list ? px(240) : h);
             y += h + gap;
         };
@@ -905,26 +935,51 @@ private:
 
         header(kReplayHeader);
         beside(kReplay, kReplayLength);
+        const int right_bottom = y;
+
+        // The scenes, their sources, the camera and the image in a narrow third column.
+        x = margin + 2 * (column + px(30));
+        y = margin - px(10);
+        width = scenes_column;
+        const int short_label = px(64);
+        const auto row_of = [&](int label_id, int control_id, bool list) {
+            place(label_id, x, y + px(4), short_label - gap, px(20));
+            place(control_id, x + short_label, y, width - short_label, list ? px(240) : row);
+            y += row + gap;
+        };
+        header(kScenesHeader);
+        row_of(kSceneLabel, kScene, true);
+        const int half_width = (width - gap) / 2;
+        place(kNewScene, x, y, half_width, row);
+        place(kDeleteScene, x + half_width + gap, y, width - half_width - gap, row);
+        y += row + gap;
+        row_of(kSceneNameLabel, kSceneName, false);
+        line(kSourcesLabel, px(20));
+        line(kSceneSources, px(124));
+        line(kSourceShown, px(22));
+        const int button_third = (width - 2 * gap) / 3;
+        place(kAddDisplay, x, y, button_third, row);
+        place(kAddWindow, x + button_third + gap, y, button_third, row);
+        place(kRemoveSource, x + 2 * (button_third + gap), y, width - 2 * (button_third + gap), row);
+        y += row + gap;
 
         header(kCameraHeader);
-        beside(kCamera, kCameraDevice);
-        const int half = (width - label_width - px(50)) / 2;
-        place(kPositionLabel, x, y + px(4), label_width - gap, px(20));
-        place(kCorner, x + label_width, y, half, px(240));
-        place(kSizeLabel, x + label_width + half + gap, y + px(4), px(50) - gap, px(20));
-        place(kCameraSize, x + width - half, y, half, px(240));
+        const int box = px(104);
+        place(kCamera, x, y, box - gap, px(22));
+        place(kCameraDevice, x + box, y, width - box, px(240));
         y += row + gap;
-        pair(kSceneLabel, kScene, row);
-        place(kImage, x, y, label_width - gap, px(22));
-        place(kImageFile, x + label_width, y + px(4), width - label_width - px(110) - gap, px(20));
-        place(kBrowseImage, x + width - px(110), y, px(110), row);
+        row_of(kPositionLabel, kCorner, true);
+        row_of(kSizeLabel, kCameraSize, true);
+        place(kImage, x, y, box - gap, px(22));
+        place(kImageFile, x + box, y + px(4), width - box, px(20));
+        y += row;
+        place(kBrowseImage, x + box, y, width - box, row);
         y += row;
 
         content_width_ = full + 2 * margin;
-        content_height_ = std::max(left_bottom, y) + margin;
+        content_height_ = std::max({left_bottom, right_bottom, y}) + margin;
         InvalidateRect(window_, nullptr, TRUE);
     }
-
     void fit() {
         RECT frame{0, 0, content_width_, content_height_};        AdjustWindowRectExForDpi(&frame, static_cast<DWORD>(GetWindowLongW(window_, GWL_STYLE)), FALSE,
                                  static_cast<DWORD>(GetWindowLongW(window_, GWL_EXSTYLE)), dpi_);
@@ -975,14 +1030,12 @@ private:
         for (std::size_t i = 0; i < cameras_.size(); ++i)
             if (cameras_[i].id == s.camera_device) camera = static_cast<int>(i);
         select(kCameraDevice, camera);
-        select(kCorner, choice_index(kCorners, s.camera_corner));
-        select(kCameraSize, choice_index(kCameraSizes, s.camera_size));
-        select(kScene, choice_index(kScenes, s.scene));
         set_check(kImage, s.image);
         set_check(kShowPreview, s.preview);
         show_image();
         show_server();
         SetWindowTextW(get(kFolder), wide(s.folder).c_str());
+        show_scenes();
     }
 
     void show_volume(rec::AudioInput input) {
@@ -1048,11 +1101,7 @@ private:
         add_source({Source::Kind::pick}, L"Select a region...");
         std::string error;
         const auto windows = rec::list_windows(error);
-        const auto named = [](const std::string& app, const std::string& title) {
-            std::wstring text = wide(title.empty() ? app : app.empty() ? title : app + " - " + title);
-            if (text.size() > 70) text = text.substr(0, 69) + L"\u2026";
-            return L"Window: " + text;
-        };
+        const auto named = [](const std::string& app, const std::string& title) { return L"Window: " + window_label(app, title); };
         const bool open = std::any_of(windows.begin(), windows.end(), [&](const rec::Window& w) {
             return w.app == s.window_app && w.title == s.window_title;
         });
@@ -1144,9 +1193,6 @@ private:
         s.replay_seconds = rec::app::kReplayLengths[at(kReplayLength)];
         s.camera = checked(kCamera);
         s.camera_device = cameras_[std::min(at(kCameraDevice), cameras_.size() - 1)].id;
-        s.camera_corner = kCorners[at(kCorner)].value;
-        s.camera_size = kCameraSizes[at(kCameraSize)].value;
-        s.scene = kScenes[at(kScene)].value;
         s.image = checked(kImage);
         s.preview = checked(kShowPreview);
         s.destination = kServices[at(kService)].value;
@@ -1177,7 +1223,50 @@ private:
         case kChangeFolder: choose_folder(); return;
         case kBrowseImage: choose_image(); return;
         case kScene:
-            if (code == CBN_SELCHANGE) change_scene(kScenes[static_cast<std::size_t>(std::max(0, selected(kScene)))].value);
+            if (code == CBN_SELCHANGE) change_scene(static_cast<std::size_t>(std::max(0, selected(kScene))));
+            return;
+        case kNewScene:
+            if (rec::app::add_scene(settings_)) {
+                show_scenes();
+                apply_scene();
+            }
+            return;
+        case kDeleteScene:
+            rec::app::remove_scene(settings_);
+            show_scenes();
+            apply_scene();
+            return;
+        case kSceneName:
+            if (code == EN_CHANGE && !filling_) {
+                auto& scene = rec::app::current_scene(settings_);
+                scene.name = narrow(text_of(get(kSceneName)));
+                HWND list = get(kScene);
+                SendMessageW(list, CB_DELETESTRING, settings_.scene, 0);
+                SendMessageW(list, CB_INSERTSTRING, settings_.scene, reinterpret_cast<LPARAM>(wide(scene.name).c_str()));
+                select(kScene, static_cast<int>(settings_.scene));
+            } else if (code == EN_KILLFOCUS) {
+                rec::app::save_settings(settings_path_, settings_);
+            }
+            return;
+        case kSceneSources:
+            if (code == LBN_SELCHANGE) {
+                const auto sources = rec::app::scene_sources(settings_);
+                const auto at = static_cast<std::size_t>(SendMessageW(get(kSceneSources), LB_GETCURSEL, 0, 0));
+                if (at < sources.size()) select_source(sources[at]);
+            }
+            return;
+        case kSourceShown:
+            if (code == BN_CLICKED) {
+                rec::app::scene_item(rec::app::current_scene(settings_), selected_).visible = checked(kSourceShown);
+                show_scene_sources();
+                apply_scene();
+            }
+            return;
+        case kAddDisplay: add_source_menu(false); return;
+        case kAddWindow: add_source_menu(true); return;
+        case kRemoveSource: remove_source(); return;
+        case kCorner: case kCameraSize:
+            if (code == CBN_SELCHANGE) place_camera();
             return;
         case kShowLast: show_last(); return;
         case kService:
@@ -1208,7 +1297,13 @@ private:
                 SetWindowTextW(get(kKey), wide(load_key(rec::app::server_url(settings_))).c_str());
             }
             return;
-        case kStream: case kSystemAudio: case kMicrophone: case kCamera: case kImage:
+        case kCamera: case kImage:
+            if (code == BN_CLICKED) {
+                read_settings();
+                show_scene_sources();
+            }
+            return;
+        case kStream: case kSystemAudio: case kMicrophone:
             return;
         case kShowPreview:
             if (code == BN_CLICKED) remember();
@@ -1221,7 +1316,21 @@ private:
             change_volume(id == kMenuMuteSystem ? rec::AudioInput::system : rec::AudioInput::microphone, true);
             return;
         default:
-            if (id >= kMenuScene && id < kMenuScene + static_cast<int>(kScenes.size())) change_scene(kScenes[id - kMenuScene].value);
+            if (id >= kMenuScene && id < kMenuScene + static_cast<int>(kMaxMenuScenes)) {
+                change_scene(static_cast<std::size_t>(id - kMenuScene));
+            } else if (id >= kMenuAddDisplay && id < kMenuAddDisplay + static_cast<int>(kMaxMenuDisplays)) {
+                rec::app::Layer layer;
+                layer.display = static_cast<std::uint32_t>(id - kMenuAddDisplay + 1);
+                add_layer(layer);
+            } else if (id >= kMenuAddWindow && id < kMenuAddWindow + static_cast<int>(kMaxMenuWindows)) {
+                const auto at = static_cast<std::size_t>(id - kMenuAddWindow);
+                if (at >= menu_windows_.size()) return;
+                rec::app::Layer layer;
+                layer.kind = "window";
+                layer.window_app = menu_windows_[at].app;
+                layer.window_title = menu_windows_[at].title;
+                add_layer(layer);
+            }
             return;
         }
     }
@@ -1281,22 +1390,131 @@ private:
         refresh();
     }
 
-    // While recording this moves the camera at once; otherwise it is the scene to start with.
-    void change_scene(const std::string& scene) {
-        const Status s = session_.status();
-        if ((s.state == State::recording || s.state == State::paused) && s.camera) {
-            if (auto changed = session_.set_scene(scene); !changed) {
-                note_ = L"Scene not changed: " + wide(changed.error);
-                note_attention_ = true;
-                note_until_ = GetTickCount64() + 5000;
-            }
+    // While recording the scene shows at once; otherwise it is the scene to start with, shown
+    // in the preview.
+    void change_scene(std::size_t index) {
+        if (index >= settings_.scenes.size()) return;
+        settings_.scene = static_cast<std::uint32_t>(index);
+        show_scenes();
+        apply_scene();
+    }
+
+    // Shows the current scene in the recording or the preview, and saves it.
+    void apply_scene() {
+        if (auto shown = session_.show_scene(settings_); !shown) {
+            note_ = L"Scene not changed: " + wide(shown.error);
+            note_attention_ = true;
+            note_until_ = GetTickCount64() + 5000;
         }
-        settings_.scene = scene;
-        select(kScene, choice_index(kScenes, scene));
         rec::app::save_settings(settings_path_, settings_);
         refresh();
     }
 
+    // The Scene list, the scene's name, its sources and the camera's place.
+    void show_scenes() {
+        HWND list = get(kScene);
+        SendMessageW(list, CB_RESETCONTENT, 0, 0);
+        for (const auto& scene : settings_.scenes)
+            SendMessageW(list, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(scene.name).c_str()));
+        const auto& scene = rec::app::current_scene(settings_);
+        select(kScene, static_cast<int>(settings_.scene));
+        filling_ = true;
+        if (narrow(text_of(get(kSceneName))) != scene.name) SetWindowTextW(get(kSceneName), wide(scene.name).c_str());
+        filling_ = false;
+        show_scene_sources();
+        show_camera_place();
+    }
+
+    // Every source, as the scene shows it; the selected one stays selected.
+    void show_scene_sources() {
+        const auto sources = rec::app::scene_sources(settings_);
+        const auto& scene = rec::app::current_scene(settings_);
+        HWND list = get(kSceneSources);
+        SendMessageW(list, LB_RESETCONTENT, 0, 0);
+        int chosen = 0;
+        for (std::size_t i = 0; i < sources.size(); ++i) {
+            std::wstring name = wide(rec::app::source_name(settings_, sources[i]));
+            if (!rec::app::scene_item(scene, sources[i]).visible) name += L" (hidden)";
+            SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name.c_str()));
+            if (sources[i] == selected_) chosen = static_cast<int>(i);
+        }
+        selected_ = sources[static_cast<std::size_t>(chosen)];
+        SendMessageW(list, LB_SETCURSEL, static_cast<WPARAM>(chosen), 0);
+        set_check(kSourceShown, rec::app::scene_item(scene, selected_).visible);
+    }
+
+    void select_source(const rec::app::SourceRef& source) {
+        selected_ = source;
+        show_scene_sources();
+        refresh();
+    }
+
+    // The Position and Size lists name the camera's place in this scene when it is a preset.
+    void show_camera_place() {
+        const auto& area = rec::app::current_scene(settings_).camera.area;
+        const auto corner = rec::app::corner_of(area);
+        if (selected(kCorner) != choice_index(kCorners, corner)) select(kCorner, choice_index(kCorners, corner));
+        if (const auto size = rec::app::size_of(area); !size.empty()) select(kCameraSize, choice_index(kCameraSizes, size));
+        EnableWindow(get(kCameraSize), IsWindowEnabled(get(kCorner)) && corner != "custom");
+    }
+
+    // A preset Position or Size puts the camera there in this scene.
+    void place_camera() {
+        const std::string corner = kCorners[static_cast<std::size_t>(std::max(0, selected(kCorner)))].value;
+        if (corner == "custom") return;
+        const std::string size = kCameraSizes[static_cast<std::size_t>(std::max(0, selected(kCameraSize)))].value;
+        rec::app::current_scene(settings_).camera.area = rec::app::corner_area(corner, size);
+        show_camera_place();
+        apply_scene();
+    }
+
+    void add_source_menu(bool windows) {
+        HMENU menu = CreatePopupMenu();
+        if (windows) {
+            std::string error;
+            menu_windows_ = rec::list_windows(error);
+            if (menu_windows_.size() > kMaxMenuWindows) menu_windows_.resize(kMaxMenuWindows);
+            for (std::size_t i = 0; i < menu_windows_.size(); ++i)
+                AppendMenuW(menu, MF_STRING, kMenuAddWindow + i, window_label(menu_windows_[i].app, menu_windows_[i].title).c_str());
+            if (menu_windows_.empty()) AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"No windows are open");
+        } else {
+            for (std::size_t i = 0; i < std::max<std::size_t>(1, displays_.size()); ++i) {
+                wchar_t name[96];
+                if (i < displays_.size()) std::swprintf(name, 96, L"Display %zu (%ux%u)", i + 1, displays_[i].width, displays_[i].height);
+                else std::swprintf(name, 96, L"Display 1");
+                AppendMenuW(menu, MF_STRING, kMenuAddDisplay + i, name);
+            }
+        }
+        RECT button{};
+        GetWindowRect(get(windows ? kAddWindow : kAddDisplay), &button);
+        TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, button.left, button.bottom, 0, window_, nullptr);
+        DestroyMenu(menu);
+    }
+
+    // A new display or window, shown over the whole frame in this scene and hidden in the others.
+    void add_layer(const rec::app::Layer& layer) {
+        if (state_ != State::idle) return;
+        if (!rec::app::add_layer(settings_, layer)) {
+            note_ = L"Scenes hold at most " + std::to_wstring(rec::app::kMaxLayers) + L" displays and windows";
+            note_attention_ = true;
+            note_until_ = GetTickCount64() + 5000;
+            refresh();
+            return;
+        }
+        selected_ = {rec::app::SourceRef::Kind::layer, settings_.layers.size() - 1};
+        show_scene_sources();
+        rec::app::save_settings(settings_path_, settings_);
+        refresh();
+    }
+
+    void remove_source() {
+        if (state_ != State::idle || selected_.kind != rec::app::SourceRef::Kind::layer) return;
+        rec::app::remove_layer(settings_, selected_.layer);
+        selected_ = {};
+        show_scene_sources();
+        rec::app::save_settings(settings_path_, settings_);
+        refresh();
+    }
     void choose_image() {
         IFileOpenDialog* dialog = nullptr;
         if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) return;
@@ -1411,11 +1629,11 @@ private:
             if (status.microphone)
                 AppendMenuW(menu, MF_STRING | (checked(kMicMute) ? MF_CHECKED : 0), kMenuMuteMic, L"Mute Microphone");
         }
-        if (const auto status = session_.status(); active && status.camera) {
+        if (settings_.scenes.size() > 1) {
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            for (std::size_t i = 0; i < kScenes.size(); ++i)
-                AppendMenuW(menu, MF_STRING | (status.scene == kScenes[i].value ? MF_CHECKED : 0), kMenuScene + i,
-                            wide(kScenes[i].label).c_str());
+            for (std::size_t i = 0; i < std::min(settings_.scenes.size(), kMaxMenuScenes); ++i)
+                AppendMenuW(menu, MF_STRING | (settings_.scene == i ? MF_CHECKED : 0), kMenuScene + i,
+                            wide(settings_.scenes[i].name).c_str());
         }
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuShow, L"Show Rec");
@@ -1524,13 +1742,16 @@ private:
         // Volume and mute change during a recording that has the source.
         for (int id : {kSystemVolume, kSystemMute}) EnableWindow(get(id), editable ? checked(kSystemAudio) : active && s.system_audio);
         for (int id : {kMicVolume, kMicMute}) EnableWindow(get(id), editable ? checked(kMicrophone) : active && s.microphone);
-        for (int id : {kCamera, kImage, kBrowseImage}) EnableWindow(get(id), editable);
-        for (int id : {kCameraDevice, kCorner}) EnableWindow(get(id), editable && checked(kCamera));
+        // Sources are fixed while recording; scenes and where they put the sources are not.
+        for (int id : {kCamera, kImage, kBrowseImage, kAddDisplay, kAddWindow}) EnableWindow(get(id), editable);
+        EnableWindow(get(kCameraDevice), editable && checked(kCamera));
+        const bool arranging = editable || active;
+        for (int id : {kScene, kNewScene, kSceneName, kSourceShown}) EnableWindow(get(id), arranging);
+        EnableWindow(get(kDeleteScene), arranging && settings_.scenes.size() > 1);
+        EnableWindow(get(kRemoveSource), editable && selected_.kind == rec::app::SourceRef::Kind::layer);
+        EnableWindow(get(kCorner), arranging && settings_.camera);
         // A dragged camera is sized by its corners.
-        EnableWindow(get(kCameraSize), editable && checked(kCamera) && selected(kCorner) != choice_index(kCorners, "custom"));
-        camera_live_ = active && s.camera;
-        // The scene is the one setting that changes during a recording, when it draws a camera.
-        EnableWindow(get(kScene), editable ? checked(kCamera) : active && s.camera);
+        EnableWindow(get(kCameraSize), arranging && settings_.camera && selected(kCorner) != choice_index(kCorners, "custom"));
         EnableWindow(get(kServer), editable);
         EnableWindow(get(kShowLast), !settings_.last_recording.empty());
 
@@ -1596,10 +1817,13 @@ private:
     bool note_attention_ = false;
     bool polling_ = false;
     bool previewing_ = false;
-    bool camera_live_ = false;  // This recording draws a camera.
-    rec::app::CameraDrag drag_;
-    rec::Area outline_{};       // Where the held camera is going.
-    bool hover_ = false;        // The pointer is over the camera in the preview.
+    rec::app::AreaDrag drag_;
+    rec::app::SourceRef dragged_;           // The source drag_ holds.
+    rec::Area outline_{};                   // Where it is going.
+    std::optional<rec::app::SourceRef> hover_;  // The source under the pointer in the preview.
+    rec::app::SourceRef selected_;          // The source the Sources list selects.
+    bool filling_ = false;                  // The app, not the person, is setting the scene's name.
+    std::vector<rec::Window> menu_windows_; // What the Add Window menu offered.
     rec::PreviewFrame frame_;
     std::wstring preview_hint_;  // Shown while the preview has no frame.
     HBRUSH preview_brush_ = nullptr;

@@ -3,13 +3,17 @@
 #include "core/overlay.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <sstream>
 #include <utility>
 
 namespace rec::app {
@@ -56,8 +60,59 @@ std::filesystem::path utf8_path(const std::string& text) {
 }
 } // namespace
 
+namespace {
+// "1,x,y,width,height": shown, and where.
+std::string item_text(const SceneItem& item) {
+    std::ostringstream out;
+    out << (item.visible ? 1 : 0) << ',' << item.area.x << ',' << item.area.y << ',' << item.area.width << ',' << item.area.height;
+    return out.str();
+}
+
+std::optional<SceneItem> parse_item(const std::string& text) {
+    int visible = 0;
+    SceneItem item;
+    char tail = 0;
+    if (std::sscanf(text.c_str(), "%d,%lf,%lf,%lf,%lf%c", &visible, &item.area.x, &item.area.y, &item.area.width,
+                    &item.area.height, &tail) != 5 ||
+        !core::valid(item.area))
+        return std::nullopt;
+    item.visible = visible != 0;
+    return item;
+}
+
+std::optional<Area> parse_area(const std::string& text) {
+    Area a;
+    char tail = 0;
+    if (std::sscanf(text.c_str(), "%lf,%lf,%lf,%lf%c", &a.x, &a.y, &a.width, &a.height, &tail) != 4 || !core::valid(a))
+        return std::nullopt;
+    return a;
+}
+
+// "prefix.N.rest": N and rest.
+bool indexed(const std::string& key, const char* prefix, std::size_t& index, std::string& rest) {
+    const std::size_t length = std::strlen(prefix);
+    if (key.compare(0, length, prefix) != 0) return false;
+    std::size_t end = length;
+    while (end < key.size() && std::isdigit(static_cast<unsigned char>(key[end]))) ++end;
+    if (end == length || end - length > 3 || end >= key.size() || key[end] != '.') return false;
+    index = static_cast<std::size_t>(std::stoul(key.substr(length, end - length)));
+    rest = key.substr(end + 1);
+    return true;
+}
+
+struct LoadedScene {
+    std::optional<std::string> name;
+    std::optional<SceneItem> screen, camera, image;
+    std::map<std::size_t, SceneItem> layers;
+};
+} // namespace
 Settings load_settings(const std::string& path) {
     Settings s;
+    std::map<std::size_t, Layer> layers;
+    std::map<std::size_t, LoadedScene> scenes;
+    // Before scenes: one camera placement and a scene by name.
+    std::string old_corner, old_size, old_scene;
+    std::optional<Area> old_custom;
     std::ifstream in(utf8_path(path), std::ios::binary);
     std::string line;
     while (std::getline(in, line)) {
@@ -96,21 +151,72 @@ Settings load_settings(const std::string& path) {
             if (std::find(kReplayLengths.begin(), kReplayLengths.end(), seconds) != kReplayLengths.end()) s.replay_seconds = seconds;
         } else if (key == "camera") s.camera = yes;
         else if (key == "camera_device" && !value.empty()) s.camera_device = value;
-        else if (key == "camera_corner" && known(kCorners, value)) s.camera_corner = value;
-        else if (key == "camera_size" && known(kCameraSizes, value)) s.camera_size = value;
-        else if (key == "camera_custom") {
-            Area a;
-            char tail = 0;
-            if (std::sscanf(value.c_str(), "%lf,%lf,%lf,%lf%c", &a.x, &a.y, &a.width, &a.height, &tail) == 4 &&
-                core::valid(a))
-                s.camera_custom = a;
+        else if (key == "camera_corner" && known(kCorners, value)) old_corner = value;
+        else if (key == "camera_size" && known(kCameraSizes, value)) old_size = value;
+        else if (key == "camera_custom") old_custom = parse_area(value);
+        else if (key == "scene") {
+            if (!value.empty() && std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isdigit(c); }))
+                s.scene = number(value, 0);
+            else old_scene = value;
         }
-        else if (key == "scene" && known(kScenes, value)) s.scene = value;
         else if (key == "image") s.image = yes;
         else if (key == "image_path") s.image_path = value;
         else if (key == "preview") s.preview = yes;
         else if (key == "last_recording") s.last_recording = value;
+        else {
+            std::size_t n = 0;
+            std::string field;
+            if (indexed(key, "layer.", n, field)) {
+                Layer& layer = layers[n];
+                if (field == "kind" && (value == "display" || value == "window")) layer.kind = value;
+                else if (field == "display") layer.display = std::max(1u, number(value, 1));
+                else if (field == "region" && (value.empty() || parse_region(value))) layer.region = value;
+                else if (field == "app") layer.window_app = value;
+                else if (field == "title") layer.window_title = value;
+            } else if (indexed(key, "scene.", n, field)) {
+                LoadedScene& scene = scenes[n];
+                if (field == "name") scene.name = value;
+                else if (field == "screen") scene.screen = parse_item(value);
+                else if (field == "camera") scene.camera = parse_item(value);
+                else if (field == "image") scene.image = parse_item(value);
+                else if (field.rfind("layer.", 0) == 0) {
+                    const auto item = parse_item(value);
+                    const auto digits = field.substr(6);
+                    if (item && !digits.empty() && digits.size() <= 3 &&
+                        std::all_of(digits.begin(), digits.end(), [](unsigned char c) { return std::isdigit(c); }))
+                        scene.layers[std::stoul(digits)] = *item;
+                }
+            }
+        }
     }
+    // Indices count from 0; a gap ends the list.
+    for (std::size_t i = 0; layers.count(i) && s.layers.size() < kMaxLayers; ++i) s.layers.push_back(layers[i]);
+    const auto hidden = SceneItem{false, Area{}};
+    if (!scenes.empty()) {
+        std::vector<Scene> loaded;
+        for (std::size_t i = 0; scenes.count(i); ++i) {
+            const LoadedScene& from = scenes[i];
+            Scene scene;
+            scene.name = from.name.value_or("Scene " + std::to_string(i + 1));
+            scene.screen = from.screen.value_or(SceneItem{});
+            scene.camera = from.camera.value_or(SceneItem{true, corner_area("bottom-right", "medium")});
+            scene.image = from.image.value_or(SceneItem{});
+            for (std::size_t j = 0; j < s.layers.size(); ++j)
+                scene.layers.push_back(from.layers.count(j) ? from.layers.at(j) : hidden);
+            loaded.push_back(std::move(scene));
+        }
+        if (!loaded.empty()) s.scenes = std::move(loaded);
+    } else {
+        // Settings from before scenes: their camera placement in the scenes that show a corner.
+        Area corner = corner_area(old_corner.empty() || old_corner == "custom" ? "bottom-right" : old_corner,
+                                  old_size.empty() ? "medium" : old_size);
+        if (old_corner == "custom" && old_custom) corner = *old_custom;
+        s.scenes[0].camera.area = s.scenes[1].camera.area = corner;
+        if (old_scene == "screen") s.scene = 1;
+        else if (old_scene == "camera") s.scene = 2;
+    }
+    for (auto& scene : s.scenes) scene.layers.resize(s.layers.size(), hidden);
+    if (s.scene >= s.scenes.size()) s.scene = 0;
     return s;
 }
 
@@ -134,11 +240,24 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nstream=" << s.stream << "\ndestination=" << s.destination << "\nserver=" << s.server
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
-            << "\ncamera_corner=" << s.camera_corner << "\ncamera_size=" << s.camera_size
-            << "\ncamera_custom=" << s.camera_custom.x << ',' << s.camera_custom.y << ',' << s.camera_custom.width << ','
-            << s.camera_custom.height << "\nscene=" << s.scene
             << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
             << "\nlast_recording=" << s.last_recording << '\n';
+        for (std::size_t i = 0; i < s.layers.size(); ++i) {
+            const Layer& layer = s.layers[i];
+            const auto key = "layer." + std::to_string(i) + ".";
+            out << key << "kind=" << layer.kind << '\n' << key << "display=" << layer.display << '\n'
+                << key << "region=" << layer.region << '\n' << key << "app=" << one_line(layer.window_app) << '\n'
+                << key << "title=" << one_line(layer.window_title) << '\n';
+        }
+        for (std::size_t i = 0; i < s.scenes.size(); ++i) {
+            const Scene& scene = s.scenes[i];
+            const auto key = "scene." + std::to_string(i) + ".";
+            out << key << "name=" << one_line(scene.name) << '\n' << key << "screen=" << item_text(scene.screen) << '\n'
+                << key << "camera=" << item_text(scene.camera) << '\n' << key << "image=" << item_text(scene.image) << '\n';
+            for (std::size_t j = 0; j < scene.layers.size(); ++j)
+                out << key << "layer." << j << '=' << item_text(scene.layers[j]) << '\n';
+        }
+        out << "scene=" << s.scene << '\n';
         if (!out) return false;
     }
     // Replace in one step so a crash never leaves half a settings file.
@@ -166,17 +285,19 @@ std::string region_text(const Region& r) {
     return std::to_string(r.x) + "," + std::to_string(r.y) + "," + std::to_string(r.width) + "," + std::to_string(r.height);
 }
 
-std::optional<Window> find_window(const Settings& s) {
-    if (s.window_app.empty() && s.window_title.empty()) return std::nullopt;
+std::optional<Window> find_window(const std::string& app, const std::string& title) {
+    if (app.empty() && title.empty()) return std::nullopt;
     std::string error;
     const auto windows = list_windows(error);
     for (const auto& w : windows)
-        if (w.app == s.window_app && w.title == s.window_title) return w;
-    if (!s.window_app.empty())
+        if (w.app == app && w.title == title) return w;
+    if (!app.empty())
         for (const auto& w : windows)
-            if (w.app == s.window_app) return w;
+            if (w.app == app) return w;
     return std::nullopt;
 }
+
+std::optional<Window> find_window(const Settings& s) { return find_window(s.window_app, s.window_title); }
 
 std::string server_url(const Settings& s) {
     if (s.destination == "twitch") return "rtmps://live.twitch.tv:443/app";
@@ -215,74 +336,253 @@ std::string next_output(const std::string& folder, const std::string& format, co
 namespace {
 // The camera's margin from the frame's edges: the same in pixels on both sides of a 16:9 frame.
 constexpr double kMarginX = 0.02, kMarginY = 0.035;
-// The smallest camera a drag makes, as a fraction of the frame.
-constexpr double kMinCamera = 0.08;
+// The smallest source a drag makes, as a fraction of the frame.
+constexpr double kMinArea = 0.08;
+// Within this of the frame's edges, its middle or a corner margin, an edge lands on it.
+constexpr double kSnapX = 0.012, kSnapY = 0.02;
+
+double snap_edge(double value, double margin, double within) {
+    for (const double target : {0.0, margin, 0.5, 1 - margin, 1.0})
+        if (std::abs(value - target) < within) return target;
+    return value;
+}
+
+bool same(const Area& a, const Area& b) {
+    constexpr double e = 1e-6;
+    return std::abs(a.x - b.x) < e && std::abs(a.y - b.y) < e && std::abs(a.width - b.width) < e &&
+           std::abs(a.height - b.height) < e;
+}
+
+bool full_frame(const Area& a) { return a.x <= 0.001 && a.y <= 0.001 && a.width >= 0.999 && a.height >= 0.999; }
+
+// Whether a press at x,y lands on area: inside it or on a corner handle, or only on a corner
+// handle for a source that fills the frame (so the ones below can still be grabbed).
+bool hits(const Area& a, double x, double y, double handle_x, double handle_y, bool corners_only) {
+    if (x < a.x - handle_x / 2 || x > a.x + a.width + handle_x / 2 || y < a.y - handle_y / 2 ||
+        y > a.y + a.height + handle_y / 2)
+        return false;
+    if (!corners_only) return true;
+    const bool near_x = x < a.x + handle_x || x > a.x + a.width - handle_x;
+    const bool near_y = y < a.y + handle_y || y > a.y + a.height - handle_y;
+    return near_x && near_y;
+}
 } // namespace
 
-Area camera_area(const Settings& s, const std::string& scene) {
-    if (scene == "camera") return {};
-    if (s.camera_corner == "custom") return s.camera_custom;
-    const double size = s.camera_size == "small" ? 0.2 : s.camera_size == "large" ? 0.33 : 0.25;
-    const bool left = s.camera_corner.ends_with("left"), top = s.camera_corner.starts_with("top");
+Area corner_area(const std::string& corner, const std::string& size_name) {
+    const double size = size_name == "small" ? 0.2 : size_name == "large" ? 0.33 : 0.25;
+    const bool left = corner.ends_with("left"), top = corner.starts_with("top");
     return {left ? kMarginX : 1 - kMarginX - size, top ? kMarginY : 1 - kMarginY - size, size, size};
 }
 
-bool camera_visible(const std::string& scene) { return scene != "screen"; }
+std::string corner_of(const Area& area) {
+    for (const auto& corner : kCorners)
+        for (const auto& size : kCameraSizes)
+            if (std::string(corner.value) != "custom" && same(area, corner_area(corner.value, size.value)))
+                return corner.value;
+    return "custom";
+}
 
-CameraDrag grab_camera(const Area& a, double x, double y, double handle_x, double handle_y) {
-    CameraDrag drag;
-    if (x < a.x - handle_x / 2 || x > a.x + a.width + handle_x / 2 || y < a.y - handle_y / 2 ||
-        y > a.y + a.height + handle_y / 2)
-        return drag;
+std::string size_of(const Area& area) {
+    for (const auto& corner : kCorners)
+        for (const auto& size : kCameraSizes)
+            if (std::string(corner.value) != "custom" && same(area, corner_area(corner.value, size.value)))
+                return size.value;
+    return "";
+}
+
+std::vector<Scene> default_scenes() {
+    const Area corner = corner_area("bottom-right", "medium");
+    Scene both{"Screen and camera", {}, {true, corner}, {}, {}};
+    Scene screen{"Screen only", {}, {false, corner}, {}, {}};
+    Scene camera{"Camera only", {}, {true, Area{}}, {}, {}};
+    return {both, screen, camera};
+}
+
+Scene& current_scene(Settings& s) {
+    if (s.scenes.empty()) s.scenes = default_scenes();
+    if (s.scene >= s.scenes.size()) s.scene = 0;
+    return s.scenes[s.scene];
+}
+
+const Scene& current_scene(const Settings& s) {
+    return s.scenes[std::min<std::size_t>(s.scene, s.scenes.size() - 1)];
+}
+
+bool add_scene(Settings& s) {
+    // Settings keep scene numbers to three digits.
+    if (s.scenes.size() >= 999) return false;
+    Scene scene = current_scene(s);
+    const auto taken = [&](const std::string& name) {
+        return std::any_of(s.scenes.begin(), s.scenes.end(), [&](const Scene& other) { return other.name == name; });
+    };
+    std::size_t n = s.scenes.size() + 1;
+    while (taken("Scene " + std::to_string(n))) ++n;
+    scene.name = "Scene " + std::to_string(n);
+    s.scenes.insert(s.scenes.begin() + s.scene + 1, std::move(scene));
+    ++s.scene;
+    return true;
+}
+
+void remove_scene(Settings& s) {
+    current_scene(s);
+    if (s.scenes.size() <= 1) return;
+    s.scenes.erase(s.scenes.begin() + s.scene);
+    s.scene = std::min<std::uint32_t>(s.scene, static_cast<std::uint32_t>(s.scenes.size() - 1));
+}
+
+bool add_layer(Settings& s, const Layer& layer) {
+    if (s.layers.size() >= kMaxLayers) return false;
+    current_scene(s);
+    s.layers.push_back(layer);
+    for (std::size_t i = 0; i < s.scenes.size(); ++i) {
+        auto& items = s.scenes[i].layers;
+        items.resize(s.layers.size() - 1, SceneItem{false, Area{}});
+        items.push_back(SceneItem{i == s.scene, Area{}});
+    }
+    return true;
+}
+
+void remove_layer(Settings& s, std::size_t index) {
+    if (index >= s.layers.size()) return;
+    s.layers.erase(s.layers.begin() + static_cast<std::ptrdiff_t>(index));
+    for (auto& scene : s.scenes)
+        if (index < scene.layers.size()) scene.layers.erase(scene.layers.begin() + static_cast<std::ptrdiff_t>(index));
+}
+
+std::string layer_name(const Layer& layer) {
+    if (layer.kind == "window") {
+        if (layer.window_title.empty()) return layer.window_app.empty() ? "Window" : layer.window_app;
+        return layer.window_app.empty() ? layer.window_title : layer.window_title + " (" + layer.window_app + ")";
+    }
+    std::string name = "Display " + std::to_string(layer.display);
+    if (const auto r = parse_region(layer.region))
+        name += ", " + std::to_string(r->width) + "x" + std::to_string(r->height) + " at " + std::to_string(r->x) +
+                "," + std::to_string(r->y);
+    return name;
+}
+
+std::vector<SourceRef> scene_sources(const Settings& s) {
+    std::vector<SourceRef> sources{{SourceRef::Kind::screen, 0}};
+    for (std::size_t i = 0; i < s.layers.size(); ++i) sources.push_back({SourceRef::Kind::layer, i});
+    if (s.camera) sources.push_back({SourceRef::Kind::camera, 0});
+    if (s.image) sources.push_back({SourceRef::Kind::image, 0});
+    return sources;
+}
+
+std::string source_name(const Settings& s, const SourceRef& source) {
+    switch (source.kind) {
+    case SourceRef::Kind::screen:
+        return s.source == "window" ? "Recorded window" : s.source == "region" ? "Recorded region" : "Recorded display";
+    case SourceRef::Kind::camera: return "Camera";
+    case SourceRef::Kind::image: return "Image";
+    case SourceRef::Kind::layer: return source.layer < s.layers.size() ? layer_name(s.layers[source.layer]) : "";
+    }
+    return "";
+}
+
+SceneItem& scene_item(Scene& scene, const SourceRef& source) {
+    switch (source.kind) {
+    case SourceRef::Kind::camera: return scene.camera;
+    case SourceRef::Kind::image: return scene.image;
+    case SourceRef::Kind::layer:
+        if (source.layer >= scene.layers.size()) scene.layers.resize(source.layer + 1, SceneItem{false, Area{}});
+        return scene.layers[source.layer];
+    case SourceRef::Kind::screen: break;
+    }
+    return scene.screen;
+}
+
+const SceneItem& scene_item(const Scene& scene, const SourceRef& source) {
+    static const SceneItem hidden{false, Area{}};
+    switch (source.kind) {
+    case SourceRef::Kind::camera: return scene.camera;
+    case SourceRef::Kind::image: return scene.image;
+    case SourceRef::Kind::layer: return source.layer < scene.layers.size() ? scene.layers[source.layer] : hidden;
+    case SourceRef::Kind::screen: break;
+    }
+    return scene.screen;
+}
+
+std::optional<SourceRef> source_at(const Settings& s, double x, double y, double handle_x, double handle_y) {
+    const Scene& scene = current_scene(s);
+    const auto sources = scene_sources(s);
+    for (auto it = sources.rbegin(); it != sources.rend(); ++it) {
+        const SceneItem& item = scene_item(scene, *it);
+        if (item.visible && hits(item.area, x, y, handle_x, handle_y, full_frame(item.area))) return *it;
+    }
+    return std::nullopt;
+}
+
+AreaDrag grab_area(const Area& a, double x, double y, double handle_x, double handle_y, bool keep_shape) {
+    AreaDrag drag;
+    if (!hits(a, x, y, handle_x, handle_y, false)) return drag;
     drag.from = a;
     drag.x = x;
     drag.y = y;
+    drag.keep_shape = keep_shape;
     const bool near_left = x < a.x + handle_x, near_right = x > a.x + a.width - handle_x;
     const bool near_top = y < a.y + handle_y, near_bottom = y > a.y + a.height - handle_y;
     if ((near_left || near_right) && (near_top || near_bottom)) {
-        drag.grab = CameraDrag::Grab::resize;
+        drag.grab = AreaDrag::Grab::resize;
         drag.left = near_left && !near_right ? true : near_right && !near_left ? false : x < a.x + a.width / 2;
         drag.top = near_top && !near_bottom ? true : near_bottom && !near_top ? false : y < a.y + a.height / 2;
     } else {
-        drag.grab = CameraDrag::Grab::move;
+        drag.grab = AreaDrag::Grab::move;
     }
     return drag;
 }
 
-Area drag_camera(const CameraDrag& drag, double x, double y) {
+Area drag_area(const AreaDrag& drag, double x, double y) {
     const Area& from = drag.from;
-    // Within this of a corner margin an edge lands on it, so the presets are easy to match.
-    constexpr double snap_x = 0.012, snap_y = 0.02;
-    const auto snap = [](double value, double target, double within) { return std::abs(value - target) < within ? target : value; };
-    if (drag.grab == CameraDrag::Grab::move) {
+    if (drag.grab == AreaDrag::Grab::move) {
         Area a = from;
         a.x = std::clamp(from.x + x - drag.x, 0.0, 1 - a.width);
         a.y = std::clamp(from.y + y - drag.y, 0.0, 1 - a.height);
-        a.x = snap(snap(a.x, kMarginX, snap_x), 1 - kMarginX - a.width, snap_x);
-        a.y = snap(snap(a.y, kMarginY, snap_y), 1 - kMarginY - a.height, snap_y);
+        // Either edge may snap; the left and top win when both are near a target.
+        if (const double left = snap_edge(a.x, kMarginX, kSnapX); left != a.x) a.x = left;
+        else a.x = snap_edge(a.x + a.width, kMarginX, kSnapX) - a.width;
+        if (const double top = snap_edge(a.y, kMarginY, kSnapY); top != a.y) a.y = top;
+        else a.y = snap_edge(a.y + a.height, kMarginY, kSnapY) - a.height;
+        a.x = std::clamp(a.x, 0.0, 1 - a.width);
+        a.y = std::clamp(a.y, 0.0, 1 - a.height);
         return a;
     }
-    if (drag.grab != CameraDrag::Grab::resize) return from;
-    // The corner opposite the one held stays put; the camera keeps its shape.
+    if (drag.grab != AreaDrag::Grab::resize) return from;
+    // The corner opposite the one held stays put.
     const double anchor_x = drag.left ? from.x + from.width : from.x;
     const double anchor_y = drag.top ? from.y + from.height : from.y;
-    const double aspect = from.height / from.width;
+    const double room_x = drag.left ? anchor_x : 1 - anchor_x;
+    const double room_y = drag.top ? anchor_y : 1 - anchor_y;
     const double reach_x = drag.left ? anchor_x - x : x - anchor_x;
-    const double reach_y = (drag.top ? anchor_y - y : y - anchor_y) / aspect;
-    const double room = std::min(drag.left ? anchor_x : 1 - anchor_x, (drag.top ? anchor_y : 1 - anchor_y) / aspect);
-    double width = std::clamp(std::max(reach_x, reach_y), std::min(kMinCamera, room), room);
-    // Snap the moving edge to the margin on its side.
-    const double margin_room = std::min(drag.left ? anchor_x - kMarginX : 1 - kMarginX - anchor_x,
-                                        ((drag.top ? anchor_y - kMarginY : 1 - kMarginY - anchor_y)) / aspect);
-    if (margin_room > 0 && std::abs(width - margin_room) < snap_x) width = margin_room;
-    const double height = width * aspect;
+    const double reach_y = drag.top ? anchor_y - y : y - anchor_y;
+    // The moving edge, snapped, as a width or height from the anchor.
+    const auto snapped = [](double anchor, double reach, bool back, double margin, double within) {
+        const double edge = snap_edge(back ? anchor - reach : anchor + reach, margin, within);
+        return back ? anchor - edge : edge - anchor;
+    };
+    double width = 0, height = 0;
+    if (drag.keep_shape) {
+        const double aspect = from.height / from.width;
+        const double room = std::min(room_x, room_y / aspect);
+        width = std::clamp(std::max(reach_x, reach_y / aspect), std::min(kMinArea, room), room);
+        const double by_x = snapped(anchor_x, width, drag.left, kMarginX, kSnapX);
+        const double by_y = snapped(anchor_y, width * aspect, drag.top, kMarginY, kSnapY) / aspect;
+        if (by_x != width && by_x > 0 && by_x <= room) width = by_x;
+        else if (by_y != width && by_y > 0 && by_y <= room) width = by_y;
+        height = width * aspect;
+    } else {
+        width = std::clamp(reach_x, std::min(kMinArea, room_x), room_x);
+        height = std::clamp(reach_y, std::min(kMinArea, room_y), room_y);
+        width = std::clamp(snapped(anchor_x, width, drag.left, kMarginX, kSnapX), std::min(kMinArea, room_x), room_x);
+        height = std::clamp(snapped(anchor_y, height, drag.top, kMarginY, kSnapY), std::min(kMinArea, room_y), room_y);
+    }
     return {drag.left ? anchor_x - width : anchor_x, drag.top ? anchor_y - height : anchor_y, width, height};
 }
 
 namespace {
-// What a recording and the idle preview share: the picture, its overlays and the audio
-// settings. camera receives the camera's overlay index.
-Result capture_options(const Settings& s, bool test_pattern, Options& o, std::optional<std::size_t>& camera) {
+// What a recording and the idle preview share: the picture, every source in the scenes and
+// the audio settings. indices receives each source's overlay index.
+Result capture_options(const Settings& s, bool test_pattern, Options& o, SourceIndices& indices) {
     o.duration_seconds = 0;
     o.display = s.display;
     if (!test_pattern && s.source == "window") {
@@ -312,42 +612,76 @@ Result capture_options(const Settings& s, bool test_pattern, Options& o, std::op
         o.microphone_device = s.microphone_device;
     }
     o.preview_width = kPreviewWidth;
-    camera.reset();
+    const Scene& scene = current_scene(s);
+    o.screen_visible = scene.screen.visible;
+    o.screen_area = scene.screen.area;
+    indices = {};
+    for (std::size_t i = 0; i < s.layers.size(); ++i) {
+        const Layer& layer = s.layers[i];
+        Overlay l;
+        if (layer.kind == "window") {
+            const auto window = find_window(layer.window_app, layer.window_title);
+            if (!window) return {"the window \"" + layer_name(layer) + "\" in the scenes is not open; open it or remove it"};
+            l.kind = Overlay::Kind::window;
+            l.window = window->id;
+        } else {
+            l.kind = Overlay::Kind::display;
+            l.display = layer.display;
+            if (!layer.region.empty()) l.region = parse_region(layer.region);
+        }
+        const SceneItem item = i < scene.layers.size() ? scene.layers[i] : SceneItem{false, Area{}};
+        l.area = item.area;
+        l.visible = item.visible;
+        indices.layers.push_back(o.overlays.size());
+        o.overlays.push_back(l);
+    }
     if (s.camera) {
-        camera = o.overlays.size();
+        indices.camera = o.overlays.size();
         Overlay c;
         c.kind = Overlay::Kind::camera;
         c.source = s.camera_device.empty() ? "default" : s.camera_device;
-        c.area = camera_area(s, s.scene);
-        c.visible = camera_visible(s.scene);
+        c.area = scene.camera.area;
+        c.visible = scene.camera.visible;
         o.overlays.push_back(c);
     }
     if (s.image) {
         if (s.image_path.empty()) return {"choose an image to show"};
+        indices.image = o.overlays.size();
         Overlay i;
         i.kind = Overlay::Kind::image;
         i.source = s.image_path;
+        i.area = scene.image.area;
+        i.visible = scene.image.visible;
         o.overlays.push_back(i);
     }
     return {};
 }
 
-// Settings that need a new capture for the idle preview; the camera's placement does not.
-void copy_placement(Settings& to, const Settings& from) {
-    to.camera_corner = from.camera_corner;
-    to.camera_size = from.camera_size;
-    to.camera_custom = from.camera_custom;
+// Moves, shows and hides every source the capture has to where scene puts it.
+Result show(Recorder& recorder, const SourceIndices& indices, const Scene& scene) {
+    if (auto set = recorder.set_screen(scene.screen.visible, scene.screen.area); !set) return set;
+    for (std::size_t i = 0; i < indices.layers.size() && i < scene.layers.size(); ++i)
+        if (auto set = recorder.set_overlay(indices.layers[i], scene.layers[i].visible, scene.layers[i].area); !set)
+            return set;
+    if (indices.camera)
+        if (auto set = recorder.set_overlay(*indices.camera, scene.camera.visible, scene.camera.area); !set) return set;
+    if (indices.image)
+        if (auto set = recorder.set_overlay(*indices.image, scene.image.visible, scene.image.area); !set) return set;
+    return {};
 }
 
+// What needs a new capture for the idle preview; scenes only move what it has.
 std::string preview_key(const Settings& s, bool test_pattern) {
     std::string key = s.source + '\n' + std::to_string(s.display) + '\n' + s.window_app + '\n' + s.window_title +
                       '\n' + s.region + '\n' + s.resolution + '\n' + (s.cursor ? "1" : "0") + (test_pattern ? "1" : "0");
     if (s.camera) key += "\ncamera " + s.camera_device;
     if (s.image) key += "\nimage " + s.image_path;
+    for (const Layer& layer : s.layers)
+        key += "\nlayer " + layer.kind + ' ' + std::to_string(layer.display) + ' ' + layer.region + '\n' +
+               layer.window_app + '\n' + layer.window_title;
     return key;
 }
 } // namespace
-
 Session::Session(std::function<void()> changed) : changed_(std::move(changed)) {}
 
 Session::~Session() {
@@ -368,8 +702,8 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
     }
     wait();
     Options o;
-    std::optional<std::size_t> camera;
-    if (auto built = capture_options(s, test_pattern, o, camera); !built) return built;
+    SourceIndices indices;
+    if (auto built = capture_options(s, test_pattern, o, indices); !built) return built;
     if (s.folder.empty()) return {"choose a folder for recordings"};
     std::error_code error;
     std::filesystem::create_directories(utf8_path(s.folder), error);
@@ -395,9 +729,8 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
         stop_requested_ = false;
         streaming_ = s.stream;
         replay_ = s.replay;
-        camera_ = camera;
-        camera_settings_ = s;
-        scene_ = s.scene;
+        indices_ = indices;
+        scene_ = std::min<std::uint32_t>(s.scene, static_cast<std::uint32_t>(s.scenes.size() - 1));
         error_.clear();
         stream_error_.clear();
         saved_.clear();
@@ -486,31 +819,21 @@ Result Session::save_replay(const std::string& folder, std::string& path, double
     return saved;
 }
 
-Result Session::set_scene(const std::string& scene) {
-    if (!known(kScenes, scene)) return {"unknown scene: " + scene};
-    std::lock_guard lock(mutex_);
-    if ((state_ != State::recording && state_ != State::paused) || stop_requested_) return {"not recording"};
-    if (!camera_) return {"turn on the camera before recording"};
-    auto set = recorder_->set_overlay(*camera_, camera_visible(scene), camera_area(camera_settings_, scene));
-    if (set) scene_ = scene;
-    return set;
-}
-
-Result Session::place_camera(const Settings& settings) {
+Result Session::show_scene(const Settings& settings) {
     std::lock_guard lock(mutex_);
     if (state_ == State::recording || state_ == State::paused) {
         if (stop_requested_) return {"not recording"};
-        if (!camera_) return {"turn on the camera before recording"};
-        copy_placement(camera_settings_, settings);
-        return recorder_->set_overlay(*camera_, camera_visible(scene_), camera_area(camera_settings_, scene_));
+        auto shown = show(*recorder_, indices_, current_scene(settings));
+        if (shown) scene_ = std::min<std::uint32_t>(settings.scene, static_cast<std::uint32_t>(settings.scenes.size() - 1));
+        return shown;
     }
     if (idle_settings_) {
-        copy_placement(*idle_settings_, settings);
-        place_idle_camera();
+        idle_settings_->scenes = settings.scenes;
+        idle_settings_->scene = settings.scene;
+        place_idle();
     }
     return {};
 }
-
 Result Session::set_volume(AudioInput input, int volume, bool muted) {
     std::lock_guard lock(mutex_);
     if ((state_ != State::recording && state_ != State::paused) || stop_requested_) return {"not recording"};
@@ -535,9 +858,9 @@ void Session::idle_preview(const Settings* settings, bool test_pattern) {
         const std::string key = settings ? preview_key(*settings, test_pattern) : std::string();
         if (key == idle_key_) {
             if (settings && idle_settings_) {
-                copy_placement(*idle_settings_, *settings);
+                idle_settings_->scenes = settings->scenes;
                 idle_settings_->scene = settings->scene;
-                place_idle_camera();
+                place_idle();
             }
             return;
         }
@@ -553,10 +876,8 @@ void Session::idle_preview(const Settings* settings, bool test_pattern) {
     idle_wake_.notify_all();
 }
 
-void Session::place_idle_camera() {
-    if (!idle_ || !idle_camera_ || !idle_settings_) return;
-    idle_->set_overlay(*idle_camera_, camera_visible(idle_settings_->scene),
-                       camera_area(*idle_settings_, idle_settings_->scene));
+void Session::place_idle() {
+    if (idle_ && idle_settings_) show(*idle_, idle_indices_, current_scene(*idle_settings_));
 }
 
 void Session::run_idle() {
@@ -591,8 +912,8 @@ void Session::run_idle() {
         lock.unlock();
         // Finding a window and starting capture can take a while; never on the UI thread.
         Options o;
-        std::optional<std::size_t> camera;
-        Result started = capture_options(settings, test_pattern, o, camera);
+        SourceIndices indices;
+        Result started = capture_options(settings, test_pattern, o, indices);
         std::unique_ptr<Recorder> recorder;
         if (started) {
             o.preview_only = true;
@@ -604,9 +925,9 @@ void Session::run_idle() {
         if (started) {
             running = std::move(recorder);
             idle_ = running.get();
-            idle_camera_ = camera;
+            idle_indices_ = indices;
             idle_->show_preview(true);
-            place_idle_camera();
+            place_idle();
         } else {
             idle_error_ = started.error;
             idle_alive_ = false;
@@ -669,7 +990,6 @@ Status Session::status() {
         s.stream_kbps = active && st.streaming ? stream_kbps_ : 0;
         s.stream_queued_ms = active ? st.stream_queued_ms : 0;
         s.replay_seconds = active ? st.replay_seconds : 0;
-        s.camera = camera_.has_value();
         s.scene = scene_;
         s.camera_frames = st.camera_frames;
         s.window_closed = st.window_closed;

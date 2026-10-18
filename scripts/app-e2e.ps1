@@ -12,6 +12,7 @@
 #   6. A camera and an image are drawn; the scene moves the camera while recording. The
 #      preview shows the same picture, before Start too, and stops when Show preview is off.
 #      Dragging the camera in the preview moves and resizes it, before Start and while recording.
+#      A new scene with a display layer, placed by dragging, is switched away from while recording.
 #   7. Volume and mute change the mix while recording, from the window and the menu.
 #   8. Settings persist without the stream key, which Credential Manager holds.
 #   9. Quit Rec from the notification-area menu while recording saves the movie, then exits.
@@ -358,7 +359,7 @@ try {
     Expect-Color (Picture-Color $picture 0.35 0.4 0.3 0.2) 'color' 'green'
     $picture.Dispose()
     Start-Sleep -Milliseconds 1000
-    [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1011, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Screen only"
+    [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]2001, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Screen only"
     Start-Sleep -Milliseconds 2500
     Press $ui 'Stop Recording'
     Wait-Status $ui 'Ready to record' | Out-Null
@@ -412,6 +413,54 @@ try {
     Expect-Color $moved 'sample_4' 'green'
     Write-Host "6b. camera layout: $($middle['frames']) frames; dragged and resized before Start, moved while recording"
 
+    # 6c. Scenes: a new scene gets display 1 (covered by a blue window) as a layer over the
+    # whole frame; dragging the layer's top-left corner makes it the bottom-right quarter, and
+    # the scene is renamed. Recording starts in it and switches to the first scene, where the
+    # layer is hidden. Then the layer is removed again.
+    Set-Check $ui 'Image overlay' $false  # It fills the frame, so it would take the corner.
+    $screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    $blue = Show-ColorWindow 'rec-app-blue' $screen.X $screen.Y $screen.Width $screen.Height 'Blue' $Artifacts
+    try {
+        Press $ui 'New Scene'
+        Start-Sleep -Milliseconds 300
+        [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1100, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, Add Display > Display 1
+        $scenes = Join-Path $Artifacts 'app-preview-scene.png'
+        Wait-PreviewColor $ui $scenes @(0.1, 0.55, 0.3, 0.3) 'blue'
+        Drag-Preview $ui @(0.004, 0.006) @(0.5, 0.5)
+        Wait-PreviewColor $ui $scenes @(0.1, 0.55, 0.3, 0.3) 'blue' -Not
+        Wait-PreviewColor $ui $scenes @(0.6, 0.6, 0.3, 0.3) 'blue'
+        Set-Field $ui 'Name' 'Blue corner'
+        $combo = (Find $ui 'Scene' $ComboBox).Item
+        if ($combo.accValue(0) -ne 'Blue corner') { throw "the Scene list shows '$($combo.accValue(0))' after renaming" }
+        Press $ui 'Start Recording'
+        Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+        Start-Sleep -Milliseconds 2000
+        $sceneList = (Find $ui 'Scene' $ComboBox).Handle
+        [AppWindow]::SendMessage($sceneList, 0x014E, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # CB_SETCURSEL: the first scene
+        [AppWindow]::SendMessage($ui.Window, 0x0111, [IntPtr]((1 -shl 16) -bor [AppWindow]::GetDlgCtrlID($sceneList)), $sceneList) | Out-Null
+        Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-scene-switched.png') @(0.6, 0.6, 0.3, 0.3) 'blue' -Not
+        Start-Sleep -Milliseconds 2500
+        Press $ui 'Stop Recording'
+        Wait-Status $ui 'Ready to record' | Out-Null
+    } finally {
+        Stop-Process -Id $blue.Id -Force -ErrorAction SilentlyContinue
+    }
+    $movie = Newest-Movie
+    Copy-Item $movie (Join-Path $Artifacts 'app-scenes.mp4')
+    $quarter = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-scenes-quarter.probe') @('--sample', '1100,650,600,300')
+    $last = 0
+    while ($quarter.ContainsKey("sample_$($last + 1)")) { $last++ }
+    if ($last -lt 4) { throw "the scenes recording is too short: $($quarter['duration']) s" }
+    Expect-Color $quarter 'sample_1' 'blue'
+    Expect-Color $quarter "sample_$last" 'white'
+    # Remove the layer, so the later steps capture only the test pattern.
+    $sources = (Find $ui 'Sources' 33).Handle  # A list
+    [AppWindow]::SendMessage($sources, 0x0186, [IntPtr]1, [IntPtr]::Zero) | Out-Null  # LB_SETCURSEL: Display 1
+    [AppWindow]::SendMessage($ui.Window, 0x0111, [IntPtr]((1 -shl 16) -bor [AppWindow]::GetDlgCtrlID($sources)), $sources) | Out-Null
+    Press $ui 'Remove'
+    Start-Sleep -Milliseconds 300
+    if ([int][AppWindow]::SendMessage($sources, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero) -ne 2) { throw 'the display layer was not removed' }  # LB_GETCOUNT
+    Write-Host "6c. scenes: $($quarter['frames']) frames; a display layer placed by dragging in a new scene, switched away while recording"
     # 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
     # unmuted from the notification-area menu 4.5 s in. The mix loses the beeps at 3 and 4 s.
     Set-Check $ui 'Microphone' $true
@@ -448,9 +497,11 @@ try {
     Expect-Text $settings 'replay=0'
     Expect-Text $settings 'camera=1'
     Expect-Text $settings 'camera_device=test'
-    Expect-Text $settings 'scene=screen-camera'
-    Expect-Text $settings 'camera_corner=custom'
-    Expect-Text $settings 'image=1'
+    Expect-Text $settings 'scene=0'
+    Expect-Text $settings 'scene.1.name=Blue corner'
+    Expect-Text $settings 'scene.0.camera=1,'
+    if ($settings.Contains('layer.0.kind')) { throw 'the removed display layer is still in the settings' }
+    Expect-Text $settings 'image=0'
     Expect-Text $settings 'preview=1'
     Expect-Text $settings 'system_volume=-6'
     Expect-Text $settings 'system_muted=0'
