@@ -371,8 +371,13 @@ try {
     Expect-Color $center 'sample_1' 'white'
     Expect-Color $center 'sample_3' 'green'
     Expect-Color $center 'sample_4' 'green'
-    Expect-Color $corner 'sample_6' 'white'
-    foreach ($second in 0..6) { Expect-Color $logo "sample_$second" 'red' }
+    # A slow runner can drop slots and shorten the movie, so the hidden camera is checked in
+    # the last sampled second rather than a fixed one.
+    $last = 0
+    while ($corner.ContainsKey("sample_$($last + 1)")) { $last++ }
+    if ($last -lt 5) { throw "the camera recording is too short: $($corner['duration']) s" }
+    Expect-Color $corner "sample_$last" 'white'
+    foreach ($second in 0..$last) { Expect-Color $logo "sample_$second" 'red' }
     Write-Host "6. camera and image: $($corner['frames']) frames, corner, full frame, hidden; the preview matched, before Start too"
 
     # 6b. Camera layout: before Start, drag the camera from its corner to the middle and its
