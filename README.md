@@ -53,11 +53,11 @@ Recordings are written in fragments, so a crash, kill or power loss keeps everyt
 ### Live streaming
 
 ```sh
-./build/rec record --system-audio --mic default --stream rtmp://live.twitch.tv/app/YOUR_KEY -t 0 -o show.mov
+./build/rec record --system-audio --mic default --stream rtmps://live.twitch.tv:443/app/YOUR_KEY -t 0 -o show.mov
 ```
 
 ```powershell
-.\build\Release\rec.exe record --system-audio --mic default --stream rtmp://live.twitch.tv/app/YOUR_KEY -t 0 -o show.mp4
+.\build\Release\rec.exe record --system-audio --mic default --stream rtmps://live.twitch.tv:443/app/YOUR_KEY -t 0 -o show.mp4
 ```
 
 `--stream URL` sends the recording timeline to an RTMP or RTMPS server (Twitch, YouTube, OBS-style ingest, MediaMTX) while the file records. The stream has its own encoders, so the file keeps its quality: H.264 at `--stream-bitrate` kb/s (default 6000, constant bitrate, keyframe every 2 s, no B-frames) and 160 kb/s AAC stereo. On macOS a separate VideoToolbox session encodes it, with constant bitrate where the encoder supports it (otherwise an average with each second capped at 1.5x). On Windows the hardware encoder of the display's GPU encodes it when there is one. The stream carries the mix when both system audio and a microphone are recorded (even with `--audio-tracks stems`), the single source otherwise, and a silent track when there is no audio, because services expect one.
@@ -183,7 +183,7 @@ The live mean moved from about −12 ms on the first day to about −24 ms the n
 - Capture is display-only.
 - Pausing a live recording on macOS cuts audio per capture buffer (about 10–20 ms), so a sound that spans the pause can leave up to one buffer at the cut. Windows cuts at the exact sample. Neither has been tested with a sound playing at the pause instant.
 - Windows HEVC recordings are not crash-safe (see above).
-- Streaming to Twitch works over RTMPS and RTMP from Windows (bandwidth-test mode, [evidence](docs/evidence/2026-10-18-twitch/README.md)). It has not been tested against YouTube, from macOS to Twitch, at a sustained 6 Mb/s, at 4K, or over a slow network. Reconnecting is tested only against a local server restart. The app's Twitch and YouTube destinations still use plain RTMP.
+- Streaming to Twitch works over RTMPS and RTMP from Windows (bandwidth-test mode, [evidence](docs/evidence/2026-10-18-twitch/README.md)). It has not been tested against YouTube, from macOS to Twitch, at a sustained 6 Mb/s, at 4K, or over a slow network. Reconnecting is tested only against a local server restart. The app's Twitch and YouTube destinations use RTMPS (`rtmps://live.twitch.tv:443/app`, `rtmps://a.rtmps.youtube.com:443/live2`).
 - Windows loopback captures the default output device. rec plays silence on it while recording so the audio clock keeps moving when nothing else plays.
 - The output latency is read once, when recording starts. Switching output devices mid-recording keeps the old offset.
 - A microphone that is not 48 kHz is resampled linearly per buffer for the mix. Its stem is converted by AVFoundation.

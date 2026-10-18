@@ -63,7 +63,8 @@ int choice_index(const std::array<Choice, N>& choices, const std::string& value)
 Settings load_settings(const std::string& path);
 bool save_settings(const std::string& path, const Settings& settings);
 
-// rtmp://host/app for the destination; the stream key is appended as the last segment.
+// rtmp:// or rtmps://host/app for the destination; the stream key is appended as the last
+// segment. The Twitch and YouTube presets use RTMPS.
 std::string server_url(const Settings& settings);
 
 enum class State { idle, starting, recording, paused, finishing };

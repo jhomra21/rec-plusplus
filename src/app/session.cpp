@@ -86,8 +86,8 @@ bool save_settings(const std::string& path, const Settings& s) {
 }
 
 std::string server_url(const Settings& s) {
-    if (s.destination == "twitch") return "rtmp://live.twitch.tv/app";
-    if (s.destination == "youtube") return "rtmp://a.rtmp.youtube.com/live2";
+    if (s.destination == "twitch") return "rtmps://live.twitch.tv:443/app";
+    if (s.destination == "youtube") return "rtmps://a.rtmps.youtube.com:443/live2";
     std::string url = s.server;
     while (!url.empty() && (url.back() == '/' || url.back() == ' ')) url.pop_back();
     return url;
