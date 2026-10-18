@@ -85,7 +85,7 @@ grep -qx 'quit=started' "$report"
 grep -qx 'idle-preview=ok' "$report"
 grep -qx 'preview=ok' "$report"
 grep -qx 'camera-layout=ok' "$report"
-grep -qx 'scenes=ok' "$report"
+grep -qx 'scene-editor=ok' "$report"
 grep -q '^live=● LIVE' "$report"
 
 probe "$(step pause)" app-pause

@@ -2147,7 +2147,7 @@ struct PreviewHit {
     saved(@"scenes");
     save_png(arranged, @"app-preview-scenes");
     save_png(switched, @"app-preview-scenes-switched");
-    note(@"scenes=ok");
+    note(@"scene-editor=ok");
 
     // 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
     // unmuted from the menu bar item's menu 4.5 s in. The mix loses the beeps at 3 and 4 s.
