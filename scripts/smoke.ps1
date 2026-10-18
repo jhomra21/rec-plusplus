@@ -39,6 +39,12 @@ try {
     Expect-Failure 'audio tracks must be' @('record', '--audio-tracks', 'surround')
     Expect-Failure 'gain must be' @('record', '--mic-gain', '99')
     Expect-Failure 'offset must be' @('record', '--system-audio-offset-ms', '5000')
+    Expect-Failure 'region must be' @('record', '--region', '1,2,3')
+    Expect-Failure 'region must be' @('record', '--region', '0,0,1,100')
+    Expect-Failure 'needs a real screen' @('record', '--test-pattern', '--region', '0,0,640,360')
+    Expect-Failure 'window not found' @('record', '--window', 'no-such-window-title-xyz')
+    $windows = Invoke-Rec $rec @('windows')
+    if ($windows.Code -ne 0) { throw "rec windows failed: $($windows.Text)" }
 
     # The live A/V sync stimulus must at least compile.
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'flash-beep.ps1') -CheckOnly
@@ -245,6 +251,11 @@ try {
         $screen = Record 'screen' 'screen.mp4' @('--display', '1', '-r', '1080p', '-f', '30', '-t', '3', '--codec', 'h264')
         Expect-Field $screen.Probe 'codec' 'h264'
         Expect-Field $screen.Probe 'frames' '90'
+        $region = Record 'region' 'region.mp4' @('--display', '1', '--region', '0,0,640,360', '-f', '30', '-t', '3', '--codec', 'h264')
+        Expect-Field $region.Probe 'width' '640'
+        Expect-Field $region.Probe 'height' '360'
+        Expect-Field $region.Probe 'frames' '90'
+        Expect-Failure 'does not fit display 1' @('record', '--display', '1', '--region', '0,0,99999,100', '-t', '1', '-o', (Join-Path $tmp 'too-big.mp4'))
     }
     # The desktop app, driven through its accessibility interface.
     $app = Join-Path (Split-Path -Parent $rec) 'rec-app.exe'

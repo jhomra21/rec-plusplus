@@ -9,6 +9,8 @@
 # in sync too.
 # REC_E2E_PREPLAY=1 starts the stimulus 2 s before the recording, so its audio is already
 # playing when capture starts.
+# REC_E2E_SOURCE=window records only the stimulus window (found by its title), and
+# REC_E2E_SOURCE=region records a 1280x720 region of the display.
 set -euo pipefail
 
 [[ "$(uname -s)" == Darwin ]] || { echo 'live A/V sync E2E requires macOS' >&2; exit 1; }
@@ -33,7 +35,14 @@ cmake --build "$root/build" --parallel
 rec="$root/build/rec"
 swiftc -O "$root/scripts/flash-beep.swift" -o "$artifacts/flash-beep"
 
-args=(record --display 1 --system-audio -r 1080p -f 60 -t 12 --codec h264 -o "$artifacts/recording.mov")
+source="${REC_E2E_SOURCE:-}"
+case "$source" in
+  window) target=(--window "rec flash-beep"); title="rec flash-beep" ;;
+  region) target=(--display 1 --region 100,100,1280,720); title="" ;;
+  "") target=(--display 1); title="" ;;
+  *) echo "REC_E2E_SOURCE must be window or region" >&2; exit 1 ;;
+esac
+args=(record "${target[@]}" --system-audio -r 1080p -f 60 -t 12 --codec h264 -o "$artifacts/recording.mov")
 if [[ "${REC_E2E_MIC:-0}" == 1 ]]; then args+=(--mic default); fi
 stream="${REC_E2E_STREAM:-0}"
 if [[ "$stream" == 1 ]]; then
@@ -47,9 +56,10 @@ pause="${REC_E2E_PAUSE:-0}"
 stimulus_seconds=6
 if [[ "$pause" == 1 ]]; then stimulus_seconds=8; fi
 stimulus_pid=""
-if [[ "${REC_E2E_PREPLAY:-0}" == 1 ]]; then
+# Window capture needs the window open before the recording starts.
+if [[ "${REC_E2E_PREPLAY:-0}" == 1 || "$source" == window ]]; then
   # Covers the 2 s lead and the recorder's 3 s start-up as well.
-  "$artifacts/flash-beep" "$((stimulus_seconds + 5))" >"$artifacts/stimulus.log" 2>&1 &
+  "$artifacts/flash-beep" "$((stimulus_seconds + 5))" "$title" >"$artifacts/stimulus.log" 2>&1 &
   stimulus_pid="$!"
   sleep 2
 fi
@@ -71,7 +81,7 @@ if ! kill -0 "$capture_pid" 2>/dev/null; then
 fi
 
 if [[ -z "$stimulus_pid" ]]; then
-  "$artifacts/flash-beep" "$stimulus_seconds" >"$artifacts/stimulus.log" 2>&1 &
+  "$artifacts/flash-beep" "$stimulus_seconds" "$title" >"$artifacts/stimulus.log" 2>&1 &
   stimulus_pid="$!"
 fi
 if [[ "$pause" == 1 ]]; then
@@ -95,6 +105,10 @@ grep -qx 'audio_codec=aac' "$artifacts/recording.probe"
 grep -qx 'frames=720' "$artifacts/recording.probe"
 awk -v d="$(value audio_duration)" 'BEGIN { exit !(d >= 11.9 && d <= 12.1) }' || { echo "audio lasts $(value audio_duration) s, not 12 s" >&2; exit 1; }
 if [[ "${REC_E2E_MIC:-0}" == 1 ]]; then grep -qx 'audio_tracks=3' "$artifacts/recording.probe"; fi
+if [[ "$source" == region ]]; then
+  grep -qx 'width=1280' "$artifacts/recording.probe"
+  grep -qx 'height=720' "$artifacts/recording.probe"
+fi
 if [[ "$pause" == 1 ]]; then grep -q 'not in the movie' "$artifacts/record.log"; fi
 events="$(value av_sync_events)"
 offset="$(value av_offset_ms)"

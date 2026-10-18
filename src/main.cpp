@@ -4,6 +4,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
@@ -128,11 +129,14 @@ void usage() {
     std::cout << "rec: native screen recorder for macOS and Windows\n\n"
                  "Usage:\n"
                  "  rec devices\n"
+                 "  rec windows\n"
                  "  rec record [options]\n"
                  "  rec probe FILE\n\n"
                  "Options:\n"
                  "  -o, --output FILE              Output .mp4 or .mov (default: rec.mov)\n"
                  "  --display N                    Display number from devices (default: 1)\n"
+                 "  --window ID|TEXT               Record one window: an ID from `rec windows`, or part of its title or app\n"
+                 "  --region X,Y,W,H               Record part of the display, in its pixels from the top-left corner\n"
                  "  -r, --resolution SIZE          720p, 1080p, 1440p, 4k, or native\n"
                  "  -f, --fps N                    24, 25, 30, 50, 60, or 120\n"
                  "  -t, --duration SECONDS         Recorded length, excluding pauses (0 = until stopped)\n"
@@ -168,6 +172,47 @@ bool number(std::string_view s, double low, double high, double& out) {
     return end != owned.c_str() && *end == '\0' && std::isfinite(out) && out >= low && out <= high;
 }
 
+bool region(std::string_view s, rec::Region& r) {
+    std::int32_t values[4]{};
+    const char* p = s.data();
+    const char* end = s.data() + s.size();
+    for (int i = 0; i < 4; ++i) {
+        const auto [next, ec] = std::from_chars(p, end, values[i]);
+        if (ec != std::errc{}) return false;
+        p = next;
+        if (i < 3) { if (p == end || *p != ',') return false; ++p; }
+    }
+    if (p != end || values[0] < 0 || values[1] < 0 || values[2] < 2 || values[3] < 2) return false;
+    r = {values[0], values[1], static_cast<std::uint32_t>(values[2]), static_cast<std::uint32_t>(values[3])};
+    return true;
+}
+
+std::string lower(std::string_view s) {
+    std::string out(s);
+    for (auto& c : out) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
+// An ID from `rec windows`, or text in a window's title or app name (the frontmost match).
+bool find_window(std::string_view query, std::uint64_t& id, std::string& error) {
+    const auto windows = rec::list_windows(error);
+    if (!error.empty()) return false;
+    std::uint64_t number = 0;
+    const auto [p, ec] = std::from_chars(query.data(), query.data() + query.size(), number);
+    if (ec == std::errc{} && p == query.data() + query.size()) {
+        for (const auto& w : windows)
+            if (w.id == number) { id = number; return true; }
+    }
+    const auto needle = lower(query);
+    for (const auto& w : windows)
+        if (lower(w.title).find(needle) != std::string::npos || lower(w.app).find(needle) != std::string::npos) {
+            id = w.id;
+            return true;
+        }
+    error = "window not found: " + std::string(query) + " (run `rec windows`)";
+    return false;
+}
+
 bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
     for (int i = 2; i < argc; ++i) {
         std::string_view arg(argv[i]);
@@ -182,6 +227,12 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
         if (arg == "-o" || arg == "--output") o.output = value;
         else if (arg == "--display") {
             if (!integer(value, o.display) || o.display == 0) { error = "invalid display index"; return false; }
+        } else if (arg == "--window") {
+            if (!find_window(value, o.window, error)) return false;
+        } else if (arg == "--region") {
+            rec::Region r;
+            if (!region(value, r)) { error = "region must be X,Y,WIDTH,HEIGHT in display pixels, at least 2x2"; return false; }
+            o.region = r;
         } else if (arg == "-f" || arg == "--fps") {
             if (!integer(value, o.fps) || (o.fps != 24 && o.fps != 25 && o.fps != 30 && o.fps != 50 && o.fps != 60 && o.fps != 120)) {
                 error = "fps must be 24, 25, 30, 50, 60, or 120"; return false;
@@ -229,6 +280,10 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
     }
     if ((o.test_tone || o.test_mic) && !o.test_pattern) {
         error = std::string(o.test_tone ? "--test-tone" : "--test-mic") + " requires --test-pattern"; return false;
+    }
+    if (o.window && o.region) { error = "use --window or --region, not both"; return false; }
+    if ((o.window || o.region) && o.test_pattern) {
+        error = std::string(o.window ? "--window" : "--region") + " needs a real screen capture"; return false;
     }
     if ((o.system_audio || o.microphone) && o.test_pattern) {
         error = std::string(o.system_audio ? "--system-audio" : "--mic") + " needs a real screen capture"; return false;
@@ -305,6 +360,17 @@ int main(int argc, char** argv) {
         std::cout << "Default output latency: " << std::fixed << std::setprecision(1)
                   << rec::default_output_latency_ms() << " ms\n";
         return status;
+    }
+    if (command == "windows") {
+        if (argc != 2) { std::cerr << "windows takes no options\n"; return 2; }
+        std::string error;
+        const auto windows = rec::list_windows(error);
+        if (!error.empty()) { std::cerr << error << '\n'; return 1; }
+        std::cout << "Windows:\n";
+        for (const auto& w : windows)
+            std::cout << "  " << w.id << ": " << (w.app.empty() ? "" : w.app + " - ") << w.title << " (" << w.width
+                      << "x" << w.height << ")\n";
+        return 0;
     }
     if (command == "probe") {
         if (argc != 3) { std::cerr << "usage: rec probe FILE\n"; return 2; }

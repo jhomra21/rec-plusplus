@@ -1,15 +1,18 @@
 // Full-screen white flash and a simultaneous 1 kHz beep once a second, for A/V sync checks.
-// Usage: flash-beep [COUNT]
+// Usage: flash-beep [COUNT [TITLE]]. With a title the window is a normal titled window at the
+// normal level, so it can be picked for window capture.
 import AppKit
 import AVFoundation
 
 let count = CommandLine.arguments.count > 1 ? Int(CommandLine.arguments[1]) ?? 5 : 5
+let title = CommandLine.arguments.count > 2 ? CommandLine.arguments[2] : ""
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 guard let screen = NSScreen.main else { fatalError("no screen") }
 let window = NSWindow(contentRect: screen.frame, styleMask: .borderless, backing: .buffered, defer: false)
-window.level = .screenSaver
+window.level = title.isEmpty ? .screenSaver : .normal
+window.title = title
 window.backgroundColor = .black
 window.isOpaque = true
 window.ignoresMouseEvents = true

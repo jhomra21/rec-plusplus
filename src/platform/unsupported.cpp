@@ -5,6 +5,10 @@ std::vector<Display> list_displays(std::string& error) {
     error = "screen capture requires macOS 15 or Windows 10 (1903) or newer";
     return {};
 }
+std::vector<Window> list_windows(std::string& error) {
+    error = "window capture requires macOS 15 or Windows 10 (1903) or newer";
+    return {};
+}
 std::vector<AudioDevice> list_microphones(std::string& error) {
     error = "microphone capture requires macOS 15 or Windows 10 (1903) or newer";
     return {};

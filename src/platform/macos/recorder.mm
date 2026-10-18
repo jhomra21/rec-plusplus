@@ -28,6 +28,8 @@
 #include <thread>
 #include <vector>
 
+#include <unistd.h>
+
 namespace rec {
 void receive_frame(void* owner, CMSampleBufferRef sample);
 void receive_audio(void* owner, CMSampleBufferRef sample, bool microphone);
@@ -100,16 +102,45 @@ SCShareableContent* shareable(std::string& error) {
 
 struct Size { std::uint32_t width, height; };
 
-Size output_size(const Options& options, SCDisplay* display) {
+Size native_size(SCDisplay* display) {
     auto mode = CGDisplayCopyDisplayMode(display.displayID);
-    const std::uint32_t native_w = mode ? static_cast<std::uint32_t>(CGDisplayModeGetPixelWidth(mode)) : display.width;
-    const std::uint32_t native_h = mode ? static_cast<std::uint32_t>(CGDisplayModeGetPixelHeight(mode)) : display.height;
+    const std::uint32_t w = mode ? static_cast<std::uint32_t>(CGDisplayModeGetPixelWidth(mode)) : display.width;
+    const std::uint32_t h = mode ? static_cast<std::uint32_t>(CGDisplayModeGetPixelHeight(mode)) : display.height;
     if (mode) CGDisplayModeRelease(mode);
+    return {w, h};
+}
+
+// Pixels per point of the display that shows most of a rectangle in global points.
+double pixels_per_point(SCShareableContent* content, CGRect frame) {
+    double best = 0, scale = 1;
+    for (SCDisplay* display in content.displays) {
+        const CGRect overlap = CGRectIntersection(display.frame, frame);
+        const double area = CGRectIsNull(overlap) ? 0 : overlap.size.width * overlap.size.height;
+        if (area > best && display.width > 0) {
+            best = area;
+            scale = static_cast<double>(native_size(display).width) / display.width;
+        }
+    }
+    return scale;
+}
+
+// Normal app windows (layer 0) that are on screen, not rec's own.
+bool listable(SCWindow* window) {
+    return window.windowLayer == 0 && window.onScreen && window.frame.size.width >= 2 && window.frame.size.height >= 2 &&
+           window.owningApplication && window.owningApplication.processID != getpid();
+}
+
+Size output_size(const Options& options, std::uint32_t native_w, std::uint32_t native_h) {
     if (!options.width || !options.height) return {native_w & ~1u, native_h & ~1u};
     const double factor = std::min({1.0, static_cast<double>(options.width) / native_w,
                                     static_cast<double>(options.height) / native_h});
     return {std::max(2u, static_cast<std::uint32_t>(native_w * factor) & ~1u),
             std::max(2u, static_cast<std::uint32_t>(native_h * factor) & ~1u)};
+}
+
+Size output_size(const Options& options, SCDisplay* display) {
+    const auto native = native_size(display);
+    return output_size(options, native.width, native.height);
 }
 
 Result wait_capture(SCStream* stream, bool start) {
@@ -430,6 +461,24 @@ std::vector<Display> list_displays(std::string& error) {
     }
 }
 
+std::vector<Window> list_windows(std::string& error) {
+    @autoreleasepool {
+        error.clear();
+        SCShareableContent* content = shareable(error);
+        if (!content) return {};
+        std::vector<Window> result;
+        for (SCWindow* window in content.windows) {
+            if (!listable(window)) continue;
+            const double scale = pixels_per_point(content, window.frame);
+            result.push_back({window.windowID, static_cast<std::uint32_t>(std::lround(window.frame.size.width * scale)),
+                              static_cast<std::uint32_t>(std::lround(window.frame.size.height * scale)),
+                              window.title ? std::string(window.title.UTF8String ?: "") : std::string(),
+                              std::string(window.owningApplication.applicationName.UTF8String ?: "")});
+        }
+        return result;
+    }
+}
+
 std::vector<AudioDevice> list_microphones(std::string& error) {
     @autoreleasepool {
         error.clear();
@@ -459,6 +508,9 @@ public:
                 return {"synthetic audio needs the test pattern"};
             if ((options_.system_audio || options_.microphone) && options_.test_pattern)
                 return {"system audio and microphone need a real screen capture"};
+            if ((options_.window || options_.region) && options_.test_pattern)
+                return {"window and region capture need a real screen capture"};
+            if (options_.window && options_.region) return {"capture a window or a region, not both"};
             if (options_.output.empty()) return {"output path is empty"};
             NSString* path = [NSString stringWithUTF8String:options_.output.c_str()];
             if (!path) return {"invalid output path"};
@@ -671,12 +723,41 @@ private:
         }
         SCShareableContent* content = shareable(error);
         if (!content) return {error};
-        if (options_.display > content.displays.count) return {"display index not found; run `rec devices`"};
-        SCDisplay* display = content.displays[options_.display - 1];
-        size_ = output_size(options_, display);
-        if (!size_.width || !size_.height) return {"display has no usable pixel dimensions"};
-        SCContentFilter* filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+        SCContentFilter* filter = nil;
+        CGRect source = CGRectNull;
+        if (options_.window) {
+            SCWindow* window = nil;
+            for (SCWindow* candidate in content.windows)
+                if (candidate.windowID == options_.window) { window = candidate; break; }
+            if (!window) return {"window not found; run `rec windows`"};
+            if (!window.onScreen) return {"the window is not on screen; show it (not minimized, on this Space), then retry"};
+            const double scale = pixels_per_point(content, window.frame);
+            size_ = output_size(options_, static_cast<std::uint32_t>(std::lround(window.frame.size.width * scale)),
+                                static_cast<std::uint32_t>(std::lround(window.frame.size.height * scale)));
+            filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
+        } else {
+            if (options_.display == 0 || options_.display > content.displays.count)
+                return {"display index not found; run `rec devices`"};
+            SCDisplay* display = content.displays[options_.display - 1];
+            size_ = output_size(options_, display);
+            if (options_.region) {
+                const auto& r = *options_.region;
+                const auto native = native_size(display);
+                if (r.x < 0 || r.y < 0 || r.width < 2 || r.height < 2 || r.x + r.width > native.width ||
+                    r.y + r.height > native.height)
+                    return {"region " + std::to_string(r.x) + "," + std::to_string(r.y) + "," + std::to_string(r.width) +
+                            "," + std::to_string(r.height) + " does not fit display " + std::to_string(options_.display) +
+                            " (" + std::to_string(native.width) + "x" + std::to_string(native.height) + ")"};
+                // The source rectangle is in points; the region is in pixels.
+                const double scale = display.width > 0 ? static_cast<double>(native.width) / display.width : 1.0;
+                source = CGRectMake(r.x / scale, r.y / scale, r.width / scale, r.height / scale);
+                size_ = output_size(options_, r.width, r.height);
+            }
+            filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+        }
+        if (size_.width < 2 || size_.height < 2) return {"the capture has no usable pixel dimensions"};
         SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];
+        if (!CGRectIsNull(source)) config.sourceRect = source;
         config.width = size_.width;
         config.height = size_.height;
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;

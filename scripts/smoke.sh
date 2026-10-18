@@ -39,6 +39,9 @@ expect_failure 'audio tracks must be' record --audio-tracks surround
 expect_failure 'gain must be' record --mic-gain 99
 expect_failure 'offset must be' record --system-audio-offset-ms 5000
 expect_failure 'stream bitrate must be' record --stream-bitrate 100
+expect_failure 'region must be' record --region 1,2,3
+expect_failure 'region must be' record --region 0,0,1,100
+expect_failure 'needs a real screen' record --test-pattern --region 0,0,640,360
 
 if [[ "$(uname -s)" != Darwin ]]; then
   expect_failure 'requires macOS' devices
@@ -238,6 +241,13 @@ else
     "$rec" probe "$artifacts/screen.mov" | tee "$artifacts/screen.probe"
     grep -qx 'codec=h264' "$artifacts/screen.probe"
     grep -qx 'frames=90' "$artifacts/screen.probe"
+    "$rec" windows | tee "$artifacts/windows.txt"
+    "$rec" record --display 1 --region 0,0,640,360 -f 30 -t 3 --codec h264 -o "$artifacts/region.mov" | tee "$artifacts/region.record.log"
+    "$rec" probe "$artifacts/region.mov" | tee "$artifacts/region.probe"
+    grep -qx 'width=640' "$artifacts/region.probe"
+    grep -qx 'height=360' "$artifacts/region.probe"
+    grep -qx 'frames=90' "$artifacts/region.probe"
+    expect_failure 'does not fit display 1' record --display 1 --region 0,0,99999,100 -t 1 -o "$tmp/too-big.mov"
   fi
 fi
 echo 'smoke passed'

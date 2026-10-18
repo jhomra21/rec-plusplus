@@ -12,8 +12,10 @@ namespace {
 constexpr std::uint32_t kChunkSize = 4096;
 constexpr int kTimeoutMs = 10000;
 constexpr int kConnectMs = 5000, kReconnectMs = 3000;
-// Reconnecting waits 0.5 s, then doubles up to 8 s between attempts, and gives up after 2 minutes.
-constexpr int kFirstRetryMs = 500, kMaxRetryMs = 8000;
+// Reconnecting waits 0.5 s, then 1 s, then 2 s between attempts, and gives up after 2 minutes.
+// A longer wait outlasts a short outage: an Ethernet drop of 5.7 s with retries up to 8 s apart
+// kept the stream down for 16 s.
+constexpr int kFirstRetryMs = 500, kMaxRetryMs = 2000;
 constexpr std::int64_t kGiveUpMs = 120000;
 // Chunk streams: 2 protocol control, 3 connection commands, 4 audio, 6 video, 8 stream commands and data.
 constexpr std::uint32_t kControl = 2, kCommands = 3, kAudio = 4, kVideo = 6, kStreamData = 8;

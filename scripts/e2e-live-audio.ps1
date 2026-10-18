@@ -8,6 +8,8 @@
 # in sync too.
 # REC_E2E_PREPLAY=1 starts the stimulus 2 s before the recording, so its audio is already
 # playing when capture starts.
+# REC_E2E_SOURCE=window records only the stimulus window (found by its title), and
+# REC_E2E_SOURCE=region records a 1280x720 region of the display.
 # Nothing else may play: the beep detector cannot tell other sound from beeps. The script
 # stops if the output device is not silent for 2 s first; REC_E2E_ALLOW_SOUND=1 skips that.
 $ErrorActionPreference = 'Stop'
@@ -22,7 +24,14 @@ $rec = Build-Rec $root (Join-Path $root 'build')
 $movie = Join-Path $artifacts 'recording.mp4'
 $pause = $env:REC_E2E_PAUSE -eq '1'
 
-$arguments = @('record', '--display', '1', '--system-audio', '-r', '1080p', '-f', '60', '-t', '12', '--codec', 'h264', '-o', $movie)
+$source = $env:REC_E2E_SOURCE
+if ($source -and $source -notin @('window', 'region')) { throw "REC_E2E_SOURCE must be window or region" }
+$target = switch ($source) {
+    'window' { @('--window', 'rec flash-beep') }
+    'region' { @('--display', '1', '--region', '100,100,1280,720') }
+    default { @('--display', '1') }
+}
+$arguments = @('record') + $target + @('--system-audio', '-r', '1080p', '-f', '60', '-t', '12', '--codec', 'h264', '-o', $movie)
 if ($env:REC_E2E_MIC -eq '1') { $arguments += @('--mic', 'default') }
 $stream = $env:REC_E2E_STREAM -eq '1'
 $server = $null
@@ -45,11 +54,13 @@ if ($env:REC_E2E_ALLOW_SOUND -ne '1') {
 }
 $seconds = if ($pause) { 8 } else { 6 }
 function Start-Stimulus([int]$length) {
-    return Start-Process -FilePath powershell -PassThru -WindowStyle Hidden -ArgumentList @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'flash-beep.ps1'), '-Seconds', $length)
+    $stimulusArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'flash-beep.ps1'), '-Seconds', $length)
+    if ($source -eq 'window') { $stimulusArguments += @('-Title', '"rec flash-beep"') }
+    return Start-Process -FilePath powershell -PassThru -WindowStyle Hidden -ArgumentList $stimulusArguments
 }
 $stimulus = $null
-if ($env:REC_E2E_PREPLAY -eq '1') {
+# Window capture needs the window open before the recording starts.
+if ($env:REC_E2E_PREPLAY -eq '1' -or $source -eq 'window') {
     # Covers the 2 s lead and the recorder's 3 s start-up as well.
     $stimulus = Start-Stimulus ($seconds + 5)
     Start-Sleep -Seconds 2
@@ -82,6 +93,7 @@ Expect-Field $probe 'audio_codec' 'aac'
 Expect-Field $probe 'frames' '720'
 Expect-Within $probe 'audio_duration' 11.95 12.05
 if ($env:REC_E2E_MIC -eq '1') { Expect-Field $probe 'audio_tracks' '3' }
+if ($source -eq 'region') { Expect-Field $probe 'width' '1280'; Expect-Field $probe 'height' '720' }
 if ($pause) { Expect-Text $result.Text 'not in the movie' }
 $events = [int]$probe['av_sync_events']
 if ($events -lt 4) { throw "only $events flash/beep pairs found" }

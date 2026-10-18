@@ -9,6 +9,7 @@
 #endif
 #include <windows.h>
 #include <commctrl.h>
+#include <windowsx.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -36,11 +38,13 @@ constexpr UINT kTrayMessage = WM_APP + 2;
 constexpr UINT_PTR kPollTimer = 1;
 constexpr int kHotkey = 1;
 constexpr UINT kTrayId = 1;
+// Sent as the WM_COMMAND code for the Source list once its selection change is handled.
+constexpr int kPickRegion = 0x7001;
 
 enum Control : int {
     kStatus = 100, kDetail, kLive, kSystemLabel, kSystemMeter, kMicLabel, kMicMeter,
     kRecord, kPause,
-    kCaptureHeader, kDisplayLabel, kDisplay, kSystemAudio, kMicrophone, kMicDevice, kCursor,
+    kCaptureHeader, kSourceLabel, kSource, kSystemAudio, kMicrophone, kMicDevice, kCursor,
     kQualityHeader, kResolutionLabel, kResolution, kFpsLabel, kFps, kCodecLabel, kCodec, kFormatLabel, kFormat,
     kStreamHeader, kStream, kServiceLabel, kService, kServerLabel, kServer, kKeyLabel, kKey, kBitrateLabel, kBitrate,
     kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast,
@@ -161,6 +165,144 @@ HICON dot_icon(int size, COLORREF color, bool ring) {
     DeleteObject(mask);
     DeleteObject(color_bitmap);
     return icon;
+}
+
+// A dimmed overlay over every display: drag a rectangle to record it; Esc, a right click or
+// switching away cancels. The rectangle is a color-keyed hole, so its content shows undimmed.
+struct RegionPick {
+    bool done = false, dragging = false, chosen = false;
+    POINT from{}, to{};
+    int dpi = 96;
+};
+constexpr COLORREF kHole = RGB(255, 0, 255);
+
+RECT span(POINT a, POINT b) { return {std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x), std::max(a.y, b.y)}; }
+
+LRESULT CALLBACK region_procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
+    if (message == WM_NCCREATE)
+        SetWindowLongPtrW(window, GWLP_USERDATA,
+                          reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams));
+    auto* pick = reinterpret_cast<RegionPick*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+    if (!pick) return DefWindowProcW(window, message, w, l);
+    const POINT at{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+    switch (message) {
+    case WM_LBUTTONDOWN:
+        pick->dragging = true;
+        pick->from = pick->to = at;
+        SetCapture(window);
+        InvalidateRect(window, nullptr, FALSE);
+        return 0;
+    case WM_MOUSEMOVE:
+        if (pick->dragging) { pick->to = at; InvalidateRect(window, nullptr, FALSE); }
+        return 0;
+    case WM_LBUTTONUP:
+        if (pick->dragging) {
+            pick->to = at;
+            pick->dragging = false;
+            pick->chosen = pick->done = true;
+            ReleaseCapture();
+        }
+        return 0;
+    case WM_RBUTTONDOWN:
+        pick->done = true;
+        return 0;
+    case WM_KEYDOWN:
+        if (w == VK_ESCAPE) pick->done = true;
+        return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(w) == WA_INACTIVE && !pick->chosen) pick->done = true;
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT paint;
+        HDC dc = BeginPaint(window, &paint);
+        RECT client;
+        GetClientRect(window, &client);
+        HDC buffer = CreateCompatibleDC(dc);
+        HBITMAP bitmap = CreateCompatibleBitmap(dc, client.right, client.bottom);
+        HGDIOBJ old_bitmap = SelectObject(buffer, bitmap);
+        FillRect(buffer, &client, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+        HFONT font = CreateFontW(-MulDiv(16, pick->dpi, 72), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0,
+                                 CLEARTYPE_QUALITY, 0, L"Segoe UI");
+        HGDIOBJ old_font = SelectObject(buffer, font);
+        SetBkMode(buffer, TRANSPARENT);
+        SetTextColor(buffer, RGB(255, 255, 255));
+        if (pick->dragging) {
+            const RECT r = span(pick->from, pick->to);
+            HBRUSH hole = CreateSolidBrush(kHole);
+            FillRect(buffer, &r, hole);
+            DeleteObject(hole);
+            RECT frame = r;
+            for (int i = 0; i < 2; ++i) {
+                InflateRect(&frame, 1, 1);
+                FrameRect(buffer, &frame, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+            }
+            wchar_t size[48];
+            std::swprintf(size, 48, L"%ld \u00D7 %ld", r.right - r.left, r.bottom - r.top);
+            RECT label{r.left, r.bottom + MulDiv(6, pick->dpi, 96), r.left + MulDiv(300, pick->dpi, 96),
+                       r.bottom + MulDiv(40, pick->dpi, 96)};
+            DrawTextW(buffer, size, -1, &label, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
+        } else {
+            // Centered on the main display, whose top-left is the screen origin.
+            RECT main{-GetSystemMetrics(SM_XVIRTUALSCREEN), -GetSystemMetrics(SM_YVIRTUALSCREEN), 0, 0};
+            main.right = main.left + GetSystemMetrics(SM_CXSCREEN);
+            main.bottom = main.top + GetSystemMetrics(SM_CYSCREEN);
+            DrawTextW(buffer, L"Drag to select the area to record. Esc cancels.", -1, &main,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        SelectObject(buffer, old_font);
+        DeleteObject(font);
+        BitBlt(dc, 0, 0, client.right, client.bottom, buffer, 0, 0, SRCCOPY);
+        SelectObject(buffer, old_bitmap);
+        DeleteObject(bitmap);
+        DeleteDC(buffer);
+        EndPaint(window, &paint);
+        return 0;
+    }
+    default:
+        return DefWindowProcW(window, message, w, l);
+    }
+}
+
+// The dragged rectangle in screen pixels, or nothing when cancelled or too small.
+std::optional<RECT> pick_region(HINSTANCE instance, UINT dpi) {
+    static const ATOM kind = [instance] {
+        WNDCLASSEXW wc{sizeof wc};
+        wc.lpfnWndProc = region_procedure;
+        wc.hInstance = instance;
+        wc.hCursor = LoadCursorW(nullptr, IDC_CROSS);
+        wc.lpszClassName = L"RecRegionPicker";
+        return RegisterClassExW(&wc);
+    }();
+    if (!kind) return std::nullopt;
+    RegionPick pick;
+    pick.dpi = static_cast<int>(dpi);
+    const int x = GetSystemMetrics(SM_XVIRTUALSCREEN), y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    HWND overlay = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"RecRegionPicker",
+                                   L"Select a region to record", WS_POPUP, x, y, GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                                   GetSystemMetrics(SM_CYVIRTUALSCREEN), nullptr, nullptr, instance, &pick);
+    if (!overlay) return std::nullopt;
+    SetLayeredWindowAttributes(overlay, kHole, 150, LWA_ALPHA | LWA_COLORKEY);
+    ShowWindow(overlay, SW_SHOW);
+    SetForegroundWindow(overlay);
+    SetFocus(overlay);
+    MSG message;
+    while (!pick.done) {
+        const BOOL got = GetMessageW(&message, nullptr, 0, 0);
+        if (got <= 0) {
+            if (got == 0) PostQuitMessage(static_cast<int>(message.wParam));
+            break;
+        }
+        TranslateMessage(&message);
+        DispatchMessageW(&message);
+    }
+    DestroyWindow(overlay);
+    if (!pick.chosen) return std::nullopt;
+    RECT r = span(pick.from, pick.to);
+    OffsetRect(&r, x, y);
+    if (r.right - r.left < 16 || r.bottom - r.top < 16) return std::nullopt;
+    return r;
 }
 
 class App {
@@ -331,8 +473,8 @@ private:
         button(kPause, L"&Pause");
 
         label(kCaptureHeader, L"Capture");
-        label(kDisplayLabel, L"&Display");
-        HWND display = combo(kDisplay);
+        label(kSourceLabel, L"&Source");
+        combo(kSource);
         check(kSystemAudio, L"System &audio");
         check(kMicrophone, L"&Microphone");
         HWND mic = combo(kMicDevice);
@@ -365,12 +507,7 @@ private:
         button(kOpenFolder, L"Open Fo&lder");
         button(kShowLast, L"Show Last Recordin&g");
 
-        for (std::size_t i = 0; i < displays_.size(); ++i) {
-            wchar_t name[96];
-            std::swprintf(name, 96, L"Display %zu (%ux%u)", i + 1, displays_[i].width, displays_[i].height);
-            SendMessageW(display, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(name));
-        }
-        if (displays_.empty()) SendMessageW(display, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Display 1"));
+
         SendMessageW(mic, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Default microphone"));
         for (const auto& device : microphones_)
             SendMessageW(mic, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(device.name).c_str()));
@@ -408,7 +545,7 @@ private:
         const auto pair = [&](int label_id, int control_id, int h) {
             place(label_id, margin, y + px(4), label_width - gap, px(20));
             // A drop-down list's height includes its open list.
-            const bool list = control_id == kDisplay || control_id == kMicDevice || control_id == kResolution ||
+            const bool list = control_id == kSource || control_id == kMicDevice || control_id == kResolution ||
                               control_id == kFps || control_id == kCodec || control_id == kFormat || control_id == kService;
             place(control_id, margin + label_width, y, width - label_width, list ? px(240) : h);
             y += h + gap;
@@ -426,7 +563,7 @@ private:
         y += px(40) + gap;
 
         header(kCaptureHeader);
-        pair(kDisplayLabel, kDisplay, row);
+        pair(kSourceLabel, kSource, row);
         line(kSystemAudio, px(22));
         place(kMicrophone, margin, y, label_width - gap, px(22));
         place(kMicDevice, margin + label_width, y, width - label_width, px(240));
@@ -483,7 +620,7 @@ private:
 
     void show_settings() {
         const auto& s = settings_;
-        select(kDisplay, std::clamp<int>(static_cast<int>(s.display) - 1, 0, std::max<int>(0, static_cast<int>(displays_.size()) - 1)));
+        fill_sources();
         set_check(kSystemAudio, s.system_audio);
         set_check(kMicrophone, s.microphone);
         int mic = 0;
@@ -502,6 +639,87 @@ private:
         SetWindowTextW(get(kFolder), wide(s.folder).c_str());
     }
 
+    void fill_sources() {
+        const auto& s = settings_;
+        sources_.clear();
+        std::vector<std::wstring> labels;
+        const auto add_source = [&](Source source, std::wstring text) {
+            sources_.push_back(std::move(source));
+            labels.push_back(std::move(text));
+        };
+        for (std::size_t i = 0; i < std::max<std::size_t>(1, displays_.size()); ++i) {
+            wchar_t name[96];
+            if (i < displays_.size()) std::swprintf(name, 96, L"Display %zu (%ux%u)", i + 1, displays_[i].width, displays_[i].height);
+            else std::swprintf(name, 96, L"Display 1");
+            add_source({Source::Kind::display, static_cast<std::uint32_t>(i + 1)}, name);
+        }
+        if (const auto r = rec::app::parse_region(s.region)) {
+            wchar_t name[128];
+            std::swprintf(name, 128, L"Region %ux%u at %d,%d on Display %u", r->width, r->height, r->x, r->y, s.display);
+            add_source({Source::Kind::region, s.display}, name);
+        }
+        add_source({Source::Kind::pick}, L"Select a region...");
+        std::string error;
+        const auto windows = rec::list_windows(error);
+        const auto named = [](const std::string& app, const std::string& title) {
+            std::wstring text = wide(title.empty() ? app : app.empty() ? title : app + " - " + title);
+            if (text.size() > 70) text = text.substr(0, 69) + L"\u2026";
+            return L"Window: " + text;
+        };
+        const bool open = std::any_of(windows.begin(), windows.end(), [&](const rec::Window& w) {
+            return w.app == s.window_app && w.title == s.window_title;
+        });
+        if (s.source == "window" && !open && !(s.window_app.empty() && s.window_title.empty()))
+            add_source({Source::Kind::window, 0, s.window_app, s.window_title}, named(s.window_app, s.window_title) + L" (not open)");
+        for (const auto& w : windows) add_source({Source::Kind::window, 0, w.app, w.title}, named(w.app, w.title));
+
+        HWND list = get(kSource);
+        SendMessageW(list, CB_RESETCONTENT, 0, 0);
+        for (const auto& text : labels) SendMessageW(list, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(text.c_str()));
+        int chosen = 0;
+        for (std::size_t i = 0; i < sources_.size(); ++i) {
+            const auto& source = sources_[i];
+            const bool match = s.source == "window"
+                                   ? source.kind == Source::Kind::window && source.app == s.window_app && source.title == s.window_title
+                               : s.source == "region" ? source.kind == Source::Kind::region
+                                                      : source.kind == Source::Kind::display && source.display == s.display;
+            if (match) { chosen = static_cast<int>(i); break; }
+        }
+        select(kSource, chosen);
+    }
+
+    // Hides Rec, lets the person drag a rectangle, and records that part of the display under it.
+    void choose_region() {
+        ShowWindow(window_, SW_HIDE);
+        const auto picked = pick_region(instance_, dpi_);
+        show_window();
+        if (picked) {
+            const POINT center{(picked->left + picked->right) / 2, (picked->top + picked->bottom) / 2};
+            MONITORINFOEXW info{};
+            info.cbSize = sizeof info;
+            GetMonitorInfoW(MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST), &info);
+            RECT clipped{};
+            IntersectRect(&clipped, &*picked, &info.rcMonitor);
+            std::uint32_t display = 1;
+            const auto device = narrow(info.szDevice);
+            for (std::size_t i = 0; i < displays_.size(); ++i) {
+                const auto& name = displays_[i].name;
+                if (name.size() >= device.size() && name.compare(name.size() - device.size(), device.size(), device) == 0)
+                    display = static_cast<std::uint32_t>(i + 1);
+            }
+            const rec::Region region{clipped.left - info.rcMonitor.left, clipped.top - info.rcMonitor.top,
+                                     static_cast<std::uint32_t>(clipped.right - clipped.left) & ~1u,
+                                     static_cast<std::uint32_t>(clipped.bottom - clipped.top) & ~1u};
+            if (region.width >= 16 && region.height >= 16) {
+                settings_.source = "region";
+                settings_.display = display;
+                settings_.region = rec::app::region_text(region);
+            }
+        }
+        fill_sources();
+        remember();
+    }
+
     // Presets show their fixed server; a custom server is typed in.
     void show_server() {
         const bool custom = settings_.destination == "custom";
@@ -512,7 +730,18 @@ private:
 
     void read_settings() {
         auto& s = settings_;
-        s.display = static_cast<std::uint32_t>(std::max(0, selected(kDisplay))) + 1;
+        const int source = selected(kSource);
+        if (source >= 0 && source < static_cast<int>(sources_.size())) {
+            const auto& chosen = sources_[static_cast<std::size_t>(source)];
+            if (chosen.kind == Source::Kind::display || chosen.kind == Source::Kind::region) {
+                s.source = chosen.kind == Source::Kind::display ? "display" : "region";
+                s.display = chosen.display;
+            } else if (chosen.kind == Source::Kind::window) {
+                s.source = "window";
+                s.window_app = chosen.app;
+                s.window_title = chosen.title;
+            }
+        }
         s.system_audio = checked(kSystemAudio);
         s.microphone = checked(kMicrophone);
         const int mic = selected(kMicDevice);
@@ -549,6 +778,21 @@ private:
                 read_settings();
                 show_server();
                 refresh();
+            }
+            return;
+        case kSource:
+            if (code == CBN_DROPDOWN) {
+                // Windows open and close while Rec waits; list the current ones.
+                read_settings();
+                fill_sources();
+            } else if (code == CBN_SELCHANGE) {
+                const int at = selected(kSource);
+                if (at >= 0 && at < static_cast<int>(sources_.size()) && sources_[static_cast<std::size_t>(at)].kind == Source::Kind::pick)
+                    PostMessageW(window_, WM_COMMAND, MAKEWPARAM(kSource, kPickRegion), 0);
+                else
+                    read_settings();
+            } else if (code == kPickRegion) {
+                choose_region();
             }
             return;
         case kServer:
@@ -758,7 +1002,7 @@ private:
         EnableWindow(get(kRecord), s.state == State::idle || active);
         EnableWindow(get(kPause), active);
         const bool editable = s.state == State::idle;
-        for (int id : {kDisplay, kSystemAudio, kMicrophone, kCursor, kResolution, kFps, kCodec, kFormat, kStream,
+        for (int id : {kSource, kSystemAudio, kMicrophone, kCursor, kResolution, kFps, kCodec, kFormat, kStream,
                        kService, kKey, kBitrate, kChangeFolder})
             EnableWindow(get(id), editable);
         EnableWindow(get(kMicDevice), editable && checked(kMicrophone));
@@ -800,6 +1044,13 @@ private:
     Settings settings_;
     std::vector<rec::Display> displays_;
     std::vector<rec::AudioDevice> microphones_;
+    // The Source list: displays, the saved region, "Select a region...", then open windows.
+    struct Source {
+        enum class Kind { display, region, pick, window } kind = Kind::display;
+        std::uint32_t display = 1;
+        std::string app, title;
+    };
+    std::vector<Source> sources_;
     Session session_{[this] { PostMessageW(window_, kSessionChanged, 0, 0); }};
 };
 } // namespace

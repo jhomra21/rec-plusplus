@@ -9,6 +9,7 @@
 
 #include <audioclient.h>
 #include <d3d11_4.h>
+#include <dwmapi.h>
 #include <dxgi1_2.h>
 #include <ksmedia.h>
 #include <mfapi.h>
@@ -128,6 +129,53 @@ struct Monitor {
     std::uint32_t width = 0, height = 0;
     bool primary = false;
 };
+
+std::string process_name(HWND window) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return {};
+    wchar_t path[MAX_PATH];
+    DWORD length = MAX_PATH;
+    std::string name;
+    if (QueryFullProcessImageNameW(process, 0, path, &length)) {
+        std::wstring full(path, length);
+        const auto slash = full.find_last_of(L"\\/");
+        if (slash != std::wstring::npos) full.erase(0, slash + 1);
+        if (full.size() > 4 && _wcsicmp(full.c_str() + full.size() - 4, L".exe") == 0) full.resize(full.size() - 4);
+        name = utf8(full.c_str());
+    }
+    CloseHandle(process);
+    return name;
+}
+
+// Top-level windows a person would pick, as the system capture picker shows them.
+bool capturable(HWND window) {
+    if (!IsWindowVisible(window) || IsIconic(window) || GetWindow(window, GW_OWNER)) return false;
+    if (GetWindowLongPtrW(window, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return false;
+    if (GetWindowTextLengthW(window) == 0) return false;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (pid == GetCurrentProcessId()) return false;
+    BOOL cloaked = FALSE;
+    if (SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_CLOAKED, &cloaked, sizeof cloaked)) && cloaked) return false;
+    wchar_t name[64]{};
+    GetClassNameW(window, name, 64);
+    const std::wstring_view kind(name);
+    return kind != L"Progman" && kind != L"WorkerW" && kind != L"Shell_TrayWnd" && kind != L"Shell_SecondaryTrayWnd";
+}
+
+// The largest rectangle of the source's shape that fits the output, centered on even pixels.
+RECT fit(LONG source_w, LONG source_h, std::uint32_t width, std::uint32_t height) {
+    const double scale = std::min(static_cast<double>(width) / source_w, static_cast<double>(height) / source_h);
+    auto w = static_cast<LONG>(std::lround(source_w * scale));
+    auto h = static_cast<LONG>(std::lround(source_h * scale));
+    if (static_cast<LONG>(width) - w <= 2) w = static_cast<LONG>(width);
+    if (static_cast<LONG>(height) - h <= 2) h = static_cast<LONG>(height);
+    const LONG x = ((static_cast<LONG>(width) - w) / 2) & ~1L;
+    const LONG y = ((static_cast<LONG>(height) - h) / 2) & ~1L;
+    return {x, y, x + w, y + h};
+}
 
 // Primary display first, so display 1 is the main display as on macOS.
 std::vector<Monitor> monitors() {
@@ -565,6 +613,30 @@ std::vector<Display> list_displays(std::string& error) {
     return result;
 }
 
+std::vector<Window> list_windows(std::string& error) {
+    error.clear();
+    // Physical pixels whatever the caller's DPI awareness, as capture delivers them.
+    const auto previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    std::vector<Window> result;
+    EnumWindows([](HWND window, LPARAM data) -> BOOL {
+        if (!capturable(window)) return TRUE;
+        RECT bounds{};
+        if (FAILED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof bounds)))
+            GetWindowRect(window, &bounds);
+        if (bounds.right - bounds.left < 2 || bounds.bottom - bounds.top < 2) return TRUE;
+        const int length = GetWindowTextLengthW(window);
+        std::wstring title(static_cast<std::size_t>(length) + 1, L'\0');
+        title.resize(static_cast<std::size_t>(GetWindowTextW(window, title.data(), length + 1)));
+        reinterpret_cast<std::vector<Window>*>(data)->push_back(
+            {static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(window)),
+             static_cast<std::uint32_t>(bounds.right - bounds.left), static_cast<std::uint32_t>(bounds.bottom - bounds.top),
+             utf8(title.c_str()), process_name(window)});
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&result));
+    if (previous) SetThreadDpiAwarenessContext(previous);
+    return result;
+}
+
 std::vector<AudioDevice> list_microphones(std::string& error) {
     ComScope com;
     error.clear();
@@ -604,6 +676,9 @@ public:
             return {"synthetic audio needs the test pattern"};
         if ((options_.system_audio || options_.microphone) && options_.test_pattern)
             return {"system audio and microphone need a real screen capture"};
+        if ((options_.window || options_.region) && options_.test_pattern)
+            return {"window and region capture need a real screen capture"};
+        if (options_.window && options_.region) return {"capture a window or a region, not both"};
         if (options_.output.empty()) return {"output path is empty"};
         const auto path = wide(options_.output);
         if (path.empty()) return {"invalid output path"};
@@ -803,13 +878,22 @@ private:
         } catch (...) {
             return {"screen capture needs Windows 10 version 1903 or newer"};
         }
-        const auto list = monitors();
-        if (options_.display > list.size()) return {"display index not found; run `rec devices`"};
-        const auto& monitor = list[options_.display - 1];
+        HWND window = nullptr;
+        HMONITOR monitor = nullptr;
+        if (options_.window) {
+            window = reinterpret_cast<HWND>(static_cast<std::uintptr_t>(options_.window));
+            if (!IsWindow(window)) return {"window not found; run `rec windows`"};
+            if (IsIconic(window)) return {"the window is minimized; restore it, then retry"};
+            monitor = MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST);
+        } else {
+            const auto list = monitors();
+            if (options_.display == 0 || options_.display > list.size()) return {"display index not found; run `rec devices`"};
+            monitor = list[options_.display - 1].handle;
+        }
 
         // Capture, scale, and encode on the GPU that scans out the monitor, so frames never
         // cross adapters on hybrid systems.
-        const auto adapter = adapter_for(monitor.handle);
+        const auto adapter = adapter_for(monitor);
         DXGI_ADAPTER_DESC1 adapter_desc{};
         if (adapter && SUCCEEDED(adapter->GetDesc1(&adapter_desc))) vendor_ = adapter_desc.VendorId;
         const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
@@ -832,15 +916,30 @@ private:
             winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(), inspectable.put()));
             winrt_device_ = inspectable.as<wgdx::Direct3D11::IDirect3DDevice>();
             auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
-            winrt::check_hresult(interop->CreateForMonitor(monitor.handle, winrt::guid_of<wgc::GraphicsCaptureItem>(),
-                                                          winrt::put_abi(item_)));
+            if (window)
+                winrt::check_hresult(interop->CreateForWindow(window, winrt::guid_of<wgc::GraphicsCaptureItem>(),
+                                                             winrt::put_abi(item_)));
+            else
+                winrt::check_hresult(interop->CreateForMonitor(monitor, winrt::guid_of<wgc::GraphicsCaptureItem>(),
+                                                              winrt::put_abi(item_)));
         } catch (winrt::hresult_error const& e) {
-            return {failed("could not capture the display", e.code())};
+            return {failed(window ? "could not capture the window" : "could not capture the display", e.code())};
         }
         const auto capture_size = item_.Size();
-        if (capture_size.Width < 2 || capture_size.Height < 2) return {"display has no usable pixel dimensions"};
-        size_ = output_size(options_, static_cast<std::uint32_t>(capture_size.Width),
-                            static_cast<std::uint32_t>(capture_size.Height));
+        if (capture_size.Width < 2 || capture_size.Height < 2)
+            return {window ? "the window has no usable size" : "display has no usable pixel dimensions"};
+        auto source_w = static_cast<std::uint32_t>(capture_size.Width);
+        auto source_h = static_cast<std::uint32_t>(capture_size.Height);
+        if (options_.region) {
+            const auto& r = *options_.region;
+            if (r.x < 0 || r.y < 0 || r.width < 2 || r.height < 2 || r.x + r.width > source_w || r.y + r.height > source_h)
+                return {"region " + std::to_string(r.x) + "," + std::to_string(r.y) + "," + std::to_string(r.width) + "," +
+                        std::to_string(r.height) + " does not fit display " + std::to_string(options_.display) + " (" +
+                        std::to_string(source_w) + "x" + std::to_string(source_h) + ")"};
+            source_w = r.width;
+            source_h = r.height;
+        }
+        size_ = output_size(options_, source_w, source_h);
         if (auto ready = create_processor(capture_size); !ready) return ready;
 
         try {
@@ -903,6 +1002,10 @@ private:
         const RECT target{0, 0, static_cast<LONG>(size_.width), static_cast<LONG>(size_.height)};
         video_context_->VideoProcessorSetStreamDestRect(processor_.Get(), 0, TRUE, &target);
         video_context_->VideoProcessorSetOutputTargetRect(processor_.Get(), TRUE, &target);
+        // A window resized to another shape is letterboxed on black.
+        D3D11_VIDEO_COLOR black{};
+        black.RGBA = {0.0f, 0.0f, 0.0f, 1.0f};
+        video_context_->VideoProcessorSetOutputBackgroundColor(processor_.Get(), FALSE, &black);
 
         D3D11_TEXTURE2D_DESC desc{};
         desc.Width = size_.width;
@@ -949,9 +1052,17 @@ private:
         // Capture-pool surfaces are only valid until the frame closes; copy before converting.
         context_->CopyResource(intermediate_.Get(), surface);
         const auto content = frame.ContentSize();
-        const RECT source{0, 0, static_cast<LONG>(std::min<UINT>(desc.Width, static_cast<UINT>(content.Width))),
-                          static_cast<LONG>(std::min<UINT>(desc.Height, static_cast<UINT>(content.Height)))};
+        RECT source{0, 0, static_cast<LONG>(std::min<UINT>(desc.Width, static_cast<UINT>(content.Width))),
+                    static_cast<LONG>(std::min<UINT>(desc.Height, static_cast<UINT>(content.Height)))};
+        if (options_.region) {
+            const auto& r = *options_.region;
+            source = {r.x, r.y, std::min(source.right, static_cast<LONG>(r.x + static_cast<LONG>(r.width))),
+                      std::min(source.bottom, static_cast<LONG>(r.y + static_cast<LONG>(r.height)))};
+        }
+        if (source.right - source.left < 2 || source.bottom - source.top < 2) return false;
         video_context_->VideoProcessorSetStreamSourceRect(processor_.Get(), 0, TRUE, &source);
+        const RECT dest = fit(source.right - source.left, source.bottom - source.top, size_.width, size_.height);
+        video_context_->VideoProcessorSetStreamDestRect(processor_.Get(), 0, TRUE, &dest);
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
         stream.pInputSurface = input_view_.Get();

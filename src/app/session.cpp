@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -27,6 +28,13 @@ bool resolution(const std::string& name, Options& o) {
     return false;
 }
 
+// Settings are one key per line, so a value never carries a line break.
+std::string one_line(std::string text) {
+    std::replace(text.begin(), text.end(), '\n', ' ');
+    std::replace(text.begin(), text.end(), '\r', ' ');
+    return text;
+}
+
 std::filesystem::path utf8_path(const std::string& text) {
     return std::filesystem::path(std::u8string(text.begin(), text.end()));
 }
@@ -45,6 +53,10 @@ Settings load_settings(const std::string& path) {
         if (key == "folder") s.folder = value;
         else if (key == "format" && (value == "mov" || value == "mp4")) s.format = value;
         else if (key == "display") s.display = std::max(1u, number(value, 1));
+        else if (key == "source" && (value == "display" || value == "window" || value == "region")) s.source = value;
+        else if (key == "window_app") s.window_app = value;
+        else if (key == "window_title") s.window_title = value;
+        else if (key == "region" && parse_region(value)) s.region = value;
         else if (key == "resolution") { Options o; if (resolution(value, o)) s.resolution = value; }
         else if (key == "fps") {
             const auto fps = number(value, 60);
@@ -73,6 +85,8 @@ bool save_settings(const std::string& path, const Settings& s) {
         std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
         if (!out) return false;
         out << "folder=" << s.folder << "\nformat=" << s.format << "\ndisplay=" << s.display
+            << "\nsource=" << s.source << "\nwindow_app=" << one_line(s.window_app)
+            << "\nwindow_title=" << one_line(s.window_title) << "\nregion=" << s.region
             << "\nresolution=" << s.resolution << "\nfps=" << s.fps << "\ncodec=" << s.codec
             << "\ncursor=" << s.cursor << "\nsystem_audio=" << s.system_audio
             << "\nmicrophone=" << s.microphone << "\nmicrophone_device=" << s.microphone_device
@@ -83,6 +97,38 @@ bool save_settings(const std::string& path, const Settings& s) {
     // Replace in one step so a crash never leaves half a settings file.
     std::filesystem::rename(temporary, file, error);
     return !error;
+}
+
+std::optional<Region> parse_region(const std::string& text) {
+    Region r;
+    long long values[4]{};
+    char tail = 0;
+    if (std::sscanf(text.c_str(), "%lld,%lld,%lld,%lld%c", &values[0], &values[1], &values[2], &values[3], &tail) != 4)
+        return std::nullopt;
+    if (values[0] < 0 || values[1] < 0 || values[2] < 2 || values[3] < 2 || values[0] > INT32_MAX ||
+        values[1] > INT32_MAX || values[2] > INT32_MAX || values[3] > INT32_MAX)
+        return std::nullopt;
+    r.x = static_cast<std::int32_t>(values[0]);
+    r.y = static_cast<std::int32_t>(values[1]);
+    r.width = static_cast<std::uint32_t>(values[2]);
+    r.height = static_cast<std::uint32_t>(values[3]);
+    return r;
+}
+
+std::string region_text(const Region& r) {
+    return std::to_string(r.x) + "," + std::to_string(r.y) + "," + std::to_string(r.width) + "," + std::to_string(r.height);
+}
+
+std::optional<Window> find_window(const Settings& s) {
+    if (s.window_app.empty() && s.window_title.empty()) return std::nullopt;
+    std::string error;
+    const auto windows = list_windows(error);
+    for (const auto& w : windows)
+        if (w.app == s.window_app && w.title == s.window_title) return w;
+    if (!s.window_app.empty())
+        for (const auto& w : windows)
+            if (w.app == s.window_app) return w;
+    return std::nullopt;
 }
 
 std::string server_url(const Settings& s) {
@@ -134,6 +180,15 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
     Options o;
     o.duration_seconds = 0;
     o.display = s.display;
+    if (!test_pattern && s.source == "window") {
+        const auto window = find_window(s);
+        if (!window) return {"the window \"" + (s.window_title.empty() ? s.window_app : s.window_title) +
+                             "\" is not open; choose another source"};
+        o.window = window->id;
+    } else if (!test_pattern && s.source == "region") {
+        o.region = parse_region(s.region);
+        if (!o.region) return {"select a region to record"};
+    }
     if (!resolution(s.resolution, o)) return {"unknown resolution: " + s.resolution};
     o.fps = s.fps;
     o.codec = s.codec == "h264" ? Codec::h264 : s.codec == "hevc" ? Codec::hevc : Codec::automatic;

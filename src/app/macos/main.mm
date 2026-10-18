@@ -93,7 +93,99 @@ NSTextField* header(NSString* text) {
 }
 
 OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
+
+// One entry of the Source menu: a display, the saved region, "Select a Region…", or a window.
+struct Source {
+    enum class Kind { display, region, pick, window } kind = Kind::display;
+    std::uint32_t display = 1;
+    std::string app, title;
+};
+
+NSString* window_label(const std::string& app, const std::string& title) {
+    NSString* text = ns(title.empty() ? app : app.empty() ? title : app + " - " + title);
+    if (text.length > 70) text = [[text substringToIndex:69] stringByAppendingString:@"…"];
+    return [@"Window: " stringByAppendingString:text];
+}
 } // namespace
+
+// A dimmed, borderless window over one screen. Dragging selects a rectangle; Esc, a right
+// click, or leaving Rec cancels.
+@interface RegionWindow : NSWindow
+@end
+
+@implementation RegionWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+@end
+
+@interface RegionView : NSView
+@property(nonatomic, copy) void (^done)(NSRect rect);  // An empty rect cancels.
+@end
+
+@implementation RegionView {
+    NSPoint _start;
+    NSRect _rect;
+}
+
+- (BOOL)acceptsFirstResponder { return YES; }
+- (BOOL)acceptsFirstMouse:(NSEvent*)event { return YES; }
+- (void)resetCursorRects { [self addCursorRect:self.bounds cursor:NSCursor.crosshairCursor]; }
+
+- (void)mouseDown:(NSEvent*)event {
+    _start = [self convertPoint:event.locationInWindow fromView:nil];
+    _rect = NSZeroRect;
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseDragged:(NSEvent*)event {
+    const NSPoint p = [self convertPoint:event.locationInWindow fromView:nil];
+    _rect = NSIntersectionRect(NSMakeRect(std::min(_start.x, p.x), std::min(_start.y, p.y), std::fabs(p.x - _start.x),
+                                          std::fabs(p.y - _start.y)), self.bounds);
+    [self setNeedsDisplay:YES];
+}
+
+- (void)mouseUp:(NSEvent*)event {
+    [self mouseDragged:event];
+    if (_rect.size.width >= 8 && _rect.size.height >= 8) {
+        if (self.done) self.done(_rect);
+    } else {
+        _rect = NSZeroRect;
+        [self setNeedsDisplay:YES];
+    }
+}
+
+- (void)rightMouseDown:(NSEvent*)event {
+    if (self.done) self.done(NSZeroRect);
+}
+
+- (void)keyDown:(NSEvent*)event {
+    if (event.keyCode == kVK_Escape) {
+        if (self.done) self.done(NSZeroRect);
+    } else {
+        [super keyDown:event];
+    }
+}
+
+- (void)drawRect:(NSRect)dirty {
+    NSBezierPath* shade = [NSBezierPath bezierPathWithRect:self.bounds];
+    const bool selected = !NSIsEmptyRect(_rect);
+    if (selected) {
+        [shade appendBezierPathWithRect:_rect];
+        shade.windingRule = NSWindingRuleEvenOdd;
+    }
+    [[NSColor colorWithWhite:0 alpha:0.35] setFill];
+    [shade fill];
+    if (selected) {
+        [NSColor.whiteColor setStroke];
+        [[NSBezierPath bezierPathWithRect:NSInsetRect(_rect, 0.5, 0.5)] stroke];
+        return;
+    }
+    NSDictionary* style = @{NSFontAttributeName: [NSFont systemFontOfSize:20 weight:NSFontWeightMedium],
+                            NSForegroundColorAttributeName: NSColor.whiteColor};
+    NSString* hint = @"Drag to select the part of the screen to record. Press Esc to cancel.";
+    const NSSize size = [hint sizeWithAttributes:style];
+    [hint drawAtPoint:NSMakePoint(NSMidX(self.bounds) - size.width / 2, NSMidY(self.bounds) - size.height / 2) withAttributes:style];
+}
+@end
 
 @interface RecController : NSObject <NSApplicationDelegate, NSMenuDelegate, NSTextFieldDelegate>
 - (void)toggleRecord:(id)sender;
@@ -106,6 +198,9 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     std::string _settingsPath;
     std::vector<rec::Display> _displays;
     std::vector<rec::AudioDevice> _microphones;
+    std::vector<rec::Window> _windows;
+    std::vector<Source> _sources;
+    NSArray<NSWindow*>* _pickers;  // The region picker while it is open.
     bool _testPattern;
     bool _hotkey;
     bool _quitting;
@@ -118,7 +213,7 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     NSTextField *_status, *_detail, *_live, *_folder;
     NSLevelIndicator *_systemMeter, *_micMeter;
     NSButton *_record, *_pause, *_systemAudio, *_microphone, *_cursor, *_stream, *_changeFolder, *_openFolder, *_showLast;
-    NSPopUpButton *_display, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service;
+    NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service;
     NSTextField *_server, *_bitrate;
     NSSecureTextField* _key;
     NSStatusItem* _statusItem;
@@ -159,25 +254,29 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     }
 }
 
-// Display names need Screen Recording permission. Without it, list the displays CoreGraphics
-// reports, in the same main-first order, so launching never triggers the permission prompt.
+// Display and window names need Screen Recording permission. Without it, list the displays
+// CoreGraphics reports, in the same main-first order, so launching never triggers the
+// permission prompt.
 - (void)listDevices {
-    const bool listDisplays = !_testPattern && CGPreflightScreenCaptureAccess();
+    const bool listScreen = !_testPattern && CGPreflightScreenCaptureAccess();
     __weak RecController* weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         std::string error;
-        auto displays = listDisplays ? rec::list_displays(error) : std::vector<rec::Display>{};
+        auto displays = listScreen ? rec::list_displays(error) : std::vector<rec::Display>{};
+        auto windows = listScreen ? rec::list_windows(error) : std::vector<rec::Window>{};
         auto microphones = rec::list_microphones(error);
         dispatch_async(dispatch_get_main_queue(), ^{
             RecController* strongSelf = weakSelf;
             if (!strongSelf) return;
-            [strongSelf showDisplays:displays microphones:microphones];
+            [strongSelf showDisplays:displays windows:windows microphones:microphones];
         });
     });
 }
 
-- (void)showDisplays:(const std::vector<rec::Display>&)displays microphones:(const std::vector<rec::AudioDevice>&)microphones {
+- (void)showDisplays:(const std::vector<rec::Display>&)displays windows:(const std::vector<rec::Window>&)windows
+         microphones:(const std::vector<rec::AudioDevice>&)microphones {
     _displays = displays;
+    _windows = windows;
     _microphones = microphones;
     if (_displays.empty()) {
         CGDirectDisplayID ids[16];
@@ -192,15 +291,7 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
             }
         }
     }
-    [_display removeAllItems];
-    for (std::size_t i = 0; i < _displays.size(); ++i) {
-        const auto& d = _displays[i];
-        NSString* name = d.width ? [NSString stringWithFormat:@"Display %zu (%ux%u)%@", i + 1, d.width, d.height, i == 0 ? @", main" : @""]
-                                 : [NSString stringWithFormat:@"Display %zu", i + 1];
-        [_display addItemWithTitle:name];
-    }
-    if (_displays.empty()) [_display addItemWithTitle:@"Display 1"];
-    [_display selectItemAtIndex:std::clamp<NSInteger>(static_cast<NSInteger>(_settings.display) - 1, 0, _display.numberOfItems - 1)];
+    [self showSources];
 
     [_micDevice removeAllItems];
     [_micDevice addItemWithTitle:@"Default microphone"];
@@ -212,6 +303,125 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     }
     [_micDevice selectItemAtIndex:mic];
     [self refresh];
+}
+
+// Displays, the saved region, "Select a Region…", then open windows. Each item's tag is its
+// index in _sources.
+- (void)showSources {
+    const auto& s = _settings;
+    _sources.clear();
+    NSMenu* menu = [[NSMenu alloc] init];
+    const auto add = [&](Source source, NSString* title) {
+        NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
+        item.tag = static_cast<NSInteger>(_sources.size());
+        _sources.push_back(std::move(source));
+        [menu addItem:item];
+    };
+    for (std::size_t i = 0; i < std::max<std::size_t>(1, _displays.size()); ++i) {
+        const auto* d = i < _displays.size() ? &_displays[i] : nullptr;
+        NSString* name = d && d->width ? [NSString stringWithFormat:@"Display %zu (%ux%u)%@", i + 1, d->width, d->height, i == 0 ? @", main" : @""]
+                                       : [NSString stringWithFormat:@"Display %zu", i + 1];
+        add({Source::Kind::display, static_cast<std::uint32_t>(i + 1)}, name);
+    }
+    [menu addItem:NSMenuItem.separatorItem];
+    if (const auto r = rec::app::parse_region(s.region))
+        add({Source::Kind::region, s.display},
+            [NSString stringWithFormat:@"Region %ux%u at %d,%d on Display %u", r->width, r->height, r->x, r->y, s.display]);
+    add({Source::Kind::pick}, @"Select a Region…");
+    const bool open = std::any_of(_windows.begin(), _windows.end(), [&](const rec::Window& w) {
+        return w.app == s.window_app && w.title == s.window_title;
+    });
+    const bool missing = s.source == "window" && !open && !(s.window_app.empty() && s.window_title.empty());
+    if (missing || !_windows.empty()) [menu addItem:NSMenuItem.separatorItem];
+    if (missing)
+        add({Source::Kind::window, 0, s.window_app, s.window_title},
+            [window_label(s.window_app, s.window_title) stringByAppendingString:@" (not open)"]);
+    for (const auto& w : _windows) add({Source::Kind::window, 0, w.app, w.title}, window_label(w.app, w.title));
+    _source.menu = menu;
+
+    NSInteger chosen = 0;
+    for (std::size_t i = 0; i < _sources.size(); ++i) {
+        const auto& source = _sources[i];
+        const bool match = s.source == "window"
+                               ? source.kind == Source::Kind::window && source.app == s.window_app && source.title == s.window_title
+                           : s.source == "region" ? source.kind == Source::Kind::region
+                                                  : source.kind == Source::Kind::display && source.display == s.display;
+        if (match) { chosen = static_cast<NSInteger>(i); break; }
+    }
+    [_source selectItemWithTag:chosen];
+}
+
+// Hides Rec, lets the person drag a rectangle on any screen, and records that part of the
+// display under it.
+- (void)chooseRegion {
+    if (_pickers) return;
+    [_window orderOut:nil];
+    [NSApp activateIgnoringOtherApps:YES];
+    NSMutableArray<NSWindow*>* pickers = [NSMutableArray array];
+    const NSPoint mouse = NSEvent.mouseLocation;
+    __weak RecController* weakSelf = self;
+    for (NSScreen* screen in NSScreen.screens) {
+        RegionWindow* picker = [[RegionWindow alloc] initWithContentRect:screen.frame styleMask:NSWindowStyleMaskBorderless
+                                                                 backing:NSBackingStoreBuffered defer:NO];
+        picker.releasedWhenClosed = NO;
+        picker.opaque = NO;
+        picker.hasShadow = NO;
+        picker.backgroundColor = NSColor.clearColor;
+        picker.level = NSScreenSaverWindowLevel;
+        picker.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
+        [picker setFrame:screen.frame display:NO];
+        RegionView* view = [[RegionView alloc] initWithFrame:NSMakeRect(0, 0, screen.frame.size.width, screen.frame.size.height)];
+        view.done = ^(NSRect rect) { [weakSelf pickedRegion:rect screen:screen]; };
+        picker.contentView = view;
+        [pickers addObject:picker];
+        if (NSPointInRect(mouse, screen.frame)) {
+            [picker makeKeyAndOrderFront:nil];
+            [picker makeFirstResponder:view];
+        } else {
+            [picker orderFront:nil];
+        }
+    }
+    _pickers = pickers;
+}
+
+- (void)pickedRegion:(NSRect)rect screen:(NSScreen*)screen {
+    if (!_pickers) return;
+    for (NSWindow* picker in _pickers) [picker orderOut:nil];
+    _pickers = nil;
+    [self showWindow:nil];
+    if (!NSIsEmptyRect(rect) && screen) {
+        // Regions are in the display's pixels from its top-left corner; the view is in points
+        // from the bottom-left.
+        const auto screenID = static_cast<CGDirectDisplayID>([screen.deviceDescription[@"NSScreenNumber"] unsignedIntValue]);
+        CGDisplayModeRef mode = CGDisplayCopyDisplayMode(screenID);
+        const double pixels = mode ? static_cast<double>(CGDisplayModeGetPixelWidth(mode)) : screen.frame.size.width * screen.backingScaleFactor;
+        if (mode) CGDisplayModeRelease(mode);
+        const double scale = pixels / screen.frame.size.width;
+        std::uint32_t display = 1;
+        for (std::size_t i = 0; i < _displays.size(); ++i)
+            if (_displays[i].id == screenID) display = static_cast<std::uint32_t>(i + 1);
+        const rec::Region region{static_cast<std::int32_t>(std::lround(rect.origin.x * scale)),
+                                 static_cast<std::int32_t>(std::lround((screen.frame.size.height - NSMaxY(rect)) * scale)),
+                                 static_cast<std::uint32_t>(std::lround(rect.size.width * scale)) & ~1u,
+                                 static_cast<std::uint32_t>(std::lround(rect.size.height * scale)) & ~1u};
+        if (region.width >= 16 && region.height >= 16) {
+            _settings.source = "region";
+            _settings.display = display;
+            _settings.region = rec::app::region_text(region);
+        }
+    }
+    [self showSources];
+    [self remember];
+    [self refresh];
+}
+
+- (void)applicationDidResignActive:(NSNotification*)notification {
+    if (_pickers) [self pickedRegion:NSZeroRect screen:nil];
+}
+
+// Windows open and close while Rec is in the background; list them again when it returns.
+- (void)applicationDidBecomeActive:(NSNotification*)notification {
+    if (!_pickers && _session && _session->status().state == State::idle) [self listDevices];
 }
 
 - (void)registerHotkey {
@@ -398,12 +608,12 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     buttons.distribution = NSStackViewDistributionFill;
     [_record setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
-    _display = [self popup:@"Display"];
+    _source = [self popup:@"Source"];
     _systemAudio = [self check:@"System audio"];
     _microphone = [self check:@"Microphone"];
     _micDevice = [self popup:@"Microphone device"];
     _cursor = [self check:@"Show cursor"];
-    NSGridView* capture = [self grid:@[@[label(@"Display"), _display], @[_systemAudio], @[_microphone, _micDevice], @[_cursor]]];
+    NSGridView* capture = [self grid:@[@[label(@"Source"), _source], @[_systemAudio], @[_microphone, _micDevice], @[_cursor]]];
 
     _resolution = [self popup:@"Resolution"];
     for (const auto& choice : kResolutions) [_resolution addItemWithTitle:ns(choice.label)];
@@ -474,7 +684,7 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     _folder.stringValue = ns(s.folder);
     _folder.toolTip = ns(s.folder);
     [self showServer];
-    [self showDisplays:_displays microphones:_microphones];
+    [self showDisplays:_displays windows:_windows microphones:_microphones];
 }
 
 // Presets show their fixed server; a custom server is typed in.
@@ -488,7 +698,18 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
 
 - (void)readSettings {
     auto& s = _settings;
-    s.display = static_cast<std::uint32_t>(std::max<NSInteger>(0, _display.indexOfSelectedItem)) + 1;
+    const NSInteger source = _source.selectedItem ? _source.selectedItem.tag : -1;
+    if (source >= 0 && source < static_cast<NSInteger>(_sources.size())) {
+        const auto& chosen = _sources[static_cast<std::size_t>(source)];
+        if (chosen.kind == Source::Kind::display || chosen.kind == Source::Kind::region) {
+            s.source = chosen.kind == Source::Kind::display ? "display" : "region";
+            s.display = chosen.display;
+        } else if (chosen.kind == Source::Kind::window) {
+            s.source = "window";
+            s.window_app = chosen.app;
+            s.window_title = chosen.title;
+        }
+    }
     s.system_audio = _systemAudio.state == NSControlStateValueOn;
     s.microphone = _microphone.state == NSControlStateValueOn;
     const NSInteger mic = _micDevice.indexOfSelectedItem;
@@ -514,6 +735,15 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
 // MARK: - Actions
 
 - (void)changed:(id)sender {
+    if (sender == _source) {
+        const NSInteger at = _source.selectedItem ? _source.selectedItem.tag : -1;
+        if (at >= 0 && at < static_cast<NSInteger>(_sources.size()) && _sources[static_cast<std::size_t>(at)].kind == Source::Kind::pick) {
+            // After the menu closes, so the picker is not dismissed by the menu's own events.
+            dispatch_async(dispatch_get_main_queue(), ^{ [self chooseRegion]; });
+            return;
+        }
+        [self readSettings];
+    }
     if (sender == _service) {
         [self readSettings];
         [self showServer];
@@ -711,7 +941,7 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     _record.enabled = s.state == State::idle || active;
     _pause.enabled = active;
     const bool editable = s.state == State::idle;
-    for (NSControl* control in @[_display, _systemAudio, _microphone, _cursor, _resolution, _fps, _codec, _format,
+    for (NSControl* control in @[_source, _systemAudio, _microphone, _cursor, _resolution, _fps, _codec, _format,
                                  _stream, _service, _server, _key, _bitrate, _changeFolder])
         control.enabled = editable;
     _micDevice.enabled = editable && _microphone.state == NSControlStateValueOn;
@@ -798,7 +1028,7 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
     // Every control has an accessible name.
     __block NSString* unnamed = nil;
     ui(^{
-        for (NSControl* control in @[self->_record, self->_pause, self->_display, self->_systemAudio, self->_microphone,
+        for (NSControl* control in @[self->_record, self->_pause, self->_source, self->_systemAudio, self->_microphone,
                                      self->_micDevice, self->_cursor, self->_resolution, self->_fps, self->_codec,
                                      self->_format, self->_stream, self->_service, self->_server, self->_key,
                                      self->_bitrate, self->_changeFolder, self->_openFolder, self->_showLast,

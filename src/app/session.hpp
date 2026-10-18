@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -24,6 +25,10 @@ struct Settings {
     std::string format = "mov";
 #endif
     std::uint32_t display = 1;
+    std::string source = "display";   // display, window, region.
+    // The window to record, found again by app and title because window IDs change.
+    std::string window_app, window_title;
+    std::string region;               // x,y,width,height in pixels of the display.
     std::string resolution = "1080p"; // 720p, 1080p, 1440p, 4k, native.
     std::uint32_t fps = 60;
     std::string codec = "auto";       // auto, h264, hevc.
@@ -62,6 +67,13 @@ int choice_index(const std::array<Choice, N>& choices, const std::string& value)
 // key=value lines; unknown keys are ignored and missing ones keep their defaults.
 Settings load_settings(const std::string& path);
 bool save_settings(const std::string& path, const Settings& settings);
+
+// "x,y,width,height" in display pixels; empty when malformed or smaller than 2x2.
+std::optional<Region> parse_region(const std::string& text);
+std::string region_text(const Region& region);
+// The open window that settings.window_app and window_title name: the same title, else the
+// first window of that app.
+std::optional<Window> find_window(const Settings& settings);
 
 // rtmp:// or rtmps://host/app for the destination; the stream key is appended as the last
 // segment. The Twitch and YouTube presets use RTMPS.

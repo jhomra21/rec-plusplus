@@ -1,7 +1,8 @@
 # Live A/V sync stimulus: a full-screen window on the primary display turns white for
 # 100 ms with a simultaneous 1 kHz beep, once a second. The flash follows the audio
-# device's play position, so the pair stays aligned to the audio clock.
-param([int]$Seconds = 6, [switch]$CheckOnly)
+# device's play position, so the pair stays aligned to the audio clock. -Title names the
+# window and shows it in the taskbar, so it can be picked for window capture.
+param([int]$Seconds = 6, [string]$Title = '', [switch]$CheckOnly)
 $ErrorActionPreference = 'Stop'
 
 Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @'
@@ -37,7 +38,7 @@ public static class FlashBeep {
         return (sample - Rate / 2) % Rate < Rate / 10;
     }
 
-    public static void Run(int seconds) {
+    public static void Run(int seconds, string title) {
         // Without this, display scaling shrinks the "full-screen" window to part of the display.
         SetProcessDPIAware();
         var pcm = new short[(seconds + 1) * Rate];
@@ -46,7 +47,8 @@ public static class FlashBeep {
 
         var form = new Form {
             FormBorderStyle = FormBorderStyle.None, StartPosition = FormStartPosition.Manual,
-            Bounds = Screen.PrimaryScreen.Bounds, TopMost = true, ShowInTaskbar = false, BackColor = Color.Black,
+            Bounds = Screen.PrimaryScreen.Bounds, TopMost = true, BackColor = Color.Black,
+            Text = title, ShowInTaskbar = title.Length > 0,
         };
         form.Show();
         Cursor.Hide();
@@ -92,4 +94,4 @@ public static class FlashBeep {
 '@
 
 if ($CheckOnly) { exit 0 }
-[FlashBeep]::Run($Seconds)
+[FlashBeep]::Run($Seconds, $Title)

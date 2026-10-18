@@ -18,9 +18,19 @@ enum class AudioTracks {
     stems  // System and microphone stems, no mix.
 };
 
+// A rectangle of a display in its pixels, from the display's top-left corner.
+struct Region {
+    std::int32_t x = 0;
+    std::int32_t y = 0;
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+};
+
 struct Options {
     std::string output = "rec.mov";
     std::uint32_t display = 1; // 1-based index from list_displays()
+    std::uint64_t window = 0; // Capture this window (id from list_windows()) instead of a display.
+    std::optional<Region> region; // Capture only this part of the display.
     std::uint32_t width = 1920; // bounding box, 0/0 selects native resolution
     std::uint32_t height = 1080;
     std::uint32_t fps = 60;
@@ -49,6 +59,14 @@ struct Display {
     std::uint32_t width = 0;
     std::uint32_t height = 0;
     std::string name;
+};
+
+struct Window {
+    std::uint64_t id = 0;
+    std::uint32_t width = 0; // Pixels.
+    std::uint32_t height = 0;
+    std::string title;
+    std::string app;
 };
 
 struct AudioDevice {
@@ -103,6 +121,8 @@ struct Result {
 
 // A failure sets error and returns an empty list.
 std::vector<Display> list_displays(std::string& error);
+// Normal app windows that are on screen and can be captured, excluding rec's own.
+std::vector<Window> list_windows(std::string& error);
 std::vector<AudioDevice> list_microphones(std::string& error);
 // Time between macOS mixing system audio and the default output device playing it. 0 if unknown.
 double default_output_latency_ms() noexcept;
