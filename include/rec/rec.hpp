@@ -39,7 +39,7 @@ struct Options {
     std::optional<double> system_audio_offset_ms; // Unset: default output device latency (0 for test tone).
     double mic_offset_ms = 0;
     double duration_seconds = 10.0; // 0 = until stop()
-    // Live stream of the same timeline, encoded separately: rtmp://host[:port]/app/stream-key.
+    // Live stream of the same timeline, encoded separately: rtmp[s]://host[:port]/app/stream-key.
     std::string stream_url;
     std::uint32_t stream_kbps = 6000; // Stream video bitrate; audio is 160 kb/s AAC.
 };
@@ -72,6 +72,8 @@ struct Stats {
     bool paused = false;
     double paused_seconds = 0; // Total time paused, excluded from the movie.
     bool streaming = false; // Connected and sending.
+    bool stream_reconnecting = false; // Lost the server and trying to reconnect.
+    std::uint32_t stream_reconnects = 0; // Times the stream reconnected after a loss.
     bool stream_hardware = false; // The stream uses a hardware video encoder.
     std::uint64_t stream_frames = 0; // Video frames sent to the stream.
     std::uint64_t stream_dropped = 0; // Video frames the stream skipped to keep up.

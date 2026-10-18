@@ -46,7 +46,9 @@ else
   # The live A/V sync stimulus must at least compile.
   swiftc -typecheck "$root/scripts/flash-beep.swift"
 
-  # Hardware encode and AVFoundation decode without screen permissions.
+  # Hardware encode and AVFoundation decode without screen permissions. A fresh CI VM's first
+  # VideoToolbox session can stall long enough to drop frames, so an unmeasured recording warms it.
+  "$rec" record --test-pattern -r 1080p -f 30 -t 1 --codec h264 -o "$tmp/warmup.mov" >"$artifacts/warmup.record.log"
   "$rec" record --test-pattern -r 1080p -f 30 -t 2 --codec h264 -o "$artifacts/h264.mov" | tee "$artifacts/h264.record.log"
   "$rec" probe "$artifacts/h264.mov" | tee "$artifacts/h264.probe"
   grep -qx 'codec=h264' "$artifacts/h264.probe"
@@ -123,7 +125,9 @@ else
   expect_failure 'must look like rtmp://' record --test-pattern -t 1 --stream rtmp://127.0.0.1/key -o "$tmp/bad-path.mov"
   expect_failure 'could not connect to 127.0.0.1:1' record --test-pattern -t 1 --stream rtmp://127.0.0.1:1/live/key -o "$tmp/refused.mov"
   received="$artifacts/stream-server"
-  start_mediamtx "$(get_mediamtx "$root/build/tools")" "$received" "$tmp/mediamtx"
+  mediamtx="$(get_mediamtx "$root/build/tools")"
+  new_test_certificate "$tmp/tls"
+  start_mediamtx "$mediamtx" "$received" "$tmp/mediamtx" "$tmp/tls"
   # Stem-only file: the stream still carries the mix.
   "$rec" record --test-pattern --test-tone --test-mic --audio-tracks stems -r 720p -f 30 -t 4 \
     --stream rtmp://127.0.0.1:1935/live/smokekey1 -o "$artifacts/stream-local.mov" | tee "$artifacts/stream.record.log"
@@ -137,6 +141,29 @@ else
   "$rec" record --test-pattern -r 720p -f 30 -t 3 --stream rtmp://127.0.0.1:1935/live/smokekey2 \
     -o "$artifacts/stream-silent-local.mov" | tee "$artifacts/stream-silent.record.log"
   grep -q 'Streamed 90 frames' "$artifacts/stream-silent.record.log"
+
+  # RTMPS checks the server's certificate: this server's self-signed one fails until the
+  # test trusts it explicitly.
+  expect_failure 'is not trusted' record --test-pattern -t 1 --stream rtmps://127.0.0.1:1936/live/untrusted -o "$tmp/untrusted.mov"
+  REC_TLS_TRUST_CERT="$tmp/tls/cert.pem" "$rec" record --test-pattern --test-tone -r 720p -f 30 -t 4 \
+    --stream rtmps://127.0.0.1:1936/live/smokekey4 -o "$artifacts/stream-rtmps-local.mov" | tee "$artifacts/stream-rtmps.record.log"
+  grep -q 'Streaming to rtmps://127.0.0.1:1936/live/\*\*\*\*' "$artifacts/stream-rtmps.record.log"
+  grep -q 'Streamed 120 frames' "$artifacts/stream-rtmps.record.log"
+
+  # A server restart mid-stream: the stream reconnects and resumes at the next keyframe.
+  "$rec" record --test-pattern --test-tone -r 720p -f 30 -t 10 --stream rtmp://127.0.0.1:1935/live/smokekey5 \
+    -o "$artifacts/stream-reconnect.mov" </dev/null >"$artifacts/stream-reconnect.record.log" 2>&1 &
+  again_pid="$!"
+  sleep 3
+  stop_mediamtx
+  sleep 0.5
+  start_mediamtx "$mediamtx" "$received" "$tmp/mediamtx-2" "$tmp/tls"
+  if ! wait "$again_pid"; then
+    cat "$artifacts/stream-reconnect.record.log" >&2; echo 'the stream did not survive a server restart' >&2; exit 1
+  fi
+  cat "$artifacts/stream-reconnect.record.log"
+  grep -q 'reconnected 1' "$artifacts/stream-reconnect.record.log"
+  grep -q 'written 300, dropped 0' "$artifacts/stream-reconnect.record.log"
 
   # Losing the server ends the stream, not the recording.
   "$rec" record --test-pattern --test-tone -r 720p -f 30 -t 4 --stream rtmp://127.0.0.1:1935/live/smokekey3 \
@@ -176,6 +203,20 @@ else
   within "$(value av_offset_max_ms "$got")" 0 55
   within "$(value frames "$artifacts/stream-received-smokekey2.probe")" 89 90
   grep -qx 'audio_codec=aac' "$artifacts/stream-received-smokekey2.probe"
+  # Same AVFoundation priming allowance as above.
+  file="$(find "$received/live/smokekey4" -name '*.mp4' -print -quit)"
+  "$rec" probe "$file" | tee "$artifacts/stream-received-smokekey4.probe"
+  within "$(value frames "$artifacts/stream-received-smokekey4.probe")" 119 120
+  within "$(value av_sync_events "$artifacts/stream-received-smokekey4.probe")" 4 4
+  within "$(value av_offset_max_ms "$artifacts/stream-received-smokekey4.probe")" 0 55
+  # The newest server recording is the session after the restart. MediaMTX may not have
+  # written the 3 s before the kill, and that session cannot reach 120 frames anyway.
+  file="$(find "$received/live/smokekey5" -name '*.mp4' | sort | tail -1)"
+  [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for the restarted stream" >&2; exit 1; }
+  "$rec" probe "$file" | tee "$artifacts/stream-received-smokekey5.probe"
+  within "$(value frames "$artifacts/stream-received-smokekey5.probe")" 120 210
+  within "$(value av_sync_events "$artifacts/stream-received-smokekey5.probe")" 3 7
+  within "$(value av_offset_max_ms "$artifacts/stream-received-smokekey5.probe")" 0 55
   "$rec" record --test-pattern -r 1080p -f 30 -t 1 --codec hevc -o "$artifacts/hevc.mp4" | tee "$artifacts/hevc.record.log"
   "$rec" probe "$artifacts/hevc.mp4" | tee "$artifacts/hevc.probe"
   grep -qx 'codec=hevc' "$artifacts/hevc.probe"

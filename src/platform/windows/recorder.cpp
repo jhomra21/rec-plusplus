@@ -742,6 +742,8 @@ public:
         if (live_) {
             const auto live = live_->counters();
             stats.streaming = live.live;
+            stats.stream_reconnecting = live.reconnecting;
+            stats.stream_reconnects = live.reconnects;
             stats.stream_hardware = live.hardware;
             stats.stream_frames = live.frames;
             stats.stream_dropped = live.dropped;

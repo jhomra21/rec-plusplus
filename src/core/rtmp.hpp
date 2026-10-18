@@ -1,11 +1,14 @@
 #pragma once
 
+#include "core/net.hpp"
+
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -38,10 +41,13 @@ struct StreamInfo {
     std::uint32_t audio_rate = 48000, audio_channels = 2;
 };
 
-// Publishes one live stream to an rtmp:// URL. open() blocks while it connects; after that
-// video() and audio() only queue, and a sender thread owns the socket. The queue holds
-// about three seconds of media. When the network falls behind, new video is dropped until
-// the next keyframe so the stream recovers cleanly; sequence headers are never dropped.
+// Publishes one live stream to an rtmp:// or rtmps:// URL. open() blocks while it connects;
+// after that video() and audio() only queue, and a sender thread owns the connection. The
+// queue holds about three seconds of media. When the network falls behind, new video is
+// dropped until the next keyframe so the stream recovers cleanly; sequence headers are never
+// dropped. When the connection drops, the sender reconnects with backoff for up to two
+// minutes, sends the metadata and sequence headers again, and resumes at the next keyframe;
+// media produced meanwhile is dropped.
 class RtmpPublisher {
 public:
     RtmpPublisher();
@@ -57,6 +63,8 @@ public:
     void close(int flush_ms);
 
     bool live() const noexcept { return live_.load(); }
+    bool reconnecting() const noexcept { return reconnecting_.load(); }
+    std::uint32_t reconnects() const noexcept { return reconnects_.load(); }
     std::uint64_t bytes() const noexcept { return bytes_.load(); }
     std::uint64_t dropped_frames() const noexcept { return dropped_.load(); }
     std::string failure() const;
@@ -86,6 +94,11 @@ private:
         std::map<std::string, std::string> info;  // String fields of object arguments.
     };
 
+    // Connects, handshakes, publishes and sends the metadata. Empty on success.
+    std::string connect(int timeout_ms);
+    // After a lost connection: retries until connected (true), or closing or out of time.
+    bool reconnect();
+    void drop_connection();
     bool push(std::uint8_t type, std::uint32_t ms, bool header, bool key, Bytes body);
     void run();
     bool send_all(const std::uint8_t* data, std::size_t size);
@@ -97,27 +110,36 @@ private:
     bool await_command(double transaction, bool status, Command& out, std::string& error);
     void fail(std::string text);
 
-    std::intptr_t socket_ = -1;
-    bool winsock_ = false;
+    // Set by open() and only read afterwards.
+    std::string host_, port_, authority_, app_, key_;
+    bool secure_ = false;
+    StreamInfo info_;
+
+    // Owned by the thread that connects: open(), then the sender, then close() after it ends.
+    std::unique_ptr<Transport> transport_;
     std::uint32_t chunk_in_ = 128, chunk_out_ = 128;
     std::uint32_t window_ = 0;
     std::uint64_t received_ = 0, acknowledged_ = 0;
     std::uint32_t stream_id_ = 0;
-    std::string key_;
     std::map<std::uint32_t, Incoming> incoming_;
     Bytes out_;
+    std::mutex transport_mutex_;  // Guards replacing transport_ against close() interrupting it.
 
     mutable std::mutex mutex_;
     std::condition_variable wake_;
     std::deque<Packet> queue_;
     std::size_t queued_bytes_ = 0, max_bytes_ = 0;
     bool need_key_ = false;
+    bool resync_ = false;  // After a reconnect: audio waits for the video keyframe too.
+    Bytes video_header_, audio_header_;
+    std::uint32_t last_ms_ = 0;
     bool closing_ = false;
     bool sender_done_ = false;
     std::int64_t flush_deadline_ms_ = 0;
     std::string failure_;
     std::thread sender_;
-    std::atomic_bool live_{false};
+    std::atomic_bool live_{false}, reconnecting_{false};
+    std::atomic<std::uint32_t> reconnects_{0};
     std::atomic<std::uint64_t> bytes_{0}, dropped_{0};
 };
 

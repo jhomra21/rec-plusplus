@@ -29,11 +29,39 @@ get_mediamtx() {
   echo "$dir/mediamtx"
 }
 
-# start_mediamtx BINARY RECORDINGS WORK: serves RTMP only on 127.0.0.1:1935 and records
-# every published stream as fragmented MP4 under RECORDINGS.
+# new_test_certificate DIR: a throwaway self-signed certificate for localhost and 127.0.0.1,
+# DIR/cert.pem and DIR/key.pem, for MediaMTX's RTMPS listener.
+new_test_certificate() {
+  local dir="$1"
+  mkdir -p "$dir"
+  cat >"$dir/openssl.cnf" <<'CONFIG'
+[req]
+distinguished_name = dn
+x509_extensions = ext
+prompt = no
+[dn]
+CN = localhost
+[ext]
+subjectAltName = DNS:localhost,IP:127.0.0.1
+extendedKeyUsage = serverAuth
+basicConstraints = CA:FALSE
+CONFIG
+  openssl req -x509 -newkey rsa:2048 -nodes -days 2 -config "$dir/openssl.cnf" \
+    -keyout "$dir/key.pem" -out "$dir/cert.pem" 2>/dev/null
+}
+
+# start_mediamtx BINARY RECORDINGS WORK [TLS]: serves RTMP only on 127.0.0.1:1935 and records
+# every published stream as fragmented MP4 under RECORDINGS. With TLS, a directory from
+# new_test_certificate, it also serves RTMPS on 127.0.0.1:1936.
 start_mediamtx() {
-  local binary="$1" recordings="$2" work="$3" attempt
+  local binary="$1" recordings="$2" work="$3" tls="${4:-}" attempt secure=""
   mkdir -p "$recordings" "$work"
+  if [[ -n "$tls" ]]; then
+    secure="rtmpEncryption: optional
+rtmpsAddress: 127.0.0.1:1936
+rtmpServerKey: $tls/key.pem
+rtmpServerCert: $tls/cert.pem"
+  fi
   cat >"$work/mediamtx.yml" <<CONFIG
 logLevel: info
 api: no
@@ -43,6 +71,7 @@ playback: no
 rtsp: no
 rtmp: yes
 rtmpAddress: 127.0.0.1:1935
+$secure
 hls: no
 webrtc: no
 srt: no

@@ -44,9 +44,9 @@ These are references, not dependencies. Record the upstream revision when copyin
 
 - `include/rec/`: public C++ API.
 - `src/`: command-line frontend.
-- `src/core/`: platform-neutral mixer and sync analysis shared by the engines.
-- `src/platform/macos/`: Apple capture, timing and encoding adapter.
-- `src/platform/windows/`: Windows capture (WGC, WASAPI), timing and Media Foundation encoding adapter.
+- `src/core/`: platform-neutral mixer, sync analysis, RTMP client and its TCP transport, shared by the engines.
+- `src/platform/macos/`: Apple capture, timing and encoding adapter, and TLS for RTMPS (Network.framework).
+- `src/platform/windows/`: Windows capture (WGC, WASAPI), timing and Media Foundation encoding adapter, and TLS for RTMPS (Schannel).
 - `src/platform/unsupported.cpp`: clear error on other hosts.
 - `src/app/`: the desktop app. `session.{hpp,cpp}` is the shared layer (settings, stream destinations, one recording session on a worker thread); `macos/main.mm` (AppKit) and `windows/main.cpp` (Win32 controls) only present it.
 - `support/`: Info.plists and the Windows app manifest.

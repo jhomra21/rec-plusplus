@@ -255,6 +255,8 @@ private:
             else quit();
             return 0;
         case WM_QUERYENDSESSION:
+            // Windows names the app on its "apps are preventing log off" screen while the movie is saved.
+            if (busy()) ShutdownBlockReasonCreate(window_, L"Saving your recording");
             return TRUE;
         case WM_ENDSESSION:
             if (w) {
@@ -262,6 +264,7 @@ private:
                 session_.wait();
                 remember();
             }
+            ShutdownBlockReasonDestroy(window_);
             return 0;
         case WM_DESTROY:
             UnregisterHotKey(window_, kHotkey);
@@ -736,10 +739,11 @@ private:
             if (s.audio_dropped) { detail += L", audio drops " + std::to_wstring(s.audio_dropped); attention_ = true; }
             if (s.streaming && !s.stream_error.empty()) { detail += L". Stream lost: " + wide(s.stream_error); attention_ = true; }
             else if (s.stream_dropped) { detail += L", stream skipped " + std::to_wstring(s.stream_dropped); attention_ = true; }
+            if (s.reconnects) detail += L", stream reconnected " + std::to_wstring(s.reconnects) + (s.reconnects == 1 ? L" time" : L" times");
         }
         set_text(kStatus, status);
         set_text(kDetail, detail);
-        set_text(kLive, active && s.live ? L"\u25CF LIVE" : L"");
+        set_text(kLive, !active ? L"" : s.live ? L"\u25CF LIVE" : s.reconnecting ? L"Reconnecting..." : L"");
         // Hide the last level once recording ends; polling stops with it.
         if (!active) system_shown_ = mic_shown_ = 0;
         meter(kSystemMeter, s.system_peak, system_shown_);

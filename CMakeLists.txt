@@ -8,18 +8,21 @@ target_include_directories(rec PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 if(APPLE)
     enable_language(OBJCXX)
-    target_sources(rec PRIVATE src/platform/macos/recorder.mm src/platform/macos/stream.cpp src/core/rtmp.cpp)
+    target_sources(rec PRIVATE src/platform/macos/recorder.mm src/platform/macos/stream.cpp src/platform/macos/tls.cpp
+        src/core/net.cpp src/core/rtmp.cpp)
     set_source_files_properties(src/platform/macos/recorder.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_compile_definitions(rec PRIVATE GL_SILENCE_DEPRECATION)
     target_link_libraries(rec PUBLIC
         "-framework Foundation" "-framework ScreenCaptureKit" "-framework AVFoundation"
         "-framework CoreMedia" "-framework CoreVideo" "-framework CoreGraphics"
-        "-framework VideoToolbox" "-framework AudioToolbox" "-framework CoreAudio")
+        "-framework VideoToolbox" "-framework AudioToolbox" "-framework CoreAudio"
+        "-framework Network" "-framework Security")
 elseif(WIN32)
-    target_sources(rec PRIVATE src/platform/windows/recorder.cpp src/platform/windows/stream.cpp src/core/rtmp.cpp)
+    target_sources(rec PRIVATE src/platform/windows/recorder.cpp src/platform/windows/stream.cpp src/platform/windows/tls.cpp
+        src/core/net.cpp src/core/rtmp.cpp)
     target_compile_definitions(rec PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
     target_compile_options(rec PRIVATE /permissive- /utf-8 /bigobj /EHsc)
-    target_link_libraries(rec PUBLIC d3d11 dxgi mfplat mfreadwrite mfuuid ole32 windowsapp ws2_32)
+    target_link_libraries(rec PUBLIC d3d11 dxgi mfplat mfreadwrite mfuuid ole32 windowsapp ws2_32 secur32 crypt32)
 else()
     target_sources(rec PRIVATE src/platform/unsupported.cpp)
 endif()

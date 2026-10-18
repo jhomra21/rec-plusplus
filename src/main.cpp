@@ -146,7 +146,7 @@ void usage() {
                  "  --mic-gain DB                  Microphone level in the mix (-60 to 24)\n"
                  "  --system-audio-offset-ms MS    Delay system audio (default: output device latency)\n"
                  "  --mic-offset-ms MS             Delay the microphone (default: 0)\n"
-                 "  --stream URL                   Also stream live: rtmp://host[:port]/app/stream-key\n"
+                 "  --stream URL                   Also stream live: rtmp[s]://host[:port]/app/stream-key\n"
                  "  --stream-bitrate KBPS          Stream video kilobits/second (default: 6000)\n"
                  "  --test-pattern                 Synthetic video that flashes once a second\n"
                  "  --test-tone                    Add a beep with each flash as system audio\n"
@@ -203,7 +203,7 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
         } else if (arg == "--bitrate") {
             if (!integer(value, o.bitrate_mbps) || o.bitrate_mbps > 300) { error = "bitrate must be between 0 and 300 Mb/s"; return false; }
         } else if (arg == "--stream") {
-            if (value.empty()) { error = "--stream needs an rtmp:// URL"; return false; }
+            if (value.empty()) { error = "--stream needs an rtmp:// or rtmps:// URL"; return false; }
             o.stream_url = value;
         } else if (arg == "--stream-bitrate") {
             if (!integer(value, o.stream_kbps) || o.stream_kbps < 500 || o.stream_kbps > 50000) {
@@ -265,6 +265,7 @@ void show_status(const rec::Stats& stats, double recorded, bool audio, bool stre
         std::cout << ", \033[33maudio drops " << stats.audio_dropped + stats.mic_dropped << "\033[0m";
     if (streaming) {
         if (stats.streaming) std::cout << "   \033[35m\xE2\x97\x8F LIVE\033[0m";
+        else if (stats.stream_reconnecting) std::cout << "   \033[33mreconnecting\033[0m";
         else std::cout << "   \033[33mstream lost\033[0m";
         if (stats.stream_dropped) std::cout << ", \033[33m" << stats.stream_dropped << " skipped\033[0m";
     }
@@ -388,7 +389,8 @@ int main(int argc, char** argv) {
         std::cout << "Paused " << std::fixed << std::setprecision(1) << stats.paused_seconds << " s (not in the movie)\n";
     if (streaming)
         std::cout << "Streamed " << stats.stream_frames << " frames (" << std::fixed << std::setprecision(1)
-                  << static_cast<double>(stats.stream_bytes) / 1e6 << " MB), skipped " << stats.stream_dropped << '\n';
+                  << static_cast<double>(stats.stream_bytes) / 1e6 << " MB), skipped " << stats.stream_dropped
+                  << (stats.stream_reconnects ? ", reconnected " + std::to_string(stats.stream_reconnects) : std::string()) << '\n';
     if (!stopped) { std::cerr << stopped.error << '\n'; return 1; }
     if (!recorder.failure().empty()) { std::cerr << recorder.failure() << '\n'; return 1; }
     std::cout << "Saved " << options.output << '\n';

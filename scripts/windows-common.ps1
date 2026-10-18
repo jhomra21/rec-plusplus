@@ -111,12 +111,38 @@ function Get-MediaMTX([string]$cache) {
     return $exe
 }
 
+# A throwaway self-signed certificate for localhost and 127.0.0.1, written as PEM to $dir
+# (cert.pem, key.pem) for MediaMTX's RTMPS listener. It is removed from the user's store at once.
+function New-TestCertificate([string]$dir) {
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    $cert = New-SelfSignedCertificate -Subject 'CN=localhost' -KeyAlgorithm RSA -KeyLength 2048 `
+        -Provider 'Microsoft Software Key Storage Provider' -KeyExportPolicy Exportable `
+        -CertStoreLocation 'Cert:\CurrentUser\My' -NotAfter (Get-Date).AddDays(2) `
+        -TextExtension @('2.5.29.17={text}DNS=localhost&IPAddress=127.0.0.1', '2.5.29.37={text}1.3.6.1.5.5.7.3.1')
+    try {
+        $rsa = [Security.Cryptography.X509Certificates.RSACertificateExtensions]::GetRSAPrivateKey($cert)
+        $key = $rsa.Key.Export([Security.Cryptography.CngKeyBlobFormat]::Pkcs8PrivateBlob)
+        $pem = { param($label, $bytes) "-----BEGIN $label-----`n" + [Convert]::ToBase64String($bytes, 'InsertLineBreaks') + "`n-----END $label-----`n" }
+        $certPath = Join-Path $dir 'cert.pem'
+        $keyPath = Join-Path $dir 'key.pem'
+        [IO.File]::WriteAllText($certPath, (& $pem 'CERTIFICATE' $cert.RawData))
+        [IO.File]::WriteAllText($keyPath, (& $pem 'PRIVATE KEY' $key))
+        return @{ Cert = $certPath; Key = $keyPath }
+    } finally {
+        Remove-Item "Cert:\CurrentUser\My\$($cert.Thumbprint)" -DeleteKey
+    }
+}
+
 # Starts MediaMTX on 127.0.0.1:1935 with RTMP only, recording every published stream as
-# fragmented MP4 under $recordings.
-function Start-MediaMTX([string]$exe, [string]$recordings, [string]$work) {
+# fragmented MP4 under $recordings. With $tls (from New-TestCertificate) it also serves
+# RTMPS on 127.0.0.1:1936.
+function Start-MediaMTX([string]$exe, [string]$recordings, [string]$work, $tls = $null) {
     New-Item -ItemType Directory -Force $recordings, $work | Out-Null
     $config = Join-Path $work 'mediamtx.yml'
     $target = ($recordings -replace '\\', '/') + '/%path/%Y-%m-%d_%H-%M-%S-%f'
+    $secure = if ($tls) {
+        "rtmpEncryption: optional`nrtmpsAddress: 127.0.0.1:1936`nrtmpServerKey: $($tls.Key -replace '\\', '/')`nrtmpServerCert: $($tls.Cert -replace '\\', '/')"
+    } else { '' }
     Set-Content -Path $config -Encoding ASCII -Value @"
 logLevel: info
 api: no
@@ -126,6 +152,7 @@ playback: no
 rtsp: no
 rtmp: yes
 rtmpAddress: 127.0.0.1:1935
+$secure
 hls: no
 webrtc: no
 srt: no

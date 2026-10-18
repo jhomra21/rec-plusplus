@@ -690,6 +690,7 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
         if (s.audio_dropped) { [text appendFormat:@", audio drops %llu", static_cast<unsigned long long>(s.audio_dropped)]; _attention = true; }
         if (s.streaming && !s.stream_error.empty()) { [text appendFormat:@". Stream lost: %@", ns(s.stream_error)]; _attention = true; }
         else if (s.stream_dropped) { [text appendFormat:@", stream skipped %llu", static_cast<unsigned long long>(s.stream_dropped)]; _attention = true; }
+        if (s.reconnects) [text appendFormat:@", stream reconnected %u %@", s.reconnects, s.reconnects == 1 ? @"time" : @"times"];
         detail = text;
     }
     if (![_status.stringValue isEqualToString:status]) _status.stringValue = status;
@@ -698,7 +699,7 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context);
                       : s.state == State::paused    ? NSColor.systemOrangeColor
                                                     : NSColor.labelColor;
     _detail.textColor = _attention ? NSColor.systemOrangeColor : NSColor.secondaryLabelColor;
-    NSString* live = active && s.live ? @"● LIVE" : @"";
+    NSString* live = !active ? @"" : s.live ? @"● LIVE" : s.reconnecting ? @"Reconnecting…" : @"";
     if (![_live.stringValue isEqualToString:live]) _live.stringValue = live;
     // Hide the last level once recording ends; polling stops with it.
     if (!active) _systemShown = _micShown = 0;

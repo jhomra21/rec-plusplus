@@ -33,7 +33,7 @@ struct Settings {
     std::string microphone_device = "default";
     bool stream = false;              // Go live while recording.
     std::string destination = "twitch"; // twitch, youtube, custom.
-    std::string server;               // Custom destination: rtmp://host[:port]/app.
+    std::string server;               // Custom destination: rtmp[s]://host[:port]/app.
     std::uint32_t stream_kbps = 6000;
     std::string last_recording;
 };
@@ -75,6 +75,8 @@ struct Status {
     float system_peak = 0, mic_peak = 0;  // Since the previous status() call.
     bool streaming = false;          // A stream was requested for this recording.
     bool live = false;               // Connected and sending.
+    bool reconnecting = false;       // Lost the server and trying again.
+    std::uint32_t reconnects = 0;
     std::uint64_t stream_dropped = 0;
     std::string stream_error;        // Why the stream ended; the recording continues.
     std::string error;               // Why the last recording failed or ended early.

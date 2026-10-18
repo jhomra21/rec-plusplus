@@ -256,6 +256,8 @@ Status Session::status() {
         s.system_peak = active ? st.system_peak : 0;
         s.mic_peak = active ? st.mic_peak : 0;
         s.live = active && st.streaming;
+        s.reconnecting = active && st.stream_reconnecting;
+        s.reconnects = st.stream_reconnects;
         s.stream_dropped = st.stream_dropped;
     }
     if (ended) stop();

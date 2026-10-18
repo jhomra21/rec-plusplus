@@ -22,6 +22,8 @@ struct LiveSettings {
 
 struct LiveCounters {
     bool live = false;
+    bool reconnecting = false;
+    std::uint32_t reconnects = 0;
     bool hardware = false;
     std::uint64_t frames = 0, dropped = 0, bytes = 0;
 };

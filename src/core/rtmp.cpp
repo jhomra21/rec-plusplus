@@ -1,26 +1,5 @@
 #include "core/rtmp.hpp"
 
-#ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <cerrno>
-#include <fcntl.h>
-#include <netdb.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <unistd.h>
-#endif
-
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -30,18 +9,12 @@
 
 namespace rec::core {
 namespace {
-#ifdef _WIN32
-using Socket = SOCKET;
-const Socket kNoSocket = INVALID_SOCKET;
-void close_socket(Socket s) { closesocket(s); }
-#else
-using Socket = int;
-const Socket kNoSocket = -1;
-void close_socket(Socket s) { ::close(s); }
-#endif
-
 constexpr std::uint32_t kChunkSize = 4096;
 constexpr int kTimeoutMs = 10000;
+constexpr int kConnectMs = 5000, kReconnectMs = 3000;
+// Reconnecting waits 0.5 s, then doubles up to 8 s between attempts, and gives up after 2 minutes.
+constexpr int kFirstRetryMs = 500, kMaxRetryMs = 8000;
+constexpr std::int64_t kGiveUpMs = 120000;
 // Chunk streams: 2 protocol control, 3 connection commands, 4 audio, 6 video, 8 stream commands and data.
 constexpr std::uint32_t kControl = 2, kCommands = 3, kAudio = 4, kVideo = 6, kStreamData = 8;
 
@@ -156,16 +129,17 @@ bool amf_read(AmfReader& r, int& kind, double& number, std::string& text,
 }
 
 struct Target {
-    std::string host, port = "1935", authority, app, key;
+    std::string host, port, authority, app, key;
+    bool secure = false;
 };
 
-constexpr const char* kShape = "stream URL must look like rtmp://host[:port]/app/stream-key";
+constexpr const char* kShape = "stream URL must look like rtmp://host[:port]/app/stream-key (or rtmps://)";
 
 std::string parse_url(const std::string& url, Target& t) {
-    const std::string scheme = "rtmp://";
-    if (url.rfind("rtmps://", 0) == 0) return "RTMPS is not supported yet; use an rtmp:// URL";
-    if (url.rfind(scheme, 0) != 0) return "stream URL must start with rtmp://";
-    const auto rest = url.substr(scheme.size());
+    std::string rest;
+    if (url.rfind("rtmps://", 0) == 0) { t.secure = true; t.port = "443"; rest = url.substr(8); }
+    else if (url.rfind("rtmp://", 0) == 0) { t.port = "1935"; rest = url.substr(7); }
+    else return "stream URL must start with rtmp:// or rtmps://";
     const auto slash = rest.find('/');
     if (slash == std::string::npos || slash == 0) return kShape;
     t.authority = rest.substr(0, slash);
@@ -195,69 +169,6 @@ std::string parse_url(const std::string& url, Target& t) {
     }
     if (t.host.empty()) return kShape;
     return {};
-}
-
-bool connect_within(Socket s, const sockaddr* address, int length, int timeout_ms) {
-#ifdef _WIN32
-    u_long blocking = 1;
-    ioctlsocket(s, FIONBIO, &blocking);
-    if (::connect(s, address, length) != 0) {
-        if (WSAGetLastError() != WSAEWOULDBLOCK) return false;
-        fd_set writable, failed;
-        FD_ZERO(&writable);
-        FD_ZERO(&failed);
-        FD_SET(s, &writable);
-        FD_SET(s, &failed);
-        timeval wait{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
-        if (select(0, nullptr, &writable, &failed, &wait) <= 0 || FD_ISSET(s, &failed)) return false;
-    }
-    int error = 0;
-    int size = sizeof error;
-    if (getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &size) != 0 || error) return false;
-    blocking = 0;
-    ioctlsocket(s, FIONBIO, &blocking);
-#else
-    const int flags = fcntl(s, F_GETFL, 0);
-    fcntl(s, F_SETFL, flags | O_NONBLOCK);
-    if (::connect(s, address, static_cast<socklen_t>(length)) != 0) {
-        if (errno != EINPROGRESS) return false;
-        pollfd wait{s, POLLOUT, 0};
-        if (poll(&wait, 1, timeout_ms) <= 0) return false;
-    }
-    int error = 0;
-    socklen_t size = sizeof error;
-    if (getsockopt(s, SOL_SOCKET, SO_ERROR, &error, &size) != 0 || error) return false;
-    fcntl(s, F_SETFL, flags);
-#endif
-    return true;
-}
-
-void configure(Socket s) {
-    int one = 1;
-    setsockopt(s, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&one), sizeof one);
-#ifdef _WIN32
-    const DWORD timeout = kTimeoutMs;
-#else
-    const timeval timeout{kTimeoutMs / 1000, 0};
-#ifdef SO_NOSIGPIPE
-    setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
-#endif
-#endif
-    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&timeout), sizeof timeout);
-    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&timeout), sizeof timeout);
-}
-
-bool readable(Socket s) {
-#ifdef _WIN32
-    fd_set set;
-    FD_ZERO(&set);
-    FD_SET(s, &set);
-    timeval none{0, 0};
-    return select(0, &set, nullptr, nullptr, &none) > 0;
-#else
-    pollfd wait{s, POLLIN, 0};
-    return poll(&wait, 1, 0) > 0;
-#endif
 }
 
 bool parse_command(const Bytes& data, std::string& name, double& transaction, std::vector<double>& numbers,
@@ -410,7 +321,7 @@ RtmpPublisher::~RtmpPublisher() { close(0); }
 std::string RtmpPublisher::redact(const std::string& url) {
     Target target;
     if (!parse_url(url, target).empty()) return "(invalid stream URL)";
-    return "rtmp://" + target.authority + "/" + target.app + "/****";
+    return (target.secure ? "rtmps://" : "rtmp://") + target.authority + "/" + target.app + "/****";
 }
 
 std::string RtmpPublisher::failure() const {
@@ -426,39 +337,15 @@ void RtmpPublisher::fail(std::string text) {
     live_.store(false);
 }
 
-bool RtmpPublisher::send_all(const std::uint8_t* data, std::size_t size) {
-    const auto s = static_cast<Socket>(socket_);
-    while (size) {
-#ifdef _WIN32
-        const int sent = ::send(s, reinterpret_cast<const char*>(data), static_cast<int>(std::min<std::size_t>(size, 1 << 20)), 0);
-#else
-#ifdef MSG_NOSIGNAL
-        const ssize_t sent = ::send(s, data, size, MSG_NOSIGNAL);
-#else
-        const ssize_t sent = ::send(s, data, size, 0);
-#endif
-        if (sent < 0 && errno == EINTR) continue;
-#endif
-        if (sent <= 0) return false;
-        data += sent;
-        size -= static_cast<std::size_t>(sent);
-    }
-    return true;
-}
+bool RtmpPublisher::send_all(const std::uint8_t* data, std::size_t size) { return transport_->send(data, size); }
 
 bool RtmpPublisher::read_exact(std::uint8_t* data, std::size_t size) {
-    const auto s = static_cast<Socket>(socket_);
     while (size) {
-#ifdef _WIN32
-        const int got = ::recv(s, reinterpret_cast<char*>(data), static_cast<int>(std::min<std::size_t>(size, 1 << 20)), 0);
-#else
-        const ssize_t got = ::recv(s, data, size, 0);
-        if (got < 0 && errno == EINTR) continue;
-#endif
-        if (got <= 0) return false;
+        const auto got = transport_->receive(data, size);
+        if (!got) return false;
         data += got;
-        size -= static_cast<std::size_t>(got);
-        received_ += static_cast<std::uint64_t>(got);
+        size -= got;
+        received_ += got;
     }
     return true;
 }
@@ -589,29 +476,42 @@ bool RtmpPublisher::await_command(double transaction, bool status, Command& out,
 std::string RtmpPublisher::open(const std::string& url, const StreamInfo& info) {
     Target target;
     if (auto error = parse_url(url, target); !error.empty()) return error;
+    host_ = target.host;
+    port_ = target.port;
+    authority_ = target.authority;
+    app_ = target.app;
     key_ = target.key;
-    const std::string where = target.host + ":" + target.port;
-#ifdef _WIN32
-    WSADATA data;
-    if (WSAStartup(MAKEWORD(2, 2), &data) != 0) return "could not start Windows networking";
-    winsock_ = true;
-#endif
-    addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    addrinfo* found = nullptr;
-    if (getaddrinfo(target.host.c_str(), target.port.c_str(), &hints, &found) != 0 || !found)
-        return "could not resolve " + target.host;
-    for (auto* a = found; a && socket_ == -1; a = a->ai_next) {
-        const Socket s = ::socket(a->ai_family, a->ai_socktype, a->ai_protocol);
-        if (s == kNoSocket) continue;
-        if (connect_within(s, a->ai_addr, static_cast<int>(a->ai_addrlen), 5000)) socket_ = static_cast<std::intptr_t>(s);
-        else close_socket(s);
+    secure_ = target.secure;
+    info_ = info;
+    if (auto error = connect(kConnectMs); !error.empty()) { drop_connection(); return error; }
+    max_bytes_ = std::max<std::size_t>(2u << 20, std::size_t(info.video_kbps + info.audio_kbps) * 1000 / 8 * 3);
+    live_.store(true);
+    sender_ = std::thread([this] { run(); });
+    return {};
+}
+
+void RtmpPublisher::drop_connection() {
+    std::unique_ptr<Transport> old;
+    {
+        std::lock_guard lock(transport_mutex_);
+        old = std::move(transport_);
     }
-    freeaddrinfo(found);
-    if (socket_ == -1) return "could not connect to " + where;
-    configure(static_cast<Socket>(socket_));
+}
+
+std::string RtmpPublisher::connect(int timeout_ms) {
+    const std::string where = host_ + ":" + port_;
+    std::string error;
+    auto transport = secure_ ? connect_tls(host_, port_, timeout_ms, error) : connect_tcp(host_, port_, timeout_ms, error);
+    if (!transport) return error;
+    {
+        std::lock_guard lock(transport_mutex_);
+        transport_ = std::move(transport);
+    }
+    chunk_in_ = chunk_out_ = 128;
+    window_ = 0;
+    received_ = acknowledged_ = 0;
+    stream_id_ = 0;
+    incoming_.clear();
 
     // Plain handshake: C0+C1, S0+S1, C2 echoes S1, S2.
     Bytes hello(1 + 1536);
@@ -628,22 +528,21 @@ std::string RtmpPublisher::open(const std::string& url, const StreamInfo& info) 
     if (!write_message(kControl, 1, 0, 0, b)) return "lost the connection to " + where;
     chunk_out_ = kChunkSize;
 
-    const std::string tc_url = "rtmp://" + target.authority + "/" + target.app;
+    const std::string tc_url = (secure_ ? "rtmps://" : "rtmp://") + authority_ + "/" + app_;
     b.clear();
     amf_string(b, "connect");
     amf_number(b, 1);
     b.push_back(3);
-    amf_key(b, "app"); amf_string(b, target.app);
+    amf_key(b, "app"); amf_string(b, app_);
     amf_key(b, "type"); amf_string(b, "nonprivate");
     amf_key(b, "flashVer"); amf_string(b, "FMLE/3.0 (compatible; rec)");
     amf_key(b, "tcUrl"); amf_string(b, tc_url);
     amf_end(b);
     Command answer;
-    std::string error;
     if (!write_message(kCommands, 20, 0, 0, b)) return "lost the connection to " + where;
     if (!await_command(1, false, answer, error)) return error;
     if (answer.name == "_error")
-        return "the stream server refused app '" + target.app + "': " + answer.info["description"];
+        return "the stream server refused app '" + app_ + "': " + answer.info["description"];
 
     for (const char* name : {"releaseStream", "FCPublish"}) {
         b.clear();
@@ -681,32 +580,95 @@ std::string RtmpPublisher::open(const std::string& url, const StreamInfo& info) 
     amf_string(b, "onMetaData");
     b.push_back(8);
     put32(b, 11);
-    amf_key(b, "width"); amf_number(b, info.width);
-    amf_key(b, "height"); amf_number(b, info.height);
-    amf_key(b, "framerate"); amf_number(b, info.fps);
+    amf_key(b, "width"); amf_number(b, info_.width);
+    amf_key(b, "height"); amf_number(b, info_.height);
+    amf_key(b, "framerate"); amf_number(b, info_.fps);
     amf_key(b, "videocodecid"); amf_number(b, 7);
-    amf_key(b, "videodatarate"); amf_number(b, info.video_kbps);
+    amf_key(b, "videodatarate"); amf_number(b, info_.video_kbps);
     amf_key(b, "audiocodecid"); amf_number(b, 10);
-    amf_key(b, "audiodatarate"); amf_number(b, info.audio_kbps);
-    amf_key(b, "audiosamplerate"); amf_number(b, info.audio_rate);
+    amf_key(b, "audiodatarate"); amf_number(b, info_.audio_kbps);
+    amf_key(b, "audiosamplerate"); amf_number(b, info_.audio_rate);
     amf_key(b, "audiosamplesize"); amf_number(b, 16);
-    amf_key(b, "stereo"); amf_bool(b, info.audio_channels == 2);
+    amf_key(b, "stereo"); amf_bool(b, info_.audio_channels == 2);
     amf_key(b, "encoder"); amf_string(b, "rec");
     amf_end(b);
     if (!write_message(kStreamData, 18, stream_id_, 0, b)) return "lost the connection to " + where;
-
-    max_bytes_ = std::max<std::size_t>(2u << 20, std::size_t(info.video_kbps + info.audio_kbps) * 1000 / 8 * 3);
-    live_.store(true);
-    sender_ = std::thread([this] { run(); });
     return {};
+}
+
+bool RtmpPublisher::reconnect() {
+    live_.store(false);
+    reconnecting_.store(true);
+    {
+        std::lock_guard lock(mutex_);
+        queue_.clear();
+        queued_bytes_ = 0;
+    }
+    drop_connection();
+    const auto lost_at = now_ms();
+    int delay = kFirstRetryMs;
+    std::string error;
+    for (;;) {
+        {
+            std::unique_lock lock(mutex_);
+            if (wake_.wait_for(lock, std::chrono::milliseconds(delay), [this] { return closing_; })) break;
+        }
+        error = connect(kReconnectMs);
+        if (error.empty()) {
+            Bytes video, audio;
+            std::uint32_t ms = 0;
+            {
+                std::lock_guard lock(mutex_);
+                video = video_header_;
+                audio = audio_header_;
+                ms = last_ms_;
+            }
+            if ((video.empty() || write_message(kVideo, 9, stream_id_, ms, video)) &&
+                (audio.empty() || write_message(kAudio, 8, stream_id_, ms, audio))) {
+                {
+                    std::lock_guard lock(mutex_);
+                    queue_.clear();
+                    queued_bytes_ = 0;
+                    need_key_ = resync_ = true;
+                    live_.store(true);
+                }
+                reconnecting_.store(false);
+                reconnects_.fetch_add(1);
+                return true;
+            }
+            error = "lost the connection to " + host_ + ":" + port_;
+        }
+        drop_connection();
+        if (now_ms() - lost_at >= kGiveUpMs) {
+            reconnecting_.store(false);
+            fail("lost the connection to the stream server and could not reconnect: " + error);
+            return false;
+        }
+        delay = std::min(delay * 2, kMaxRetryMs);
+    }
+    reconnecting_.store(false);
+    fail("lost the connection to the stream server");
+    return false;
 }
 
 bool RtmpPublisher::push(std::uint8_t type, std::uint32_t ms, bool header, bool key, Bytes body) {
     {
         std::lock_guard lock(mutex_);
-        if (!live_.load() || closing_) return false;
+        if (closing_) return false;
         const bool video = type == 9;
+        if (header) (video ? video_header_ : audio_header_) = body;
+        if (!live_.load()) {
+            if (video && !header && reconnecting_.load()) dropped_.fetch_add(1);
+            return false;
+        }
         if (!header) {
+            if (resync_) {
+                if (!(video && key)) {
+                    if (video) dropped_.fetch_add(1);
+                    return false;
+                }
+                resync_ = false;
+            }
             if (video && need_key_ && !key) { dropped_.fetch_add(1); return false; }
             if (queued_bytes_ + body.size() > max_bytes_) {
                 if (video) { dropped_.fetch_add(1); need_key_ = true; }
@@ -714,6 +676,7 @@ bool RtmpPublisher::push(std::uint8_t type, std::uint32_t ms, bool header, bool 
             }
             if (video && key) need_key_ = false;
         }
+        last_ms_ = ms;
         queued_bytes_ += body.size();
         queue_.push_back({type, ms, std::move(body)});
     }
@@ -738,23 +701,22 @@ void RtmpPublisher::run() {
                 queued_bytes_ -= packet.body.size();
             }
         }
-        if (packet.type && !write_message(packet.type == 9 ? kVideo : kAudio, packet.type, stream_id_, packet.ms, packet.body)) {
-            fail("lost the connection to the stream server");
-            break;
-        }
+        bool lost = packet.type && !write_message(packet.type == 9 ? kVideo : kAudio, packet.type, stream_id_, packet.ms, packet.body);
         bool ended = false;
-        while (!ended && readable(static_cast<Socket>(socket_))) {
+        while (!lost && transport_->readable()) {
             Message m;
-            if (!read_message(m)) { fail("the stream server closed the connection"); ended = true; break; }
+            if (!read_message(m)) { lost = true; break; }
             if (handle_control(m) || m.type != 20) continue;
             Command c;
             if (parse_command(m.data, c.name, c.transaction, c.numbers, c.info) && c.name == "onStatus" &&
                 c.info["level"] == "error") {
                 fail("the stream server ended the stream: " + c.info["code"] + " " + c.info["description"]);
                 ended = true;
+                break;
             }
         }
         if (ended) break;
+        if (lost && !reconnect()) break;
     }
     {
         std::lock_guard lock(mutex_);
@@ -769,20 +731,17 @@ void RtmpPublisher::close(int flush_ms) {
         closing_ = true;
         flush_deadline_ms_ = now_ms() + flush_ms;
         wake_.notify_all();
-        // A send blocked on a stalled network cannot see the deadline; closing the socket ends it.
+        // A send blocked on a stalled network cannot see the deadline; interrupting ends it.
         if (!wake_.wait_for(lock, std::chrono::milliseconds(flush_ms + 1000), [this] { return sender_done_; })) {
             lock.unlock();
-#ifdef _WIN32
-            shutdown(static_cast<Socket>(socket_), SD_BOTH);
-#else
-            shutdown(static_cast<Socket>(socket_), SHUT_RDWR);
-#endif
+            std::lock_guard guard(transport_mutex_);
+            if (transport_) transport_->interrupt();
         } else {
             lock.unlock();
         }
         sender_.join();
     }
-    if (socket_ != -1) {
+    if (transport_) {
         if (live_.load()) {
             Bytes b;
             amf_string(b, "FCUnpublish");
@@ -797,18 +756,10 @@ void RtmpPublisher::close(int flush_ms) {
             amf_number(b, stream_id_);
             write_message(kCommands, 20, 0, 0, b);
         }
-#ifdef _WIN32
-        shutdown(static_cast<Socket>(socket_), SD_SEND);
-#else
-        shutdown(static_cast<Socket>(socket_), SHUT_WR);
-#endif
-        close_socket(static_cast<Socket>(socket_));
-        socket_ = -1;
+        transport_->finish();
+        drop_connection();
     }
     live_.store(false);
-#ifdef _WIN32
-    if (winsock_) { WSACleanup(); winsock_ = false; }
-#endif
 }
 
 } // namespace rec::core

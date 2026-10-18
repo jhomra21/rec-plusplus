@@ -126,7 +126,8 @@ try {
     Expect-Failure 'stream bitrate must be' @('record', '--stream-bitrate', '100')
     $mediamtx = Get-MediaMTX (Join-Path $root 'build\tools')
     $received = Join-Path $artifacts 'stream-server'
-    $server = Start-MediaMTX $mediamtx $received (Join-Path $tmp 'mediamtx')
+    $tls = New-TestCertificate (Join-Path $tmp 'tls')
+    $server = Start-MediaMTX $mediamtx $received (Join-Path $tmp 'mediamtx') $tls
     try {
         # Stem-only file: the stream still carries the mix.
         $live = Record 'stream' 'stream-local.mp4' @('--test-pattern', '--test-tone', '--test-mic', '--audio-tracks', 'stems',
@@ -140,6 +141,33 @@ try {
         $silent = Record 'stream-silent' 'stream-silent-local.mp4' @('--test-pattern', '-r', '720p', '-f', '30', '-t', '3',
             '--stream', 'rtmp://127.0.0.1:1935/live/smokekey2')
         Expect-Text $silent.Log 'Streamed 90 frames'
+
+        # RTMPS checks the server's certificate: this server's self-signed one fails until the
+        # test trusts it explicitly.
+        Expect-Failure 'is not trusted' @('record', '--test-pattern', '-t', '1', '--stream', 'rtmps://127.0.0.1:1936/live/untrusted',
+            '-o', (Join-Path $tmp 'untrusted.mp4'))
+        $env:REC_TLS_TRUST_CERT = $tls.Cert
+        try {
+            $secure = Record 'stream-rtmps' 'stream-rtmps-local.mp4' @('--test-pattern', '--test-tone', '-r', '720p', '-f', '30', '-t', '4',
+                '--stream', 'rtmps://127.0.0.1:1936/live/smokekey4')
+        } finally { Remove-Item Env:REC_TLS_TRUST_CERT }
+        Expect-Text $secure.Log 'Streaming to rtmps://127.0.0.1:1936/live/****'
+        Expect-Text $secure.Log 'Streamed 120 frames'
+
+        # A server restart mid-stream: the stream reconnects and resumes at the next keyframe.
+        $againPath = Join-Path $artifacts 'stream-reconnect.mp4'
+        $run = Start-RecProcess $rec @('record', '--test-pattern', '--test-tone', '-r', '720p', '-f', '30', '-t', '10',
+            '--stream', 'rtmp://127.0.0.1:1935/live/smokekey5', '-o', $againPath)
+        Start-Sleep -Seconds 3
+        Stop-MediaMTX $server
+        Start-Sleep -Milliseconds 500
+        $server = Start-MediaMTX $mediamtx $received (Join-Path $tmp 'mediamtx-2') $tls
+        $again = Stop-RecProcess $run
+        Set-Content -Path (Join-Path $artifacts 'stream-reconnect.record.log') -Value $again.Text
+        Write-Host $again.Text
+        if ($again.Code -ne 0) { throw "the stream did not survive a server restart: $($again.Text)" }
+        Expect-Text $again.Text 'reconnected 1'
+        Expect-Text $again.Text 'written 300, dropped 0'
 
         # Losing the server ends the stream, not the recording.
         $lostPath = Join-Path $artifacts 'stream-lost.mp4'
@@ -177,6 +205,19 @@ try {
     Expect-Within $got 'av_offset_max_ms' 0 20
     Expect-Within $files['smokekey2'] 'frames' 89 90
     Expect-Field $files['smokekey2'] 'audio_codec' 'aac'
+    $tlsGot = Get-Probe $rec (Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received 'live\smokekey4') | Select-Object -First 1).FullName `
+        (Join-Path $artifacts 'stream-received-smokekey4.probe')
+    Expect-Within $tlsGot 'frames' 119 120
+    Expect-Within $tlsGot 'av_sync_events' 4 4
+    Expect-Within $tlsGot 'av_offset_max_ms' 0 20
+    # The newest server recording is the session after the restart. MediaMTX may not have
+    # written the 3 s before the kill, and that session cannot reach 120 frames anyway.
+    $resumedFile = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received 'live\smokekey5') | Sort-Object Name | Select-Object -Last 1
+    if (-not $resumedFile) { throw 'MediaMTX recorded nothing for the restarted stream' }
+    $resumed = Get-Probe $rec $resumedFile.FullName (Join-Path $artifacts 'stream-received-smokekey5.probe')
+    Expect-Within $resumed 'frames' 120 210
+    Expect-Within $resumed 'av_sync_events' 3 7
+    Expect-Within $resumed 'av_offset_max_ms' 0 20
     # HEVC needs a hardware encoder or the HEVC Video Extensions; GPU-less CI runners have neither.
     $hevcPath = Join-Path $artifacts 'hevc.mp4'
     $hevcRun = Invoke-Rec $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '1', '--codec', 'hevc', '-o', $hevcPath)

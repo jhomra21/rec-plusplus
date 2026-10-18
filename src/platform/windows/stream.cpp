@@ -256,6 +256,8 @@ public:
         c.frames = frames_sent_.load();
         c.dropped = dropped_.load() + publisher_.dropped_frames();
         c.bytes = publisher_.bytes();
+        c.reconnecting = publisher_.reconnecting() && !broken_.load();
+        c.reconnects = publisher_.reconnects();
         return c;
     }
 

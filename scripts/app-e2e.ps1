@@ -9,6 +9,8 @@
 #   3. Go live to a local MediaMTX server while recording; the server's copy decodes.
 #   4. Closing the window while recording keeps recording; the next stop saves the movie.
 #   5. Settings persist without the stream key, which Credential Manager holds.
+#   6. Quit Rec from the notification-area menu while recording saves the movie, then exits.
+#   7. Logging off while recording saves the movie before WM_ENDSESSION returns.
 param([string]$Rec, [string]$App, [string]$Artifacts)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
@@ -97,7 +99,8 @@ function Wait-Status($ui, [string]$prefix, [int]$seconds = 20) {
         Start-Sleep -Milliseconds 100
     }
     throw "status is '$(Text-Of $ui 100)' ($(Text-Of $ui 101)), expected '$prefix...'"
-}function Newest-Movie {
+}
+function Newest-Movie {
     $file = Get-ChildItem $folder -Filter '*.mp4' | Sort-Object LastWriteTime | Select-Object -Last 1
     if (-not $file) { throw "no recording in $folder" }
     return $file.FullName
@@ -205,6 +208,39 @@ try {
     Expect-Text $settings 'stream_kbps=3000'
     Expect-Text $settings 'last_recording='
     if ($settings.Contains('appkey')) { throw 'the stream key was written to the settings file' }
+
+    # 6. Quit from the notification-area menu while recording: the app saves the movie, then exits.
+    $before = @(Get-ChildItem $folder -Filter '*.mp4').Count
+    $ui = Start-App
+    Wait-Status $ui 'Ready to record' | Out-Null
+    Press $ui 'Start Recording'
+    Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    Start-Sleep -Seconds 2
+    [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1004, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, Quit Rec
+    if (-not $ui.Process.WaitForExit(15000)) { throw 'Quit Rec did not end the app while recording' }
+    if (@(Get-ChildItem $folder -Filter '*.mp4').Count -ne $before + 1) { throw 'Quit Rec did not save the recording' }
+    $quit = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-quit.probe')
+    Expect-Within $quit 'duration' 1.5 3.5
+    Expect-Within $quit 'av_offset_max_ms' 0 20
+    Write-Host "6. quit while recording: $($quit['frames']) frames"
+
+    # 7. Log off while recording: the movie is complete when WM_ENDSESSION returns, after which
+    # Windows may end the process at any moment.
+    $ui = Start-App
+    Wait-Status $ui 'Ready to record' | Out-Null
+    Press $ui 'Start Recording'
+    Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    Start-Sleep -Seconds 2
+    $logoff = [IntPtr]([int64]0x80000000)  # ENDSESSION_LOGOFF
+    if ([AppWindow]::SendMessage($ui.Window, 0x0011, [IntPtr]::Zero, $logoff) -eq [IntPtr]::Zero) { throw 'the app refused to log off' }  # WM_QUERYENDSESSION
+    [AppWindow]::SendMessage($ui.Window, 0x0016, [IntPtr]1, $logoff) | Out-Null  # WM_ENDSESSION
+    $ui.Process.Kill()
+    $ui.Process.WaitForExit()
+    if (@(Get-ChildItem $folder -Filter '*.mp4').Count -ne $before + 2) { throw 'log-off did not save the recording' }
+    $ended = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-logoff.probe')
+    Expect-Within $ended 'duration' 1.5 3.5
+    Expect-Within $ended 'av_offset_max_ms' 0 20
+    Write-Host "7. log off while recording: $($ended['frames']) frames"
     Write-Host 'app e2e passed'
 } finally {
     if ($ui -and -not $ui.Process.HasExited) { $ui.Process.Kill() }
