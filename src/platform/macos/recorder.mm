@@ -11,6 +11,7 @@
 #include "core/mixer.hpp"
 #include "core/pause.hpp"
 #include "core/sync.hpp"
+#include "platform/macos/overlay.hpp"
 #include "platform/macos/stream.hpp"
 
 #include <algorithm>
@@ -362,6 +363,10 @@ CVPixelBufferRef pattern_frame(Size size, bool flash) {
     for (std::size_t row = 0; row < CVPixelBufferGetHeightOfPlane(pixel, 1); ++row)
         std::memset(uv + row * uv_stride, 128, CVPixelBufferGetWidthOfPlane(pixel, 1) * 2);
     CVPixelBufferUnlockBaseAddress(pixel, 0);
+    // Tagged like a capture, so overlays convert with the same matrix.
+    CVBufferSetAttachment(pixel, kCVImageBufferYCbCrMatrixKey, kCVImageBufferYCbCrMatrix_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(pixel, kCVImageBufferColorPrimariesKey, kCVImageBufferColorPrimaries_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
+    CVBufferSetAttachment(pixel, kCVImageBufferTransferFunctionKey, kCVImageBufferTransferFunction_ITU_R_709_2, kCVAttachmentMode_ShouldPropagate);
     return pixel;
 }
 
@@ -489,6 +494,11 @@ std::vector<AudioDevice> list_microphones(std::string& error) {
     }
 }
 
+std::vector<Camera> list_cameras(std::string& error) {
+    error.clear();
+    return mac::cameras();
+}
+
 double default_output_latency_ms() noexcept { return output_latency_seconds() * 1000.0; }
 
 // Capture callbacks only retain and enqueue. One recording thread encodes video on a
@@ -540,6 +550,13 @@ public:
                 if (!pattern_[0] || !pattern_[1]) { stop(); return {"synthetic frame allocation failed"}; }
                 captured_.store(1);
                 active_.store(true);
+            }
+            if (!options_.overlays.empty()) {
+                overlays_ = std::make_unique<mac::Overlays>();
+                if (auto started = overlays_->start(size_.width, size_.height, options_.overlays); !started) {
+                    stop();
+                    return started;
+                }
             }
             if (!options_.stream_url.empty() || options_.replay_seconds) {
                 mac::LiveSettings live;
@@ -609,6 +626,11 @@ public:
                 writer_ = nil;
             }
             if (live_) live_->stop();
+            if (overlays_) {
+                camera_frames_ = overlays_->camera_frames();
+                overlays_->stop();
+                overlays_.reset();
+            }
             if (activity_) { [[NSProcessInfo processInfo] endActivity:activity_]; activity_ = nil; }
             recording_.store(false);
             {
@@ -690,6 +712,7 @@ public:
             stats.stream_bytes = live.bytes;
             stats.replay_seconds = live.replay_seconds;
         }
+        stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
         return stats;
     }
     std::string failure() const { std::lock_guard lock(mutex_); return failure_; }
@@ -698,6 +721,10 @@ public:
         seconds = 0;
         if (!live_ || !options_.replay_seconds) return {"the replay buffer is off"};
         return live_->save_replay(path, seconds);
+    }
+    Result set_overlay(std::size_t index, bool visible, const std::optional<Area>& area) {
+        if (!overlays_) return {"no overlay " + std::to_string(index + 1)};
+        return overlays_->set(index, visible, area);
     }
 
     Result pause() {
@@ -1145,6 +1172,12 @@ private:
             if (stop_requested_.load() || finished_) break;
             @autoreleasepool {
                 CVPixelBufferRef frame = select_frame(slot, due);
+                CVPixelBufferRef composed = nullptr;
+                if (frame && overlays_) {
+                    composed = overlays_->compose(frame);
+                    if (!composed) fail("could not draw the overlays");
+                    frame = composed;
+                }
                 // Retry the same timestamp for up to 500 ms on transient backpressure.
                 // Never hold a stream callback or create an unbounded frame queue.
                 bool appended = false;
@@ -1176,6 +1209,7 @@ private:
                 } else if (!stop_requested_.load()) {
                     dropped_.fetch_add(1);
                 }
+                if (composed) CVPixelBufferRelease(composed);
                 if (writer_.status == AVAssetWriterStatusFailed)
                     fail(message(writer_.error, "video encoding failed"));
                 pump_audio(false);
@@ -1230,6 +1264,8 @@ private:
     std::atomic_bool finished_{false};
     std::atomic<std::uint64_t> captured_{0}, written_{0}, dropped_{0}, mix_written_{0};
     std::unique_ptr<mac::LiveStream> live_;  // Kept after stop() for its counters.
+    std::unique_ptr<mac::Overlays> overlays_;
+    std::uint64_t camera_frames_ = 0;  // The count when the overlays were released.
 };
 
 namespace {
@@ -1252,9 +1288,29 @@ double brightness(CVPixelBufferRef pixel) {
     CVPixelBufferUnlockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
     return count ? static_cast<double>(sum) / (255.0 * static_cast<double>(count)) : 0;
 }
+
+Probe::Color mean_color(CVPixelBufferRef pixel, const Region& r) {
+    Probe::Color color;
+    if (!pixel || CVPixelBufferLockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return color;
+    const auto* base = static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(pixel));
+    const auto stride = CVPixelBufferGetBytesPerRow(pixel);
+    const auto width = CVPixelBufferGetWidth(pixel), height = CVPixelBufferGetHeight(pixel);
+    double sum[3]{};
+    std::uint64_t count = 0;
+    for (std::size_t y = static_cast<std::size_t>(r.y); base && y < height && y < r.y + r.height; ++y)
+        for (std::size_t x = static_cast<std::size_t>(r.x); x < width && x < r.x + r.width; ++x, ++count)
+            for (int c = 0; c < 3; ++c) sum[c] += base[y * stride + x * 4 + c];
+    CVPixelBufferUnlockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
+    if (count) {
+        color.b = static_cast<std::uint8_t>(std::lround(sum[0] / count));
+        color.g = static_cast<std::uint8_t>(std::lround(sum[1] / count));
+        color.r = static_cast<std::uint8_t>(std::lround(sum[2] / count));
+    }
+    return color;
+}
 } // namespace
 
-Result probe_file(const std::string& path, Probe& probe) {
+Result probe_file(const std::string& path, Probe& probe, std::optional<Region> sample_rect) {
     @autoreleasepool {
         probe = {};
         NSString* name = [NSString stringWithUTF8String:path.c_str()];
@@ -1269,6 +1325,12 @@ Result probe_file(const std::string& path, Probe& probe) {
         const auto codec = format ? CMFormatDescriptionGetMediaSubType(format) : 0;
         probe.codec = codec == kCMVideoCodecType_H264 ? "h264" :
                       codec == kCMVideoCodecType_HEVC ? "hevc" : "other";
+        if (sample_rect) {
+            const auto& r = *sample_rect;
+            if (r.x < 0 || r.y < 0 || r.width < 2 || r.height < 2 || r.x + r.width > probe.width || r.y + r.height > probe.height)
+                return {"the sample rectangle does not fit the " + std::to_string(probe.width) + "x" + std::to_string(probe.height) + " video"};
+        }
+        double next_sample = 0;
         NSError* error = nil;
         AVAssetReader* reader = [[AVAssetReader alloc] initWithAsset:asset error:&error];
         if (!reader) return {message(error, "could not open movie")};
@@ -1289,6 +1351,10 @@ Result probe_file(const std::string& path, Probe& probe) {
             previous = timestamp;
             ++probe.frames;
             flashes.feed(CMTimeGetSeconds(timestamp), brightness(CMSampleBufferGetImageBuffer(sample)));
+            if (sample_rect && CMTimeGetSeconds(timestamp) >= next_sample) {
+                probe.samples.push_back(mean_color(CMSampleBufferGetImageBuffer(sample), *sample_rect));
+                next_sample = std::floor(CMTimeGetSeconds(timestamp)) + 1;
+            }
             CFRelease(sample);
         }
         if (reader.status != AVAssetReaderStatusCompleted)
@@ -1384,6 +1450,9 @@ Result Recorder::save_replay(const std::string& path, double* seconds) {
     auto result = impl_->capture.save_replay(path, saved);
     if (seconds) *seconds = saved;
     return result;
+}
+Result Recorder::set_overlay(std::size_t index, bool visible, std::optional<Area> area) {
+    return impl_->capture.set_overlay(index, visible, area);
 }
 
 } // namespace rec

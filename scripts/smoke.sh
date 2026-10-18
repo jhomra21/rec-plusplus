@@ -27,6 +27,18 @@ within() {
   awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v != "" && v + 0 >= lo && v + 0 <= hi) }' \
     || { echo "$1 is outside [$2, $3]" >&2; exit 1; }
 }
+# color KEY FILE green|red|white: a sample_N=R,G,B probe field, with room for encoding error.
+color() {
+  awk -F= -v key="$1" -v want="$3" '$1 == key {
+      split($2, c, ",")
+      found = 1
+      if (want == "green") ok = c[2] > 120 && c[2] > c[1] + 60 && c[2] > c[3] + 60
+      if (want == "red") ok = c[1] > 170 && c[1] > c[2] + 100 && c[1] > c[3] + 100
+      if (want == "white") ok = c[1] > 190 && c[2] > 190 && c[3] > 190
+      print key "=" $2
+    }
+    END { exit !(found && ok) }' "$2" || { echo "$1 is not $3" >&2; exit 1; }
+}
 
 "$rec" --help | grep -q 'native screen recorder'
 expect_failure 'fps must be' record --fps invalid
@@ -124,6 +136,24 @@ else
   within "$(value av_sync_events "$artifacts/replay-clip.probe")" 4 8
   within "$(value av_offset_max_ms "$artifacts/replay-clip.probe")" 0 25
 
+  # Overlays: a camera and an image composited into every frame on the GPU; "hide 1" removes
+  # the camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
+  png="$root/scripts/overlay-test.png"
+  expect_failure 'could not open the image' record --test-pattern -t 1 --image "$artifacts/missing.png" -o "$artifacts/missing.mov"
+  expect_failure 'the area after @' record --test-pattern --camera test@0.9,0.9,0.2,0.2
+  { sleep 2.5; echo 'hide 1'; sleep 5; } |
+    "$rec" record --test-pattern -r 1080p -f 30 -t 4 --camera test --image "$png@0.05,0.05,0.2,0.2" -o "$artifacts/overlay.mov" \
+    | tee "$artifacts/overlay.record.log"
+  grep -q 'Hiding camera 1' "$artifacts/overlay.record.log"
+  grep -q 'written 120, dropped 0' "$artifacts/overlay.record.log"
+  within "$(awk '/^Camera frames/ { print $3 }' "$artifacts/overlay.record.log")" 30 1000
+  # The camera's default area at 1080p is 1402,772 480x270; the image fits 96,54 384x216 as 384x192.
+  "$rec" probe "$artifacts/overlay.mov" --sample 1450,800,380,200 | tee "$artifacts/overlay-camera.probe"
+  color sample_0 "$artifacts/overlay-camera.probe" green
+  color sample_1 "$artifacts/overlay-camera.probe" green
+  color sample_3 "$artifacts/overlay-camera.probe" white
+  "$rec" probe "$artifacts/overlay.mov" --sample 150,100,250,100 | tee "$artifacts/overlay-image.probe"
+  for second in 0 1 2 3; do color "sample_$second" "$artifacts/overlay-image.probe" red; done
   # Crash safety: a recording killed mid-write still decodes up to its last movie fragment.
   "$rec" record --test-pattern --test-tone -f 30 -t 0 --codec h264 -o "$artifacts/crash.mov" \
     </dev/null >"$artifacts/crash.record.log" 2>&1 &

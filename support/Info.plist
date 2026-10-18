@@ -10,5 +10,7 @@
     <string>0.1.0</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>rec records your microphone when you pass --mic.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>rec shows your camera over the recording when you pass --camera.</string>
 </dict>
 </plist>

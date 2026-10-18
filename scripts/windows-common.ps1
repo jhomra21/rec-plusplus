@@ -34,8 +34,8 @@ function Invoke-Rec([string]$rec, [string[]]$arguments) {
     return @{ Code = $LASTEXITCODE; Text = ($lines -join "`n") }
 }
 
-function Get-Probe([string]$rec, [string]$movie, [string]$report) {
-    $run = Invoke-Rec $rec @('probe', $movie)
+function Get-Probe([string]$rec, [string]$movie, [string]$report, [string[]]$extra = @()) {
+    $run = Invoke-Rec $rec (@('probe', $movie) + $extra)
     Set-Content -Path $report -Value $run.Text
     Write-Host ($run.Text -replace "`n", ' ')
     if ($run.Code -ne 0) { throw "rec probe $movie failed: $($run.Text)" }
@@ -56,6 +56,19 @@ function Expect-Within($probe, [string]$key, [double]$low, [double]$high) {
     if (-not $value) { throw "$key is missing" }
     $number = [double]::Parse($value, [Globalization.CultureInfo]::InvariantCulture)
     if ($number -lt $low -or $number -gt $high) { throw "$key=$value is outside [$low, $high]" }
+}
+
+# A sample_N=R,G,B probe field: green, red or white, with room for encoding error.
+function Expect-Color($probe, [string]$key, [string]$color) {
+    $value = $probe[$key]
+    if (-not $value) { throw "$key is missing" }
+    $r, $g, $b = $value.Split(',') | ForEach-Object { [int]$_ }
+    $ok = switch ($color) {
+        'green' { $g -gt 120 -and $g -gt $r + 60 -and $g -gt $b + 60 }
+        'red' { $r -gt 170 -and $r -gt $g + 100 -and $r -gt $b + 100 }
+        'white' { $r -gt 190 -and $g -gt 190 -and $b -gt 190 }
+    }
+    if (-not $ok) { throw "$key=$value is not $color" }
 }
 
 function Expect-Text([string]$text, [string]$expected) {

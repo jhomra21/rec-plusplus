@@ -14,9 +14,11 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -37,19 +39,23 @@ std::atomic_bool interrupted{false};
 
 extern "C" void on_signal(int) { interrupted.store(true); }
 
-enum class Command { toggle, pause, resume, stop, save_replay };
+enum class Command { toggle, pause, resume, stop, save_replay, show, hide, flip };
+struct Posted {
+    Command command;
+    std::size_t overlay = 0;  // show, hide and flip: 0-based.
+};
 std::mutex commands_mutex;
-std::deque<Command> commands;
+std::deque<Posted> commands;
 
-void post(Command command) {
+void post(Command command, std::size_t overlay = 0) {
     std::lock_guard lock(commands_mutex);
-    commands.push_back(command);
+    commands.push_back({command, overlay});
 }
 
-bool next_command(Command& command) {
+bool next_command(Posted& posted) {
     std::lock_guard lock(commands_mutex);
     if (commands.empty()) return false;
-    command = commands.front();
+    posted = commands.front();
     commands.pop_front();
     return true;
 }
@@ -73,9 +79,10 @@ void restore_terminal() {
 }
 #endif
 
-// Keys in a terminal: p or space toggles pause, s saves the replay, q stops. Piped stdin takes
-// one command per line (pause, resume, toggle, save, stop), so scripts can drive a recording. The reader thread is
-// detached: a pending read must not keep the process alive after the movie is saved.
+// Keys in a terminal: p or space toggles pause, s saves the replay, 1 to 4 show or hide an
+// overlay, q stops. Piped stdin takes one command per line (pause, resume, toggle, save,
+// show N, hide N, stop), so scripts can drive a recording. The reader thread is detached: a
+// pending read must not keep the process alive after the movie is saved.
 void watch_input() {
     if (keyboard()) {
 #ifndef _WIN32
@@ -99,6 +106,7 @@ void watch_input() {
                 if (key == EOF) return;
                 if (key == 'p' || key == 'P' || key == ' ') post(Command::toggle);
                 else if (key == 's' || key == 'S') post(Command::save_replay);
+                else if (key >= '1' && key <= '4') post(Command::flip, static_cast<std::size_t>(key - '1'));
                 else if (key == 'q' || key == 'Q') post(Command::stop);
             }
         }).detach();
@@ -116,6 +124,9 @@ void watch_input() {
             else if (line == "resume") post(Command::resume);
             else if (line == "toggle") post(Command::toggle);
             else if (line == "save") post(Command::save_replay);
+            else if ((line.rfind("show ", 0) == 0 || line.rfind("hide ", 0) == 0) && line.size() == 6 && line[5] >= '1' &&
+                     line[5] <= '4')
+                post(line[0] == 's' ? Command::show : Command::hide, static_cast<std::size_t>(line[5] - '1'));
             else if (line == "stop") post(Command::stop);
         }
     }).detach();
@@ -146,7 +157,7 @@ void usage() {
                  "  rec devices\n"
                  "  rec windows\n"
                  "  rec record [options]\n"
-                 "  rec probe FILE\n\n"
+                 "  rec probe FILE [--sample X,Y,W,H]\n\n"
                  "Options:\n"
                  "  -o, --output FILE              Output .mp4 or .mov (default: rec.mov)\n"
                  "  --display N                    Display number from devices (default: 1)\n"
@@ -168,11 +179,17 @@ void usage() {
                  "  --stream URL                   Also stream live: rtmp[s]://host[:port]/app/stream-key\n"
                  "  --stream-bitrate KBPS          Stream video kilobits/second (default: 6000)\n"
                  "  --replay SECONDS               Keep the last 5 to 300 seconds in memory; s saves them as an MP4\n"
+                 "  --camera DEVICE[@X,Y,W,H]      Show a camera (default, or an ID or name from devices; test for a\n"
+                 "                                 synthetic one) over the capture, by default in the bottom-right corner\n"
+                 "  --image FILE[@X,Y,W,H]         Show a PNG or JPEG over the capture (default: the whole frame)\n"
+                 "                                 X,Y,W,H are fractions of the frame, e.g. 0.73,0.715,0.25,0.25\n"
                  "  --test-pattern                 Synthetic video that flashes once a second\n"
                  "  --test-tone                    Add a beep with each flash as system audio\n"
                  "  --test-mic                     Add a quiet synthetic microphone\n\n"
-                 "While recording, press p or space to pause and resume, s to save the replay, q or Ctrl-C to stop.\n"
-                 "With stdin piped, send lines: pause, resume, toggle, save, stop.\n";
+                 "While recording, press p or space to pause and resume, s to save the replay, 1 to 4 to show or\n"
+                 "hide a camera or image (in the order given), q or Ctrl-C to stop.\n"
+                 "With stdin piped, send lines: pause, resume, toggle, save, show N, hide N, stop.\n"
+                 "rec probe --sample reports the mean color of a rectangle (video pixels) once a second.\n";
 }
 
 bool integer(std::string_view s, std::uint32_t& out) {
@@ -201,6 +218,30 @@ bool region(std::string_view s, rec::Region& r) {
     if (p != end || values[0] < 0 || values[1] < 0 || values[2] < 2 || values[3] < 2) return false;
     r = {values[0], values[1], static_cast<std::uint32_t>(values[2]), static_cast<std::uint32_t>(values[3])};
     return true;
+}
+
+bool area(std::string_view s, rec::Area& a) {
+    double values[4]{};
+    std::size_t start = 0;
+    for (int i = 0; i < 4; ++i) {
+        const auto comma = s.find(',', start);
+        if ((i < 3) != (comma != std::string_view::npos)) return false;
+        if (!number(s.substr(start, i < 3 ? comma - start : std::string_view::npos), 0, 1, values[i])) return false;
+        start = comma + 1;
+    }
+    a = {values[0], values[1], values[2], values[3]};
+    return a.width >= 0.01 && a.height >= 0.01 && a.x + a.width <= 1 + 1e-6 && a.y + a.height <= 1 + 1e-6;
+}
+
+// SOURCE or SOURCE@X,Y,W,H. A path may contain @, so only a valid area after the last one counts.
+rec::Overlay overlay(rec::Overlay::Kind kind, std::string_view value, rec::Area fallback) {
+    rec::Overlay o;
+    o.kind = kind;
+    o.source = value;
+    o.area = fallback;
+    if (const auto at = value.rfind('@'); at != std::string_view::npos && area(value.substr(at + 1), o.area))
+        o.source = value.substr(0, at);
+    return o;
 }
 
 std::string lower(std::string_view s) {
@@ -280,6 +321,18 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
             if (!integer(value, o.stream_kbps) || o.stream_kbps < 500 || o.stream_kbps > 50000) {
                 error = "stream bitrate must be between 500 and 50000 kb/s"; return false;
             }
+        } else if (arg == "--camera" || arg == "--image") {
+            const bool camera = arg == "--camera";
+            if (value.empty()) { error = camera ? "--camera needs a device: default, test, or an ID or name from `rec devices`" : "--image needs a file"; return false; }
+            if (o.overlays.size() == 4) { error = "at most 4 cameras and images"; return false; }
+            const auto at = value.rfind('@');
+            rec::Area checked;
+            if (at != std::string_view::npos && !area(value.substr(at + 1), checked) &&
+                value.substr(at + 1).find(',') != std::string_view::npos) {
+                error = "the area after @ must be X,Y,WIDTH,HEIGHT as fractions of the frame, inside it"; return false;
+            }
+            o.overlays.push_back(overlay(camera ? rec::Overlay::Kind::camera : rec::Overlay::Kind::image, value,
+                                         camera ? rec::Area{0.73, 0.715, 0.25, 0.25} : rec::Area{}));
         } else if (arg == "--mic") {
             if (value.empty()) { error = "--mic needs a device: default, or an ID or name from `rec devices`"; return false; }
             o.microphone = true;
@@ -378,6 +431,10 @@ int main(int argc, char** argv) {
         if (!error.empty()) { std::cerr << error << '\n'; status = 1; }
         std::cout << "Microphones:\n";
         for (const auto& mic : microphones) std::cout << "  " << mic.name << " (id " << mic.id << ")\n";
+        auto cameras = rec::list_cameras(error);
+        if (!error.empty()) { std::cerr << error << '\n'; status = 1; }
+        std::cout << "Cameras:\n";
+        for (const auto& camera : cameras) std::cout << "  " << camera.name << " (id " << camera.id << ")\n";
         std::cout << "Default output latency: " << std::fixed << std::setprecision(1)
                   << rec::default_output_latency_ms() << " ms\n";
         return status;
@@ -394,9 +451,16 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (command == "probe") {
-        if (argc != 3) { std::cerr << "usage: rec probe FILE\n"; return 2; }
+        std::optional<rec::Region> sample;
+        if (argc == 5 && std::string_view(argv[3]) == "--sample") {
+            rec::Region r;
+            if (!region(argv[4], r)) { std::cerr << "--sample needs X,Y,WIDTH,HEIGHT in video pixels\n"; return 2; }
+            sample = r;
+        } else if (argc != 3) {
+            std::cerr << "usage: rec probe FILE [--sample X,Y,W,H]\n"; return 2;
+        }
         rec::Probe probe;
-        if (auto result = rec::probe_file(argv[2], probe); !result) {
+        if (auto result = rec::probe_file(argv[2], probe, sample); !result) {
             std::cerr << result.error << '\n'; return 1;
         }
         std::cout << "codec=" << probe.codec << "\nwidth=" << probe.width
@@ -408,6 +472,8 @@ int main(int argc, char** argv) {
                   << "\nav_sync_events=" << probe.sync_events
                   << "\nav_offset_ms=" << probe.av_offset_ms
                   << "\nav_offset_max_ms=" << probe.av_offset_max_ms << '\n';
+        for (std::size_t i = 0; i < probe.samples.size(); ++i)
+            std::cout << "sample_" << i << '=' << +probe.samples[i].r << ',' << +probe.samples[i].g << ',' << +probe.samples[i].b << '\n';
         return 0;
     }
     if (command != "record") { std::cerr << "unknown command: " << command << '\n'; return 2; }
@@ -445,10 +511,32 @@ int main(int argc, char** argv) {
         return std::max(0.0, wall.count() - recorder.stats().paused_seconds);
     };
     unsigned replays = 0;
+    std::vector<bool> visible;
+    for (const auto& o : options.overlays) visible.push_back(o.visible);
     while (!interrupted.load() && !recorder.finished()) {
-        Command command;
-        while (next_command(command)) {
+        Posted posted;
+        while (next_command(posted)) {
+            const Command command = posted.command;
             if (command == Command::stop) { interrupted.store(true); break; }
+            if (command == Command::show || command == Command::hide || command == Command::flip) {
+                if (live) std::cout << "\r\033[K";
+                const std::size_t n = posted.overlay;
+                if (n >= visible.size()) {
+                    std::cerr << "No overlay " << n + 1 << "; add one with --camera or --image\n";
+                } else {
+                    const bool show = command == Command::show || (command == Command::flip && !visible[n]);
+                    if (auto changed = recorder.set_overlay(n, show); changed) {
+                        visible[n] = show;
+                        std::cout << (show ? "Showing " : "Hiding ") << (options.overlays[n].kind == rec::Overlay::Kind::camera ? "camera " : "image ")
+                                  << n + 1 << " at " << clock_text(recorded()) << '\n';
+                    } else {
+                        std::cerr << changed.error << '\n';
+                    }
+                }
+                std::cout << std::flush;
+                shown -= std::chrono::seconds(1);
+                continue;
+            }
             if (command == Command::save_replay) {
                 if (live) std::cout << "\r\033[K";
                 if (!options.replay_seconds) {
@@ -511,6 +599,8 @@ int main(int argc, char** argv) {
     if (options.microphone || options.test_mic)
         std::cout << "Microphone buffers written " << stats.mic_written << ", dropped " << stats.mic_dropped << '\n';
     if (stats.mix_written) std::cout << "Mix buffers written " << stats.mix_written << '\n';
+    if (std::any_of(options.overlays.begin(), options.overlays.end(), [](const rec::Overlay& o) { return o.kind == rec::Overlay::Kind::camera; }))
+        std::cout << "Camera frames " << stats.camera_frames << '\n';
     if (stats.paused_seconds > 0)
         std::cout << "Paused " << std::fixed << std::setprecision(1) << stats.paused_seconds << " s (not in the movie)\n";
     if (streaming)

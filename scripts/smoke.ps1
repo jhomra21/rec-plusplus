@@ -133,6 +133,29 @@ try {
     Expect-Within $replay 'av_sync_events' 4 8
     Expect-Within $replay 'av_offset_max_ms' 0 25
 
+    # Overlays: a camera and an image drawn into every frame on the GPU; "hide 1" removes the
+    # camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
+    $png = Join-Path $PSScriptRoot 'overlay-test.png'
+    Expect-Failure 'could not open the image' @('record', '--test-pattern', '-t', '1', '--image', (Join-Path $artifacts 'missing.png'), '-o', (Join-Path $artifacts 'missing.mp4'))
+    Expect-Failure 'the area after @' @('record', '--test-pattern', '--camera', 'test@0.9,0.9,0.2,0.2')
+    $overlayPath = Join-Path $artifacts 'overlay.mp4'
+    $run = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '4', '--camera', 'test', '--image', "$png@0.05,0.05,0.2,0.2", '-o', $overlayPath)
+    Start-Sleep -Milliseconds 2500
+    Send-RecCommand $run 'hide 1'
+    $overlaid = Stop-RecProcess $run
+    Set-Content -Path (Join-Path $artifacts 'overlay.record.log') -Value $overlaid.Text
+    Write-Host $overlaid.Text
+    if ($overlaid.Code -ne 0) { throw "overlay recording failed: $($overlaid.Text)" }
+    Expect-Text $overlaid.Text 'Hiding camera 1'
+    Expect-Text $overlaid.Text 'written 120, dropped 0'
+    if (-not ($overlaid.Text -match 'Camera frames (\d+)') -or [int]$Matches[1] -lt 30) { throw 'the test camera delivered too few frames' }
+    # The camera's default area at 1080p is 1402,772 480x270; the image fits 96,54 384x216 as 384x192.
+    $camera = Get-Probe $rec $overlayPath (Join-Path $artifacts 'overlay-camera.probe') @('--sample', '1450,800,380,200')
+    Expect-Color $camera 'sample_0' 'green'
+    Expect-Color $camera 'sample_1' 'green'
+    Expect-Color $camera 'sample_3' 'white'
+    $image = Get-Probe $rec $overlayPath (Join-Path $artifacts 'overlay-image.probe') @('--sample', '150,100,250,100')
+    foreach ($second in 0..3) { Expect-Color $image "sample_$second" 'red' }
     # Crash safety: a recording killed mid-write still decodes up to its last fragment.
     $crashPath = Join-Path $artifacts 'crash.mp4'
     $run = Start-RecProcess $rec @('record', '--test-pattern', '--test-tone', '-f', '30', '-t', '0', '--codec', 'h264', '-o', $crashPath)

@@ -32,8 +32,10 @@
 
 #include "rec/rec.hpp"
 #include "core/mixer.hpp"
+#include "core/overlay.hpp"
 #include "core/pause.hpp"
 #include "core/sync.hpp"
+#include "platform/windows/overlay.hpp"
 #include "platform/windows/stream.hpp"
 
 #include <algorithm>
@@ -657,6 +659,14 @@ std::vector<AudioDevice> list_microphones(std::string& error) {
     return result;
 }
 
+std::vector<Camera> list_cameras(std::string& error) {
+    ComScope com;
+    if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) { error = "Media Foundation is unavailable"; return {}; }
+    auto result = win::cameras(error);
+    MFShutdown();
+    return result;
+}
+
 double default_output_latency_ms() noexcept {
     try { return output_latency_seconds() * 1000.0; } catch (...) { return 0; }
 }
@@ -703,10 +713,19 @@ public:
             pattern_[0] = pattern_frame(size_, false);
             pattern_[1] = pattern_frame(size_, true);
             if (!pattern_[0] || !pattern_[1]) { stop(); return {"synthetic frame allocation failed"}; }
+            if (!options_.overlays.empty())
+                if (auto created = create_pattern_device(); !created) { stop(); return created; }
             captured_.store(1);
         } else {
             if (auto opened = open_audio(); !opened) { stop(); return opened; }
             if (auto started = start_capture(); !started) { stop(); return started; }
+        }
+        if (!options_.overlays.empty()) {
+            overlays_ = std::make_unique<win::Overlays>();
+            if (auto started = overlays_->start(device_.Get(), size_.width, size_.height, options_.overlays); !started) {
+                stop();
+                return started;
+            }
         }
         if (!options_.stream_url.empty() || options_.replay_seconds) {
             if (options_.stream_kbps < 500 || options_.stream_kbps > 50000) {
@@ -782,6 +801,11 @@ public:
         }
         if (live_) live_->stop();
         if (allocator_) { allocator_->UninitializeSampleAllocator(); allocator_.Reset(); }
+        if (overlays_) {
+            camera_frames_ = overlays_->camera_frames();
+            overlays_->stop();
+            overlays_.reset();
+        }
         for (auto& slot : slots_) slot = {};
         pending_count_ = 0;
         current_ = -1;
@@ -833,6 +857,7 @@ public:
             stats.stream_bytes = live.bytes;
             stats.replay_seconds = live.replay_seconds;
         }
+        stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
         return stats;
     }
     std::string failure() const { std::lock_guard lock(mutex_); return failure_; }
@@ -841,6 +866,10 @@ public:
         seconds = 0;
         if (!live_ || !options_.replay_seconds) return {"the replay buffer is off"};
         return live_->save_replay(path, seconds);
+    }
+    Result set_overlay(std::size_t index, bool visible, const std::optional<Area>& area) {
+        if (!overlays_) return {"no overlay " + std::to_string(index + 1)};
+        return overlays_->set(index, visible, area);
     }
 
     Result pause() {
@@ -882,6 +911,45 @@ private:
             if (!device) return {error};
             audio_[kMic].capture = std::make_unique<AudioCapture>();
             if (auto opened = audio_[kMic].capture->open(device.Get(), false); !opened) return opened;
+        }
+        return {};
+    }
+
+    // The synthetic frames as NV12 textures on a default device, so overlays draw on the GPU
+    // exactly as they do over a capture. Machines without a GPU get WARP.
+    Result create_pattern_device() {
+        const D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
+        HRESULT hr = E_FAIL;
+        for (const auto type : {D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP}) {
+            for (const UINT flags : {static_cast<UINT>(D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT),
+                                     static_cast<UINT>(D3D11_CREATE_DEVICE_BGRA_SUPPORT)}) {
+                hr = D3D11CreateDevice(nullptr, type, nullptr, flags, levels, 2, D3D11_SDK_VERSION, &device_, nullptr, &context_);
+                if (SUCCEEDED(hr)) break;
+            }
+            if (SUCCEEDED(hr)) break;
+        }
+        if (FAILED(hr)) return {failed("could not create a Direct3D 11 device", hr)};
+        ComPtr<ID3D11Multithread> multithread;
+        if (SUCCEEDED(context_.As(&multithread))) multithread->SetMultithreadProtected(TRUE);
+        hr = MFCreateDXGIDeviceManager(&reset_token_, &manager_);
+        if (SUCCEEDED(hr)) hr = manager_->ResetDevice(device_.Get(), reset_token_);
+        if (FAILED(hr)) return {failed("could not share the device with Media Foundation", hr)};
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = size_.width;
+        desc.Height = size_.height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_NV12;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        for (int i = 0; i < 2; ++i) {
+            BYTE* data = nullptr;
+            if (FAILED(pattern_[i]->Lock(&data, nullptr, nullptr))) return {"synthetic frame allocation failed"};
+            const D3D11_SUBRESOURCE_DATA initial{data, size_.width, 0};
+            hr = device_->CreateTexture2D(&desc, &initial, &slots_[i].texture);
+            pattern_[i]->Unlock();
+            if (FAILED(hr)) return {failed("could not allocate video frames", hr)};
         }
         return {};
     }
@@ -1207,7 +1275,7 @@ private:
         if (FAILED(hr)) return {failed(hevc ? "the HEVC encoder cannot accept the selected settings"
                                             : "the H.264 encoder cannot accept the selected settings", hr)};
 
-        if (!options_.test_pattern) {
+        if (device_) {
             hr = MFCreateVideoSampleAllocatorEx(IID_PPV_ARGS(&allocator_));
             if (SUCCEEDED(hr)) hr = allocator_->SetDirectXManager(manager_.Get());
             ComPtr<IMFAttributes> pool;
@@ -1227,7 +1295,7 @@ private:
 
     Write write_video(std::uint64_t slot, int frame) {
         ComPtr<IMFSample> sample;
-        if (options_.test_pattern) {
+        if (!allocator_) {
             if (FAILED(MFCreateSample(&sample)) || FAILED(sample->AddBuffer(pattern_[frame].Get()))) {
                 fail("could not create a video sample");
                 return Write::failed;
@@ -1247,6 +1315,10 @@ private:
                 return Write::failed;
             }
             context_->CopySubresourceRegion(target.Get(), subresource, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
+            if (overlays_ && !overlays_->draw(context_.Get(), target.Get(), subresource)) {
+                fail("could not draw the overlays");
+                return Write::failed;
+            }
             ComPtr<IMF2DBuffer> planar;
             DWORD length = 0;
             if (SUCCEEDED(buffer.As(&planar)) && SUCCEEDED(planar->GetContiguousLength(&length)))
@@ -1485,6 +1557,8 @@ private:
     std::size_t pending_head_ = 0, pending_count_ = 0;
     int current_ = -1;
     std::array<ComPtr<IMFMediaBuffer>, 2> pattern_;
+    std::unique_ptr<win::Overlays> overlays_;
+    std::uint64_t camera_frames_ = 0;  // The count when the overlays were released.
     ComPtr<IMFVideoSampleAllocatorEx> allocator_;
 
     ComPtr<IMFSinkWriter> writer_;
@@ -1513,7 +1587,7 @@ private:
     std::atomic<std::uint64_t> captured_{0}, written_{0}, dropped_{0}, mix_written_{0};
 };
 
-Result probe_file(const std::string& path, Probe& probe) {
+Result probe_file(const std::string& path, Probe& probe, std::optional<Region> sample) {
     ComScope com;
     probe = {};
     if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) return {"Media Foundation is unavailable"};
@@ -1568,42 +1642,76 @@ Result probe_file(const std::string& path, Probe& probe) {
         hr = reader->SetCurrentMediaType(static_cast<DWORD>(video), nullptr, nv12.Get());
         if (FAILED(hr)) return {failed("could not decode video (is a decoder for this codec installed?)", hr)};
     }
+    if (sample) {
+        const auto& r = *sample;
+        if (r.x < 0 || r.y < 0 || r.width < 2 || r.height < 2 || r.x + r.width > probe.width || r.y + r.height > probe.height)
+            return {"the sample rectangle does not fit the " + std::to_string(probe.width) + "x" + std::to_string(probe.height) + " video"};
+    }
+    // Decoded NV12 rows are padded to the coded height; the chroma plane starts after it.
+    UINT32 coded_height = probe.height;
+    auto read_coded_height = [&] {
+        ComPtr<IMFMediaType> current;
+        UINT32 w = 0, h = 0;
+        if (SUCCEEDED(reader->GetCurrentMediaType(static_cast<DWORD>(video), &current)) &&
+            SUCCEEDED(MFGetAttributeSize(current.Get(), MF_MT_FRAME_SIZE, &w, &h)) && h >= probe.height)
+            coded_height = h;
+    };
+    read_coded_height();
+    LONGLONG next_sample = 0;
     core::FlashDetector flashes;
     LONGLONG previous = LLONG_MIN, end = 0;
     for (;;) {
         DWORD stream = 0, flags = 0;
         LONGLONG time = 0;
-        ComPtr<IMFSample> sample;
-        hr = reader->ReadSample(static_cast<DWORD>(video), 0, &stream, &flags, &time, &sample);
+        ComPtr<IMFSample> decoded;
+        hr = reader->ReadSample(static_cast<DWORD>(video), 0, &stream, &flags, &time, &decoded);
         if (FAILED(hr)) return {failed("video decode failed", hr)};
-        if (sample) {
+        if (flags & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED) read_coded_height();
+        if (decoded) {
             if (previous != LLONG_MIN && time <= previous)
                 return {"video timestamps are not strictly increasing: frame " + std::to_string(probe.frames) + " at " +
                         std::to_string(time / 10000) + " ms follows " + std::to_string(previous / 10000) + " ms"};
             previous = time;
             ++probe.frames;
             LONGLONG duration = 0;
-            sample->GetSampleDuration(&duration);
+            decoded->GetSampleDuration(&duration);
             end = std::max(end, time + duration);
             ComPtr<IMFMediaBuffer> buffer;
             ComPtr<IMF2DBuffer> planar;
             BYTE* scan = nullptr;
             LONG pitch = 0;
             double brightness = 0;
-            if (SUCCEEDED(sample->GetBufferByIndex(0, &buffer)) && SUCCEEDED(buffer.As(&planar)) &&
+            if (SUCCEEDED(decoded->GetBufferByIndex(0, &buffer)) && SUCCEEDED(buffer.As(&planar)) &&
                 SUCCEEDED(planar->Lock2D(&scan, &pitch))) {
                 std::uint64_t sum = 0, count = 0;
                 const auto step_x = std::max<UINT32>(1, probe.width / 64), step_y = std::max<UINT32>(1, probe.height / 36);
                 for (UINT32 y = step_y / 2; y < probe.height; y += step_y)
                     for (UINT32 x = step_x / 2; x < probe.width; x += step_x, ++count)
                         sum += scan[static_cast<std::ptrdiff_t>(y) * pitch + x];
-                planar->Unlock2D();
                 // Studio-range luma: 16 is black, 235 is white.
                 if (count) brightness = (static_cast<double>(sum) / count - 16.0) / 219.0;
+                if (sample && time >= next_sample) {
+                    const auto& r = *sample;
+                    const BYTE* chroma = scan + static_cast<std::ptrdiff_t>(coded_height) * pitch;
+                    double y_sum = 0, u_sum = 0, v_sum = 0;
+                    for (UINT32 y = 0; y < r.height; ++y)
+                        for (UINT32 x = 0; x < r.width; ++x)
+                            y_sum += scan[static_cast<std::ptrdiff_t>(r.y + y) * pitch + r.x + x];
+                    const UINT32 cw = r.width / 2, ch = r.height / 2;
+                    for (UINT32 y = 0; y < ch; ++y)
+                        for (UINT32 x = 0; x < cw; ++x) {
+                            const BYTE* uv = chroma + static_cast<std::ptrdiff_t>(r.y / 2 + y) * pitch + (r.x / 2 + x) * 2;
+                            u_sum += uv[0];
+                            v_sum += uv[1];
+                        }
+                    probe.samples.push_back(core::studio_rgb(y_sum / (static_cast<double>(r.width) * r.height),
+                                                             u_sum / std::max(1u, cw * ch), v_sum / std::max(1u, cw * ch)));
+                    next_sample = (time / kTicks + 1) * kTicks;
+                }
+                planar->Unlock2D();
             }
             flashes.feed(static_cast<double>(time) / kTicks, brightness);
-        }
-        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
+        }        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
     }
     if (!probe.frames) return {"no decoded frames"};
     probe.duration_seconds = static_cast<double>(end) / kTicks;
@@ -1680,6 +1788,9 @@ Result Recorder::save_replay(const std::string& path, double* seconds) {
     auto result = impl_->capture.save_replay(path, saved);
     if (seconds) *seconds = saved;
     return result;
+}
+Result Recorder::set_overlay(std::size_t index, bool visible, std::optional<Area> area) {
+    return impl_->capture.set_overlay(index, visible, area);
 }
 
 } // namespace rec

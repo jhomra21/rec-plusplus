@@ -26,6 +26,28 @@ struct Region {
     std::uint32_t height = 0;
 };
 
+// A rectangle in fractions of the output frame from its top-left corner; the default is
+// the whole frame.
+struct Area {
+    double x = 0;
+    double y = 0;
+    double width = 1;
+    double height = 1;
+};
+
+// A picture drawn over the capture in every frame: an image file or a camera. Overlays
+// draw in order, later ones on top.
+struct Overlay {
+    enum class Kind { image, camera };
+    Kind kind = Kind::image;
+    // image: a PNG, JPEG, BMP or GIF file. camera: "default", an ID or part of a name from
+    // list_cameras(), or "test" for a synthetic camera (green with a moving white bar).
+    std::string source;
+    // An image keeps its aspect ratio inside the area; a camera is cropped to fill it.
+    Area area;
+    bool visible = true;
+};
+
 struct Options {
     std::string output = "rec.mov";
     std::uint32_t display = 1; // 1-based index from list_displays()
@@ -55,6 +77,7 @@ struct Options {
     // Keep the last N seconds (5 to 300) of the stream encode in memory for save_replay();
     // 0 = off. Without stream_url the stream encoders run for the replay alone.
     std::uint32_t replay_seconds = 0;
+    std::vector<Overlay> overlays; // At most 4. Without any, frames are not composited.
 };
 
 struct Display {
@@ -73,6 +96,11 @@ struct Window {
 };
 
 struct AudioDevice {
+    std::string id;
+    std::string name;
+};
+
+struct Camera {
     std::string id;
     std::string name;
 };
@@ -100,6 +128,7 @@ struct Stats {
     std::uint64_t stream_dropped = 0; // Video frames the stream skipped to keep up.
     std::uint64_t stream_bytes = 0;
     double replay_seconds = 0; // Media the replay buffer holds now.
+    std::uint64_t camera_frames = 0; // Frames received from camera overlays.
 };
 
 struct Probe {
@@ -116,6 +145,9 @@ struct Probe {
     std::uint32_t sync_events = 0;
     double av_offset_ms = 0; // Mean audio minus video; positive means audio is late.
     double av_offset_max_ms = 0; // Largest absolute offset.
+    struct Color { std::uint8_t r = 0, g = 0, b = 0; };
+    // With a sample rectangle: its mean color in the first frame of each second.
+    std::vector<Color> samples;
 };
 
 struct Result {
@@ -128,9 +160,10 @@ std::vector<Display> list_displays(std::string& error);
 // Normal app windows that are on screen and can be captured, excluding rec's own.
 std::vector<Window> list_windows(std::string& error);
 std::vector<AudioDevice> list_microphones(std::string& error);
+std::vector<Camera> list_cameras(std::string& error);
 // Time between macOS mixing system audio and the default output device playing it. 0 if unknown.
 double default_output_latency_ms() noexcept;
-Result probe_file(const std::string& path, Probe& probe);
+Result probe_file(const std::string& path, Probe& probe, std::optional<Region> sample = std::nullopt);
 
 class Recorder {
 public:
@@ -154,6 +187,8 @@ public:
     // Writes the replay buffer to a new MP4 at path while recording continues: the last
     // replay_seconds, from a keyframe, so up to 2 s more. seconds receives the saved length.
     Result save_replay(const std::string& path, double* seconds = nullptr);
+    // Shows, hides or moves Options::overlays[index] from the next frame on, while recording.
+    Result set_overlay(std::size_t index, bool visible, std::optional<Area> area = std::nullopt);
 
 private:
     class Impl;
