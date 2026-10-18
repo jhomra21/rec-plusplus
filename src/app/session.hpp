@@ -63,6 +63,7 @@ struct Settings {
     std::uint32_t fps = 60;
     std::string codec = "auto";       // auto, h264, hevc.
     bool cursor = true;
+    bool clicks = false;
     bool system_audio = true;
     bool microphone = false;
     std::string microphone_device = "default";

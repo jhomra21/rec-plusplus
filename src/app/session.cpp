@@ -134,6 +134,7 @@ Settings load_settings(const std::string& path) {
             if (fps == 24 || fps == 25 || fps == 30 || fps == 50 || fps == 60 || fps == 120) s.fps = fps;
         } else if (key == "codec" && (value == "auto" || value == "h264" || value == "hevc")) s.codec = value;
         else if (key == "cursor") s.cursor = yes;
+        else if (key == "clicks") s.clicks = yes;
         else if (key == "system_audio") s.system_audio = yes;
         else if (key == "microphone") s.microphone = yes;
         else if (key == "microphone_device" && !value.empty()) s.microphone_device = value;
@@ -233,7 +234,7 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nsource=" << s.source << "\nwindow_app=" << one_line(s.window_app)
             << "\nwindow_title=" << one_line(s.window_title) << "\nregion=" << s.region
             << "\nresolution=" << s.resolution << "\nfps=" << s.fps << "\ncodec=" << s.codec
-            << "\ncursor=" << s.cursor << "\nsystem_audio=" << s.system_audio
+            << "\ncursor=" << s.cursor << "\nclicks=" << s.clicks << "\nsystem_audio=" << s.system_audio
             << "\nmicrophone=" << s.microphone << "\nmicrophone_device=" << s.microphone_device
             << "\nsystem_volume=" << s.system_volume << "\nmic_volume=" << s.mic_volume
             << "\nsystem_muted=" << s.system_muted << "\nmic_muted=" << s.mic_muted
@@ -598,6 +599,7 @@ Result capture_options(const Settings& s, bool test_pattern, Options& o, SourceI
     o.fps = s.fps;
     o.codec = s.codec == "h264" ? Codec::h264 : s.codec == "hevc" ? Codec::hevc : Codec::automatic;
     o.cursor = s.cursor;
+    o.clicks = s.clicks;
     o.system_gain_db = std::clamp(s.system_volume, kVolumeMin, kVolumeMax);
     o.mic_gain_db = std::clamp(s.mic_volume, kVolumeMin, kVolumeMax);
     o.system_muted = s.system_muted;
@@ -673,7 +675,8 @@ Result show(Recorder& recorder, const SourceIndices& indices, const Scene& scene
 // What needs a new capture for the idle preview; scenes only move what it has.
 std::string preview_key(const Settings& s, bool test_pattern) {
     std::string key = s.source + '\n' + std::to_string(s.display) + '\n' + s.window_app + '\n' + s.window_title +
-                      '\n' + s.region + '\n' + s.resolution + '\n' + (s.cursor ? "1" : "0") + (test_pattern ? "1" : "0");
+                      '\n' + s.region + '\n' + s.resolution + '\n' + (s.cursor ? "1" : "0") + (s.clicks ? "1" : "0") +
+                      (test_pattern ? "1" : "0");
     if (s.camera) key += "\ncamera " + s.camera_device;
     if (s.image) key += "\nimage " + s.image_path;
     for (const Layer& layer : s.layers)

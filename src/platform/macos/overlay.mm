@@ -8,6 +8,7 @@
 
 #include "platform/macos/overlay.hpp"
 #include "platform/macos/screen.h"
+#include "core/clicks.hpp"
 #include "core/overlay.hpp"
 
 #include <algorithm>
@@ -365,7 +366,7 @@ public:
 
     ~Impl() { stop(); }
 
-    Result start(std::uint32_t width, std::uint32_t height, const Options& options) {
+    Result start(std::uint32_t width, std::uint32_t height, const Options& options, const ClickSource& clicks) {
         if (auto error = core::check_overlays(options.overlays); !error.empty()) return {error};
         if (!core::valid(options.screen_area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
         width_ = width;
@@ -387,6 +388,24 @@ public:
         };
         if (CVPixelBufferPoolCreate(kCFAllocatorDefault, nullptr, (__bridge CFDictionaryRef)attributes, &pool_) != kCVReturnSuccess)
             return {"could not allocate composited frames"};
+        if (options.clicks) {
+            click_source_ = clicks;
+            for (int right = 0; right < 2; ++right) {
+                const auto pixels = core::click_mark_pixels(kMarkSize, right);
+                click_marks_[right] = [CIImage imageWithBitmapData:[NSData dataWithBytes:pixels.data() length:pixels.size()]
+                                                       bytesPerRow:kMarkSize * 4
+                                                              size:CGSizeMake(kMarkSize, kMarkSize)
+                                                            format:kCIFormatBGRA8
+                                                        colorSpace:nil];
+                if (!click_marks_[right]) return {"could not make the click marks"};
+            }
+            clicks_ = std::make_unique<core::Clicks>();
+            for (int right = 0; right < 2; ++right) {
+                presses_[right] = CGEventSourceCounterForEventType(kCGEventSourceStateCombinedSessionState,
+                                                                   right ? kCGEventRightMouseDown : kCGEventLeftMouseDown);
+                held_[right] = false;
+            }
+        }
         for (const auto& overlay : options.overlays) {
             Layer layer;
             layer.overlay = overlay;
@@ -434,8 +453,17 @@ public:
             screen_area = screen_area_;
             screen_visible = screen_visible_;
         }
+        std::array<core::ClickMark, core::Clicks::kMax> marks;
+        std::size_t mark_count = 0;
+        if (clicks_) {
+            // The presses are stamped when this reads them, about one frame late, so marks are
+            // drawn for now rather than for the frame's slot, which is 40 ms behind.
+            const auto now = core::Clicks::Clock::now();
+            read_clicks(now);
+            if (screen_visible) mark_count = clicks_->marks(now, click_area(), width_, height_, screen_area, marks);
+        }
         const bool whole = screen_visible && screen_area.x <= 0 && screen_area.y <= 0 && screen_area.width >= 1 && screen_area.height >= 1;
-        if (whole && !count) return CVPixelBufferRetain(base);
+        if (whole && !count && !mark_count) return CVPixelBufferRetain(base);
         @autoreleasepool {
             CVPixelBufferRef out = nullptr;
             if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool_, &out) != kCVReturnSuccess) return nullptr;
@@ -449,6 +477,7 @@ public:
                 if (screen_visible)
                     result = [placed([CIImage imageWithCVPixelBuffer:base], Overlay::Kind::image, screen_area) imageByCompositingOverImage:result];
             }
+            for (std::size_t i = 0; i < mark_count; ++i) result = [mark(marks[i]) imageByCompositingOverImage:result];
             for (std::size_t i = 0; i < count; ++i) {
                 Layer& layer = *jobs[i].layer;
                 CIImage* picture = layer.image;
@@ -504,6 +533,74 @@ public:
     }
 
 private:
+    static constexpr std::uint32_t kMarkSize = 128;
+
+    // Turns new mouse-down counts and released buttons into presses and releases at the
+    // pointer. A press and release between two reads still counts.
+    void read_clicks(core::Clicks::Clock::time_point now) {
+        CGEventRef event = CGEventCreate(nullptr);
+        const CGPoint at = event ? CGEventGetLocation(event) : CGPointZero;
+        if (event) CFRelease(event);
+        for (int right = 0; right < 2; ++right) {
+            const auto presses = CGEventSourceCounterForEventType(kCGEventSourceStateCombinedSessionState,
+                                                                  right ? kCGEventRightMouseDown : kCGEventLeftMouseDown);
+            const bool down = CGEventSourceButtonState(kCGEventSourceStateCombinedSessionState,
+                                                       right ? kCGMouseButtonRight : kCGMouseButtonLeft);
+            if (presses != presses_[right]) {
+                presses_[right] = presses;
+                clicks_->press(now, at.x, at.y, right);
+                held_[right] = true;
+            }
+            if (held_[right] && !down) {
+                clicks_->release(now, right);
+                held_[right] = false;
+            }
+        }
+    }
+
+    // The main capture's rectangle on the desktop in points, looked up again every half
+    // second or so, since a window moves.
+    core::DesktopRect click_area() {
+        if (click_lookups_++ % 16) return click_rect_;
+        CGRect bounds = CGRectNull;
+        if (click_source_.window) {
+            // The array holds window IDs as pointer-sized values.
+            const void* ids[] = {reinterpret_cast<const void*>(static_cast<std::uintptr_t>(click_source_.window))};
+            CFArrayRef wanted = CFArrayCreate(nullptr, ids, 1, nullptr);
+            CFArrayRef info = wanted ? CGWindowListCreateDescriptionFromArray(wanted) : nullptr;
+            if (info && CFArrayGetCount(info) > 0) {
+                auto window = static_cast<CFDictionaryRef>(CFArrayGetValueAtIndex(info, 0));
+                auto rect = static_cast<CFDictionaryRef>(CFDictionaryGetValue(window, kCGWindowBounds));
+                if (!rect || !CGRectMakeWithDictionaryRepresentation(rect, &bounds)) bounds = CGRectNull;
+            }
+            if (info) CFRelease(info);
+            if (wanted) CFRelease(wanted);
+        } else if (click_source_.display) {
+            bounds = CGDisplayBounds(click_source_.display);
+            if (const auto& r = click_source_.region; r && bounds.size.width > 0) {
+                // The region is in the display's pixels.
+                auto mode = CGDisplayCopyDisplayMode(click_source_.display);
+                const double scale = mode ? CGDisplayModeGetPixelWidth(mode) / bounds.size.width : 1.0;
+                if (mode) CGDisplayModeRelease(mode);
+                bounds = CGRectMake(bounds.origin.x + r->x / scale, bounds.origin.y + r->y / scale, r->width / scale, r->height / scale);
+            }
+        }
+        if (CGRectIsNull(bounds)) return click_rect_ = {};
+        return click_rect_ = {bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height};
+    }
+
+    // A click mark centered on its point, faded to its opacity. Core Image's origin is at the
+    // bottom left.
+    CIImage* mark(const core::ClickMark& m) const {
+        const double scale = m.diameter / kMarkSize;
+        CIImage* picture = [click_marks_[m.right ? 1 : 0]
+            imageByApplyingTransform:CGAffineTransformMake(scale, 0, 0, scale, m.x - m.diameter / 2, height_ - m.y - m.diameter / 2)];
+        if (m.alpha >= 1) return picture;
+        // CIColorMatrix works on unpremultiplied color, so scaling alpha alone fades the mark.
+        return [picture imageByApplyingFilter:@"CIColorMatrix"
+                          withInputParameters:@{@"inputAVector": [CIVector vectorWithX:0 Y:0 Z:0 W:m.alpha]}];
+    }
+
     // A picture scaled and cropped into its area, as core::place lays it out.
     CIImage* placed(CIImage* picture, Overlay::Kind kind, const Area& area) const {
         const CGRect extent = picture.extent;
@@ -528,12 +625,19 @@ private:
     std::vector<Layer> layers_;
     Area screen_area_;
     bool screen_visible_ = true;
+    std::unique_ptr<core::Clicks> clicks_;
+    ClickSource click_source_;
+    core::DesktopRect click_rect_;
+    std::uint64_t click_lookups_ = 0;
+    std::uint32_t presses_[2] = {};
+    bool held_[2] = {};
+    CIImage* __strong click_marks_[2] = {nil, nil};
 };
 
 Overlays::Overlays() : impl_(std::make_unique<Impl>()) {}
 Overlays::~Overlays() = default;
-Result Overlays::start(std::uint32_t width, std::uint32_t height, const Options& options) {
-    return impl_->start(width, height, options);
+Result Overlays::start(std::uint32_t width, std::uint32_t height, const Options& options, const ClickSource& clicks) {
+    return impl_->start(width, height, options, clicks);
 }
 CVPixelBufferRef Overlays::compose(CVPixelBufferRef base) { return impl_->compose(base); }
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }

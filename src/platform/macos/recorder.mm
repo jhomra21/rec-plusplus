@@ -647,11 +647,16 @@ public:
                 if (!pattern_[0] || !pattern_[1]) { stop(); return {"synthetic frame allocation failed"}; }
                 captured_.store(1);
                 active_.store(true);
+                // Marks land as if display options_.display were captured.
+                CGDirectDisplayID displays[16];
+                std::uint32_t found = 0;
+                if (CGGetActiveDisplayList(16, displays, &found) == kCGErrorSuccess && options_.display >= 1 && options_.display <= found)
+                    click_source_.display = options_.display == 1 ? CGMainDisplayID() : displays[options_.display - 1];
             }
             // The compositor always runs, so the screen can move and layers can show while
             // recording. Without anything to draw it passes frames through.
             overlays_ = std::make_unique<mac::Overlays>();
-            if (auto started = overlays_->start(size_.width, size_.height, options_); !started) {
+            if (auto started = overlays_->start(size_.width, size_.height, options_, click_source_); !started) {
                 overlays_.reset();
                 if (layered()) { stop(); return started; }
             }
@@ -883,7 +888,8 @@ private:
     // Frames need composing: overlays, or the main capture moved or hidden.
     bool layered() const {
         const auto& a = options_.screen_area;
-        return !options_.overlays.empty() || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 || a.height < 1;
+        return !options_.overlays.empty() || options_.clicks || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 ||
+               a.height < 1;
     }
 
     void fail(std::string text) {
@@ -921,6 +927,7 @@ private:
             size_ = output_size(options_, static_cast<std::uint32_t>(std::lround(window.frame.size.width * scale)),
                                 static_cast<std::uint32_t>(std::lround(window.frame.size.height * scale)));
             filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
+            click_source_.window = window.windowID;
         } else {
             if (options_.display == 0 || options_.display > content.displays.count)
                 return {"display index not found; run `rec devices`"};
@@ -940,6 +947,7 @@ private:
                 size_ = output_size(options_, r.width, r.height);
             }
             filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+            click_source_ = {display.displayID, 0, options_.region};
         }
         if (size_.width < 2 || size_.height < 2) return {"the capture has no usable pixel dimensions"};
         SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];
@@ -1445,6 +1453,7 @@ private:
     std::atomic<std::uint64_t> captured_{0}, written_{0}, dropped_{0}, mix_written_{0};
     std::unique_ptr<mac::LiveStream> live_;  // Kept after stop() for its counters.
     std::unique_ptr<mac::Overlays> overlays_;
+    mac::ClickSource click_source_;
     std::uint64_t camera_frames_ = 0;  // The count when the overlays were released.
     VTPixelTransferSessionRef transfer_ = nullptr;  // Preview scaling, on the recording thread.
     CVPixelBufferRef preview_pixels_ = nullptr;

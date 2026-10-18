@@ -27,7 +27,7 @@ within() {
   awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v != "" && v + 0 >= lo && v + 0 <= hi) }' \
     || { echo "$1 is outside [$2, $3]" >&2; exit 1; }
 }
-# color KEY FILE green|red|white|black: a sample_N=R,G,B probe field, with room for encoding error.
+# color KEY FILE green|red|white|black|yellow: a sample_N=R,G,B probe field, with room for encoding error.
 color() {
   awk -F= -v key="$1" -v want="$3" '$1 == key {
       split($2, c, ",")
@@ -36,6 +36,7 @@ color() {
       if (want == "red") ok = c[1] > 170 && c[1] > c[2] + 100 && c[1] > c[3] + 100
       if (want == "white") ok = c[1] > 190 && c[2] > 190 && c[3] > 190
       if (want == "black") ok = c[1] < 40 && c[2] < 40 && c[3] < 40
+      if (want == "yellow") ok = c[1] > 190 && c[2] > 150 && c[3] < c[1] - 70
       print key "=" $2
     }
     END { exit !(found && ok) }' "$2" || { echo "$1 is not $3" >&2; exit 1; }
@@ -163,7 +164,28 @@ else
   color sample_4 "$artifacts/scene-screen-before.probe" black
   color sample_0 "$artifacts/scene-screen-after.probe" black
   color sample_4 "$artifacts/scene-screen-after.probe" white
-  # Volume and mute act on the program audio. A lone tone, its only track, starts muted and is
+  # Click marks: the left button held at a quarter of the main display's width and height,
+  # 1 to 3.5 s after the recording starts. The mark lands where that point falls in the test
+  # pattern's frame. Posting mouse events needs Accessibility permission; without it the
+  # check is skipped.
+  swiftc -O -o "$tmp/mouse" "$root/scripts/mouse.swift"
+  "$tmp/mouse" 0.25 0.25 1.0 2.5 >"$artifacts/mouse.log" &
+  clicker=$!
+  "$rec" record --test-pattern --clicks -r 1080p -f 30 -t 6 -o "$artifacts/clicks.mov" | tee "$artifacts/clicks.record.log"
+  wait "$clicker"
+  grep -q 'written 180, dropped 0' "$artifacts/clicks.record.log"
+  if grep -qx untrusted "$artifacts/mouse.log"; then
+    echo "click marks: not checked, this runner may not post mouse events"
+  else
+    size="$(value size "$artifacts/mouse.log")"
+    sample="$(awk -v w="${size%x*}" -v h="${size#*x}" 'BEGIN {
+      s = 1920 / w; if (1080 / h < s) s = 1080 / h
+      printf "%d,%d,12,12", (1920 - w * s) / 2 + 0.25 * w * s - 6, (1080 - h * s) / 2 + 0.25 * h * s - 6 }')"
+    "$rec" probe "$artifacts/clicks.mov" --sample "$sample" | tee "$artifacts/clicks.probe"
+    # Over the white flash: half yellow, then the pattern once the mark has faded.
+    color sample_2 "$artifacts/clicks.probe" yellow
+    color sample_5 "$artifacts/clicks.probe" white
+  fi  # Volume and mute act on the program audio. A lone tone, its only track, starts muted and is
   # unmuted 3.5 s in: no beep with the first flash. Mixed with the mic, the tone is turned down
   # 6 dB, then muted 2.5 s in: the mix has no beeps after that.
   { sleep 3.5; echo 'unmute system'; sleep 5; } |

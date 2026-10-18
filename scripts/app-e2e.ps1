@@ -484,6 +484,8 @@ try {
     if (@($beeps | Where-Object { $_ -gt 2.7 -and $_ -lt 4.5 }).Count -ne 0) { throw "beeps while muted: $($muted['beeps'])" }
     if (@($beeps | Where-Object { $_ -gt 4.7 }).Count -lt 1) { throw "no beeps after unmuting: $($muted['beeps'])" }
     Write-Host "7. volume and mute: beeps at $($muted['beeps'])"
+    # Click marks follow the box into the settings (the engine's marks are checked by the smoke run).
+    Set-Check $ui 'Show clicks' $true
     # 8. Closing when idle quits and saves settings, without the key.
     [AppWindow]::PostMessage($handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     if (-not $ui.Process.WaitForExit(15000)) { throw 'the app did not quit' }
@@ -502,6 +504,7 @@ try {
     Expect-Text $settings 'scene.0.camera=1,'
     if ($settings.Contains('layer.0.kind')) { throw 'the removed display layer is still in the settings' }
     Expect-Text $settings 'image=0'
+    Expect-Text $settings 'clicks=1'
     Expect-Text $settings 'preview=1'
     Expect-Text $settings 'system_volume=-6'
     Expect-Text $settings 'system_muted=0'

@@ -192,7 +192,40 @@ try {
     Expect-Color $before 'sample_4' 'black'
     Expect-Color $after 'sample_0' 'black'
     Expect-Color $after 'sample_4' 'white'
-    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
+    # Click marks: the left button held over a test window, then the right one elsewhere. The
+    # marks land where those points of display 1 fall in the test pattern's frame.
+    $display = (& $rec devices) | Select-String '^\s+1: .*\((\d+)x(\d+), id' | Select-Object -First 1
+    if (-not $display) { throw 'display 1 is not listed' }
+    $screenW = [double]$display.Matches[0].Groups[1].Value
+    $screenH = [double]$display.Matches[0].Groups[2].Value
+    $fit = [Math]::Min(1920 / $screenW, 1080 / $screenH)
+    $frameAt = { param($x, $y) "$([int]((1920 - $screenW * $fit) / 2 + $x * $fit) - 6),$([int]((1080 - $screenH * $fit) / 2 + $y * $fit) - 6),12,12" }
+    $pad = Show-ColorWindow 'rec-click-pad' 100 100 800 600 'Gray' $tmp
+    try {
+        $clicksPath = Join-Path $artifacts 'clicks.mp4'
+        $run = Start-RecProcess $rec @('record', '--test-pattern', '--clicks', '-r', '1080p', '-f', '30', '-t', '9', '-o', $clicksPath)
+        Start-Sleep -Milliseconds 1000
+        Set-MouseButton 300 300 'left' $true
+        Start-Sleep -Milliseconds 2500
+        Set-MouseButton 300 300 'left' $false
+        Start-Sleep -Milliseconds 1000
+        Set-MouseButton 700 500 'right' $true
+        Start-Sleep -Milliseconds 3000
+        Set-MouseButton 700 500 'right' $false
+        $clicked = Stop-RecProcess $run
+    } finally {
+        Stop-Process -Id $pad.Id -Force -ErrorAction SilentlyContinue
+    }
+    Set-Content -Path (Join-Path $artifacts 'clicks.record.log') -Value $clicked.Text
+    if ($clicked.Code -ne 0) { throw "click recording failed: $($clicked.Text)" }
+    Expect-Text $clicked.Text 'written 270, dropped 0'
+    $left = Get-Probe $rec $clicksPath (Join-Path $artifacts 'clicks-left.probe') @('--sample', (& $frameAt 300 300))
+    $right = Get-Probe $rec $clicksPath (Join-Path $artifacts 'clicks-right.probe') @('--sample', (& $frameAt 700 500))
+    # Over the white flash: half yellow, then the pattern once the mark has faded.
+    Expect-Color $left 'sample_2' 'yellow'
+    Expect-Color $left 'sample_8' 'white'
+    Expect-Color $right 'sample_2' 'white'
+    Expect-Color $right 'sample_6' 'light blue'    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
     # is unmuted 3.5 s in: no beep with the first flash. Mixed with the mic, the tone is turned
     # down 6 dB, then muted 2.5 s in: the mix has no beeps after that.
     $unmutePath = Join-Path $artifacts 'unmute.mp4'

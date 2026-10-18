@@ -225,6 +225,7 @@ void usage() {
                  "  --codec NAME                   auto, h264, hevc\n"
                  "  --bitrate MBPS                 Target megabits/second (0 = automatic)\n"
                  "  --no-cursor                    Do not record the cursor\n"
+                 "  --clicks                       Mark mouse presses: yellow left, blue right\n"
                  "  --system-audio                 Record system audio\n"
                  "  --mic DEVICE                   Record a microphone: default, or an ID or name from devices\n"
                  "  --audio-tracks LAYOUT          both (mix + stems), mix, or stems (default: both)\n"
@@ -339,6 +340,7 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
     for (int i = 2; i < argc; ++i) {
         std::string_view arg(argv[i]);
         if (arg == "--no-cursor") { o.cursor = false; continue; }
+        if (arg == "--clicks") { o.clicks = true; continue; }
         if (arg == "--test-pattern") { o.test_pattern = true; continue; }
         if (arg == "--test-tone") { o.test_tone = true; continue; }
         if (arg == "--test-mic") { o.test_mic = true; continue; }

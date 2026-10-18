@@ -12,11 +12,21 @@
 
 namespace rec::mac {
 
+// Where the main capture is on the desktop, for click marks: a display (or a region of it in
+// its pixels) or a window.
+struct ClickSource {
+    std::uint32_t display = 0;  // CGDirectDisplayID
+    std::uint32_t window = 0;   // CGWindowID
+    std::optional<Region> region;
+};
+
 // Composites each frame with Core Image on the GPU, into IOSurface-backed NV12 buffers
-// from a small pool: the main capture in its area, then the image, camera, display and
-// window overlays. The recording thread calls compose(); set() and set_screen() may come
-// from any thread. Each camera and each display or window stream delivers on its own queue
-// and only replaces its newest retained frame.
+// from a small pool: the main capture in its area, click marks, then the image, camera,
+// display and window overlays. The recording thread calls compose(); set() and
+// set_screen() may come from any thread. Each camera and each display or window stream
+// delivers on its own queue and only replaces its newest retained frame. With
+// options.clicks, compose() reads the system's mouse-down counters, so a press shorter than
+// a frame still shows and no input permission is needed.
 class Overlays {
 public:
     Overlays();
@@ -24,8 +34,8 @@ public:
     Overlays(const Overlays&) = delete;
     Overlays& operator=(const Overlays&) = delete;
 
-    // Uses options.overlays, screen_area, screen_visible, cursor and fps.
-    Result start(std::uint32_t width, std::uint32_t height, const Options& options);
+    // Uses options.overlays, screen_area, screen_visible, cursor, clicks and fps.
+    Result start(std::uint32_t width, std::uint32_t height, const Options& options, const ClickSource& clicks = {});
     // A retained frame to encode: base in its area with the visible overlays on top, or
     // base itself (retained) when it fills the frame and no overlay is visible. Null when
     // drawing failed.

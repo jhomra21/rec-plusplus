@@ -8,6 +8,7 @@
 #include <unknwn.h>
 
 #include <d3d11_4.h>
+#include <dwmapi.h>
 #include <d3dcompiler.h>
 #include <mfapi.h>
 #include <mferror.h>
@@ -25,9 +26,11 @@
 
 #include "platform/windows/displays.hpp"
 #include "platform/windows/overlay.hpp"
+#include "core/clicks.hpp"
 #include "core/overlay.hpp"
 
 #include <algorithm>
+#include <future>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -53,7 +56,8 @@ cbuffer Placement : register(b0) {
     float4 dest;    // left, top, right, bottom in clip space
     float4 source;  // u0, v0, u1, v1
     float opaque;   // 1: the texture has no alpha (a camera)
-    float3 unused;
+    float fade;     // Opacity of a picture with alpha.
+    float2 unused;
 };
 struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; };
 Vertex vs(uint id : SV_VertexID) {
@@ -67,7 +71,7 @@ Texture2D picture : register(t0);
 SamplerState smooth : register(s0);
 float4 color(float2 uv) {
     float4 c = picture.Sample(smooth, uv);
-    return opaque > 0.5 ? float4(c.rgb, 1) : c;
+    return opaque > 0.5 ? float4(c.rgb, 1) : c * fade;
 }
 static const float3 kLuma = float3(0.2126, 0.7152, 0.0722);
 float4 luma(Vertex v) : SV_Target {
@@ -90,7 +94,8 @@ struct Constants {
     float dest[4];
     float source[4];
     float opaque;
-    float unused[3];
+    float fade;
+    float unused[2];
 };
 
 std::string failed(const char* what, HRESULT hr) {
@@ -520,6 +525,62 @@ std::vector<Monitor> monitors() {
     return list;
 }
 
+thread_local core::Clicks* t_clicks = nullptr;
+
+LRESULT CALLBACK mouse_hook(int code, WPARAM message, LPARAM data) {
+    if (code == HC_ACTION && t_clicks) {
+        const auto& m = *reinterpret_cast<const MSLLHOOKSTRUCT*>(data);
+        const auto now = core::Clicks::Clock::now();
+        switch (message) {
+        case WM_LBUTTONDOWN: t_clicks->press(now, m.pt.x, m.pt.y, false); break;
+        case WM_RBUTTONDOWN: t_clicks->press(now, m.pt.x, m.pt.y, true); break;
+        case WM_LBUTTONUP: t_clicks->release(now, false); break;
+        case WM_RBUTTONUP: t_clicks->release(now, true); break;
+        default: break;
+        }
+    }
+    return CallNextHookEx(nullptr, code, message, data);
+}
+
+// Records mouse presses into clicks. A low-level hook runs on the thread that set it, which
+// must pump messages; the hook only stores the press, so it never holds up the pointer.
+class ClickWatch {
+public:
+    ~ClickWatch() { stop(); }
+
+    Result start(core::Clicks& clicks) {
+        std::promise<DWORD> ready;
+        auto started = ready.get_future();
+        thread_ = std::thread([&clicks, &ready] {
+            MSG message;
+            PeekMessageW(&message, nullptr, WM_USER, WM_USER, PM_NOREMOVE);  // Creates the queue.
+            t_clicks = &clicks;
+            HHOOK hook = SetWindowsHookExW(WH_MOUSE_LL, mouse_hook, GetModuleHandleW(nullptr), 0);
+            ready.set_value(hook ? GetCurrentThreadId() : 0);
+            if (!hook) return;
+            while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+            }
+            UnhookWindowsHookEx(hook);
+        });
+        thread_id_ = started.get();
+        if (!thread_id_) {
+            thread_.join();
+            return {"could not watch mouse clicks"};
+        }
+        return {};
+    }
+
+    void stop() {
+        if (!thread_.joinable()) return;
+        PostThreadMessageW(thread_id_, WM_QUIT, 0, 0);
+        thread_.join();
+    }
+
+private:
+    std::thread thread_;
+    DWORD thread_id_ = 0;
+};
+
 class Overlays::Impl {
 public:
     struct Layer {
@@ -543,7 +604,8 @@ public:
         ComPtr<ID3D11ShaderResourceView> luma, chroma;
     };
 
-    Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const Options& options) {
+    Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const Options& options,
+                 const ClickSource& clicks) {
         if (auto error = core::check_overlays(options.overlays); !error.empty()) return {error};
         if (!core::valid(options.screen_area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
         device_ = device;
@@ -555,6 +617,29 @@ public:
         if (FAILED(device->CheckFormatSupport(DXGI_FORMAT_NV12, &support)) || !(support & D3D11_FORMAT_SUPPORT_RENDER_TARGET))
             return {"this graphics driver cannot draw overlays into video frames"};
         if (auto made = create_pipeline(); !made) return made;
+        if (options.clicks) {
+            click_source_ = clicks;
+            for (int right = 0; right < 2; ++right) {
+                constexpr UINT size = 128;
+                const auto pixels = core::click_mark_pixels(size, right);
+                D3D11_TEXTURE2D_DESC desc{};
+                desc.Width = desc.Height = size;
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                desc.SampleDesc.Count = 1;
+                desc.Usage = D3D11_USAGE_IMMUTABLE;
+                desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                const D3D11_SUBRESOURCE_DATA data{pixels.data(), size * 4, 0};
+                ComPtr<ID3D11Texture2D> texture;
+                HRESULT hr = device->CreateTexture2D(&desc, &data, &texture);
+                if (SUCCEEDED(hr)) hr = device->CreateShaderResourceView(texture.Get(), nullptr, &click_marks_[right]);
+                if (FAILED(hr)) return {failed("could not make the click marks", hr)};
+            }
+            clicks_ = std::make_unique<core::Clicks>();
+            watch_ = std::make_unique<ClickWatch>();
+            if (auto watching = watch_->start(*clicks_); !watching) return watching;
+        }
         for (const auto& overlay : options.overlays) {
             Layer layer;
             layer.overlay = overlay;
@@ -631,7 +716,8 @@ public:
         return total;
     }
 
-    bool draw(ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame, unsigned subresource) {
+    bool draw(ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame, unsigned subresource,
+              std::chrono::steady_clock::time_point at) {
         struct Job { Layer* layer; Area area; };
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
@@ -644,9 +730,11 @@ public:
             screen_area = screen_area_;
             screen_visible = screen_visible_;
         }
+        std::array<core::ClickMark, core::Clicks::kMax> marks;
+        const std::size_t mark_count = clicks_ && screen_visible ? clicks_->marks(at, click_area(), width_, height_, screen_area, marks) : 0;
         const bool whole = screen_visible && screen_area.x <= 0 && screen_area.y <= 0 && screen_area.width >= 1 && screen_area.height >= 1;
         if (whole) context->CopySubresourceRegion(frame, subresource, 0, 0, 0, screen, 0, nullptr);
-        if (whole && !count) return true;
+        if (whole && !count && !mark_count) return true;
         ComPtr<ID3D11Multithread> multithread;
         context->QueryInterface(IID_PPV_ARGS(&multithread));
         if (multithread) multithread->Enter();
@@ -660,6 +748,7 @@ public:
                 context->ClearRenderTargetView(target->chroma.Get(), neutral);
                 if (screen_visible) drawn = draw_screen(context, *target, screen, screen_area);
             }
+            for (std::size_t i = 0; i < mark_count && drawn; ++i) draw_mark(context, *target, marks[i]);
             for (std::size_t i = 0; i < count && drawn; ++i) draw_layer(context, *target, *jobs[i].layer, jobs[i].area);
             end(context);
         }
@@ -668,6 +757,7 @@ public:
     }
 
     void stop() {
+        watch_.reset();
         std::lock_guard lock(mutex_);
         for (auto& layer : layers_) {
             if (layer.camera) layer.camera->stop();
@@ -713,12 +803,13 @@ private:
 
     // One picture into both planes of the frame.
     void quad(ID3D11DeviceContext* context, Target& target, const core::Placement& p, const double (&uv)[4], bool opaque,
-              ID3D11PixelShader* luma, ID3D11PixelShader* chroma) {
+              ID3D11PixelShader* luma, ID3D11PixelShader* chroma, double fade = 1) {
         const Constants constants{
             {static_cast<float>(2 * p.left / width_ - 1), static_cast<float>(1 - 2 * p.top / height_),
              static_cast<float>(2 * p.right / width_ - 1), static_cast<float>(1 - 2 * p.bottom / height_)},
             {static_cast<float>(uv[0]), static_cast<float>(uv[1]), static_cast<float>(uv[2]), static_cast<float>(uv[3])},
             opaque ? 1.0f : 0.0f,
+            static_cast<float>(fade),
             {}};
         context->UpdateSubresource(constants_.Get(), 0, nullptr, &constants, 0, 0);
         const D3D11_VIEWPORT full{0, 0, static_cast<float>(width_), static_cast<float>(height_), 0, 1};
@@ -743,6 +834,37 @@ private:
         const double uv[4] = {p.u0, p.v0, p.u1, p.v1};
         quad(context, target, p, uv, true, screen_luma_.Get(), screen_chroma_.Get());
         return true;
+    }
+
+    void draw_mark(ID3D11DeviceContext* context, Target& target, const core::ClickMark& mark) {
+        const double r = mark.diameter / 2, uv[4] = {0, 0, 1, 1};
+        const core::Placement p{mark.x - r, mark.y - r, mark.x + r, mark.y + r};
+        context->PSSetShaderResources(0, 1, click_marks_[mark.right ? 1 : 0].GetAddressOf());
+        quad(context, target, p, uv, false, luma_.Get(), chroma_.Get(), mark.alpha);
+    }
+
+    // The main capture's rectangle on the desktop in physical pixels, looked up again every
+    // half second or so, since a window moves.
+    core::DesktopRect click_area() {
+        if (click_lookups_++ % 16) return click_rect_;
+        const auto previous = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        RECT bounds{};
+        bool found = false;
+        if (auto* window = static_cast<HWND>(click_source_.window)) {
+            found = SUCCEEDED(DwmGetWindowAttribute(window, DWMWA_EXTENDED_FRAME_BOUNDS, &bounds, sizeof bounds)) ||
+                    GetWindowRect(window, &bounds);
+        } else if (auto* monitor = static_cast<HMONITOR>(click_source_.monitor)) {
+            MONITORINFO info{sizeof info};
+            found = GetMonitorInfoW(monitor, &info);
+            bounds = info.rcMonitor;
+        }
+        if (previous) SetThreadDpiAwarenessContext(previous);
+        if (!found) return click_rect_ = {};
+        click_rect_ = {static_cast<double>(bounds.left), static_cast<double>(bounds.top),
+                       static_cast<double>(bounds.right - bounds.left), static_cast<double>(bounds.bottom - bounds.top)};
+        if (const auto& r = click_source_.region)
+            click_rect_ = {click_rect_.x + r->x, click_rect_.y + r->y, static_cast<double>(r->width), static_cast<double>(r->height)};
+        return click_rect_;
     }
 
     void draw_layer(ID3D11DeviceContext* context, Target& target, Layer& layer, const Area& area) {
@@ -931,15 +1053,23 @@ private:
     bool screen_visible_ = true;
     std::vector<Target> targets_;
     std::vector<Planes> planes_;
+    std::unique_ptr<core::Clicks> clicks_;
+    std::unique_ptr<ClickWatch> watch_;
+    ClickSource click_source_;
+    core::DesktopRect click_rect_;
+    std::uint64_t click_lookups_ = 0;
+    ComPtr<ID3D11ShaderResourceView> click_marks_[2];
 };
 
 Overlays::Overlays() : impl_(std::make_unique<Impl>()) {}
 Overlays::~Overlays() { impl_->stop(); }
-Result Overlays::start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const Options& options) {
-    return impl_->start(device, width, height, options);
+Result Overlays::start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const Options& options,
+                       const ClickSource& clicks) {
+    return impl_->start(device, width, height, options, clicks);
 }
-bool Overlays::draw(ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame, unsigned subresource) {
-    return impl_->draw(context, screen, frame, subresource);
+bool Overlays::draw(ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame, unsigned subresource,
+                    std::chrono::steady_clock::time_point at) {
+    return impl_->draw(context, screen, frame, subresource, at);
 }
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }
 Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { return impl_->set_screen(visible, area); }

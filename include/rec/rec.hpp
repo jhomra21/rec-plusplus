@@ -64,6 +64,9 @@ struct Options {
     std::uint32_t bitrate_mbps = 0; // 0 = selected from resolution
     Codec codec = Codec::automatic;
     bool cursor = true;
+    // Mark mouse presses on the main capture: a circle at the pointer, yellow for the left
+    // button and blue for the right, that fades out after release.
+    bool clicks = false;
     bool test_pattern = false; // Synthetic flashing frame, for hardware-encoder E2E without screen permission.
     bool test_tone = false; // Synthetic beep as system audio, once a second with the flash (requires test_pattern).
     bool test_mic = false; // Synthetic quiet microphone source (requires test_pattern).

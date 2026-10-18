@@ -263,7 +263,7 @@ struct PreviewHit {
     NSSlider *_systemVolume, *_micVolume;
     NSTextField *_systemVolumeText, *_micVolumeText;
     NSButton *_systemMute, *_micMute;
-    NSButton *_record, *_pause, *_saveReplay, *_replay, *_systemAudio, *_microphone, *_cursor, *_stream, *_changeFolder, *_openFolder, *_showLast;
+    NSButton *_record, *_pause, *_saveReplay, *_replay, *_systemAudio, *_microphone, *_cursor, *_clicks, *_stream, *_changeFolder, *_openFolder, *_showLast;
     NSButton *_camera, *_image, *_chooseImage, *_showPreview;
     NSButton *_newScene, *_deleteScene, *_sourceShown, *_addDisplay, *_addWindow, *_removeSource;
     NSTextField* _sceneName;
@@ -674,6 +674,8 @@ struct PreviewHit {
     NSGridView* grid = [NSGridView gridViewWithViews:cells];
     grid.rowSpacing = 8;
     grid.columnSpacing = 10;
+    // A grid taller than its rows spreads them apart.
+    [grid setContentHuggingPriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationVertical];
     [grid columnAtIndex:0].width = 130;
     [grid columnAtIndex:1].xPlacement = NSGridCellPlacementFill;
     for (NSInteger i = 0; i < grid.numberOfRows; ++i) {
@@ -787,7 +789,8 @@ struct PreviewHit {
     _microphone = [self check:@"Microphone"];
     _micDevice = [self popup:@"Microphone device"];
     _cursor = [self check:@"Show cursor"];
-    NSGridView* capture = [self grid:@[@[label(@"Source"), _source], @[_systemAudio], @[_microphone, _micDevice], @[_cursor]]];
+    _clicks = [self check:@"Show clicks"];
+    NSGridView* capture = [self grid:@[@[label(@"Source"), _source], @[_systemAudio], @[_microphone, _micDevice], @[_cursor, _clicks]]];
 
     _resolution = [self popup:@"Resolution"];
     for (const auto& choice : kResolutions) [_resolution addItemWithTitle:ns(choice.label)];
@@ -833,7 +836,7 @@ struct PreviewHit {
     imageRow.distribution = NSStackViewDistributionFill;
     NSGridView* camera = [self grid:@[@[_camera, _cameraDevice], @[label(@"Position"), _corner], @[label(@"Size"), _cameraSize],
                                       @[_image, imageRow]]];
-    [camera columnAtIndex:0].width = 100;
+    [camera columnAtIndex:0].width = 120;
 
     // The scenes and the sources they arrange.
     _scene = [self popup:@"Scene"];
@@ -889,6 +892,8 @@ struct PreviewHit {
         stack.orientation = NSUserInterfaceLayoutOrientationVertical;
         stack.alignment = NSLayoutAttributeLeading;
         stack.spacing = 8;
+        // Side by side, the shorter column would otherwise stretch to the taller one's height.
+        [stack setHuggingPriority:NSLayoutPriorityDefaultHigh forOrientation:NSLayoutConstraintOrientationVertical];
         for (NSView* view in views) [view.widthAnchor constraintEqualToConstant:width].active = YES;
         return stack;
     };
@@ -899,7 +904,7 @@ struct PreviewHit {
     top.spacing = 30;
     NSStackView* leftColumn = column(left, 440);
     NSStackView* rightColumn = column(right, 440);
-    NSStackView* scenesColumn = column(third, 300);
+    NSStackView* scenesColumn = column(third, 330);
     for (NSView* view in @[capture, quality]) [leftColumn setCustomSpacing:18 afterView:view];
     for (NSView* view in @[live]) [rightColumn setCustomSpacing:18 afterView:view];
     [scenesColumn setCustomSpacing:18 afterView:sourceButtons];
@@ -915,7 +920,8 @@ struct PreviewHit {
     stack.alignment = NSLayoutAttributeTop;
     stack.spacing = 30;
     stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
-    stack.translatesAutoresizingMaskIntoConstraints = NO;    NSView* content = _window.contentView;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    NSView* content = _window.contentView;
     [content addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
         [stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
@@ -931,6 +937,7 @@ struct PreviewHit {
     _systemAudio.state = s.system_audio ? NSControlStateValueOn : NSControlStateValueOff;
     _microphone.state = s.microphone ? NSControlStateValueOn : NSControlStateValueOff;
     _cursor.state = s.cursor ? NSControlStateValueOn : NSControlStateValueOff;
+    _clicks.state = s.clicks ? NSControlStateValueOn : NSControlStateValueOff;
     [_resolution selectItemAtIndex:choice_index(kResolutions, s.resolution)];
     const auto rate = std::find(kFrameRates.begin(), kFrameRates.end(), s.fps);
     [_fps selectItemAtIndex:rate == kFrameRates.end() ? 4 : rate - kFrameRates.begin()];
@@ -1036,6 +1043,7 @@ struct PreviewHit {
     const NSInteger mic = _micDevice.indexOfSelectedItem;
     s.microphone_device = mic > 0 && mic <= static_cast<NSInteger>(_microphones.size()) ? _microphones[mic - 1].id : "default";
     s.cursor = _cursor.state == NSControlStateValueOn;
+    s.clicks = _clicks.state == NSControlStateValueOn;
     const auto at = [](NSPopUpButton* popup) { return static_cast<std::size_t>(std::max<NSInteger>(0, popup.indexOfSelectedItem)); };
     s.resolution = kResolutions[at(_resolution)].value;
     s.fps = kFrameRates[at(_fps)];
@@ -1643,7 +1651,7 @@ struct PreviewHit {
     _pause.enabled = active;
     _saveReplay.enabled = active && s.replay;
     const bool editable = s.state == State::idle;
-    for (NSControl* control in @[_source, _systemAudio, _microphone, _cursor, _resolution, _fps, _codec, _format,
+    for (NSControl* control in @[_source, _systemAudio, _microphone, _cursor, _clicks, _resolution, _fps, _codec, _format,
                                  _stream, _service, _server, _key, _bitrate, _replay, _replayLength, _changeFolder])
         control.enabled = editable;
     _micDevice.enabled = editable && _microphone.state == NSControlStateValueOn;
@@ -1790,7 +1798,7 @@ struct PreviewHit {
                                      self->_newScene, self->_deleteScene, self->_sceneName, self->_sourcesTable,
                                      self->_sourceShown, self->_addDisplay, self->_addWindow, self->_removeSource,
                                      self->_image, self->_imageFile, self->_chooseImage, self->_source, self->_systemAudio, self->_microphone,
-                                     self->_micDevice, self->_cursor, self->_resolution, self->_fps, self->_codec,
+                                     self->_micDevice, self->_cursor, self->_clicks, self->_resolution, self->_fps, self->_codec,
                                      self->_format, self->_stream, self->_service, self->_server, self->_key,
                                      self->_bitrate, self->_changeFolder, self->_openFolder, self->_showLast,
                                      self->_systemMeter, self->_micMeter, self->_systemVolume, self->_micVolume,

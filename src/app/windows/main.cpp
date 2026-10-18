@@ -48,7 +48,7 @@ enum Control : int {
     kStatus = 100, kDetail, kLive, kSystemLabel, kSystemMeter, kSystemVolume, kSystemVolumeText, kSystemMute,
     kMicLabel, kMicMeter, kMicVolume, kMicVolumeText, kMicMute,
     kRecord, kPause, kSaveReplay,
-    kCaptureHeader, kSourceLabel, kSource, kSystemAudio, kMicrophone, kMicDevice, kCursor,
+    kCaptureHeader, kSourceLabel, kSource, kSystemAudio, kMicrophone, kMicDevice, kCursor, kClicks,
     kQualityHeader, kResolutionLabel, kResolution, kFpsLabel, kFps, kCodecLabel, kCodec, kFormatLabel, kFormat,
     kStreamHeader, kStream, kServiceLabel, kService, kServerLabel, kServer, kKeyLabel, kKey, kBitrateLabel, kBitrate,
     kReplayHeader, kReplay, kReplayLength,
@@ -743,6 +743,7 @@ private:
         check(kMicrophone, L"&Microphone");
         HWND mic = combo(kMicDevice);
         check(kCursor, L"Show &cursor");
+        check(kClicks, L"Show c&licks");
 
         label(kQualityHeader, L"Quality");
         label(kResolutionLabel, L"&Resolution");
@@ -907,7 +908,9 @@ private:
         pair(kSourceLabel, kSource, row);
         line(kSystemAudio, px(22));
         beside(kMicrophone, kMicDevice);
-        line(kCursor, px(22));
+        place(kCursor, x, y, label_width - gap, px(22));
+        place(kClicks, x + label_width, y, width - label_width, px(22));
+        y += px(22) + gap;
 
         header(kQualityHeader);
         pair(kResolutionLabel, kResolution, row);
@@ -1015,6 +1018,7 @@ private:
         show_volume(rec::AudioInput::system);
         show_volume(rec::AudioInput::microphone);
         set_check(kCursor, s.cursor);
+        set_check(kClicks, s.clicks);
         select(kResolution, choice_index(kResolutions, s.resolution));
         select(kFps, static_cast<int>(std::find(kFrameRates.begin(), kFrameRates.end(), s.fps) - kFrameRates.begin()) % static_cast<int>(kFrameRates.size()));
         select(kCodec, choice_index(kCodecs, s.codec));
@@ -1183,6 +1187,7 @@ private:
         const int mic = selected(kMicDevice);
         s.microphone_device = mic > 0 && mic <= static_cast<int>(microphones_.size()) ? microphones_[mic - 1].id : "default";
         s.cursor = checked(kCursor);
+        s.clicks = checked(kClicks);
         const auto at = [this](int id) { return static_cast<std::size_t>(std::max(0, selected(id))); };
         s.resolution = kResolutions[at(kResolution)].value;
         s.fps = kFrameRates[at(kFps)];
@@ -1735,7 +1740,7 @@ private:
         EnableWindow(get(kPause), active);
         EnableWindow(get(kSaveReplay), active && s.replay);
         const bool editable = s.state == State::idle;
-        for (int id : {kSource, kSystemAudio, kMicrophone, kCursor, kResolution, kFps, kCodec, kFormat, kStream,
+        for (int id : {kSource, kSystemAudio, kMicrophone, kCursor, kClicks, kResolution, kFps, kCodec, kFormat, kStream,
                        kService, kKey, kBitrate, kReplay, kReplayLength, kChangeFolder})
             EnableWindow(get(id), editable);
         EnableWindow(get(kMicDevice), editable && checked(kMicrophone));

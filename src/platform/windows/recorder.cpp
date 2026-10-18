@@ -696,6 +696,9 @@ public:
             if (!pattern_[0] || !pattern_[1]) { stop(); return {"synthetic frame allocation failed"}; }
             if (layered() || options_.preview_width)
                 if (auto created = create_pattern_device(); !created) { stop(); return created; }
+            // Marks land as if display options_.display were captured.
+            if (const auto list = monitors(); options_.display >= 1 && options_.display <= list.size())
+                click_source_.monitor = list[options_.display - 1].handle;
             captured_.store(1);
         } else {
             if (auto opened = open_audio(); !opened) { stop(); return opened; }
@@ -705,7 +708,7 @@ public:
         // while recording. A driver that cannot draw into NV12 still records a plain capture.
         if (device_) {
             overlays_ = std::make_unique<win::Overlays>();
-            if (auto started = overlays_->start(device_.Get(), size_.width, size_.height, options_); !started) {
+            if (auto started = overlays_->start(device_.Get(), size_.width, size_.height, options_, click_source_); !started) {
                 overlays_.reset();
                 if (layered()) { stop(); return started; }
             }
@@ -913,7 +916,8 @@ private:
     // Frames need composing: overlays, or the main capture moved or hidden.
     bool layered() const {
         const auto& a = options_.screen_area;
-        return !options_.overlays.empty() || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 || a.height < 1;
+        return !options_.overlays.empty() || options_.clicks || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 ||
+               a.height < 1;
     }
 
     void fail(std::string text) {
@@ -1005,6 +1009,7 @@ private:
             if (options_.display == 0 || options_.display > list.size()) return {"display index not found; run `rec devices`"};
             monitor = list[options_.display - 1].handle;
         }
+        click_source_ = {window ? nullptr : monitor, window, window ? std::nullopt : options_.region};
 
         // Capture, scale, and encode on the GPU that scans out the monitor, so frames never
         // cross adapters on hybrid systems.
@@ -1326,7 +1331,7 @@ private:
 
     // The frame as encoded: the slot composed with the layers, or the slot as is.
     bool compose(int frame, ID3D11Texture2D* target, unsigned subresource) {
-        if (overlays_) return overlays_->draw(context_.Get(), slots_[frame].texture.Get(), target, subresource);
+        if (overlays_) return overlays_->draw(context_.Get(), slots_[frame].texture.Get(), target, subresource, shown_at_);
         context_->CopySubresourceRegion(target, subresource, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
         return true;
     }
@@ -1549,7 +1554,8 @@ private:
                     continue;
                 }
                 due = *host;
-                tick = begin_ + nanoseconds((due - origin_) * 100) + delay;
+                shown_at_ = begin_ + nanoseconds((due - origin_) * 100);
+                tick = shown_at_ + delay;
                 const auto now = steady_clock::now();
                 if (now >= tick) break;
                 std::this_thread::sleep_until(std::min(tick, now + milliseconds(10)));
@@ -1626,6 +1632,8 @@ private:
     int current_ = -1;
     std::array<ComPtr<IMFMediaBuffer>, 2> pattern_;
     std::unique_ptr<win::Overlays> overlays_;
+    win::ClickSource click_source_;
+    std::chrono::steady_clock::time_point shown_at_;  // The host instant of the slot being drawn.
     std::uint64_t camera_frames_ = 0;  // The count when the overlays were released.
     std::unique_ptr<win::FramePreview> previewer_;
     ComPtr<ID3D11Texture2D> composed_;  // The frame as drawn, in preview-only mode.

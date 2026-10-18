@@ -69,8 +69,32 @@ function Expect-Color($probe, [string]$key, [string]$color) {
         'white' { $r -gt 190 -and $g -gt 190 -and $b -gt 190 }
         'blue' { $b -gt 170 -and $b -gt $r + 100 -and $b -gt $g + 100 }
         'black' { $r -lt 40 -and $g -lt 40 -and $b -lt 40 }
+        'yellow' { $r -gt 190 -and $g -gt 150 -and $b -lt $r - 70 }
+        'light blue' { $b -gt 190 -and $b -gt $r + 70 }
     }
     if (-not $ok) { throw "$key=$value is not $color" }
+}
+
+# Presses or releases a mouse button at x,y in physical pixels of the desktop, as a user would.
+function Set-MouseButton([int]$x, [int]$y, [string]$button, [bool]$down) {
+    if (-not ('Native.Mouse' -as [type])) {
+        Add-Type -Name Mouse -Namespace Native -MemberDefinition @'
+[DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
+[DllImport("user32.dll")] public static extern bool GetPhysicalCursorPos(out System.Drawing.Point point);
+'@ -ReferencedAssemblies System.Drawing
+    }
+    $previous = [Native.Mouse]::SetThreadDpiAwarenessContext([IntPtr]-4)  # Per-monitor aware v2.
+    [Native.Mouse]::SetCursorPos($x, $y) | Out-Null
+    $at = New-Object System.Drawing.Point
+    [Native.Mouse]::GetPhysicalCursorPos([ref]$at) | Out-Null
+    [Native.Mouse]::SetThreadDpiAwarenessContext($previous) | Out-Null
+    if ([Math]::Abs($at.X - $x) -gt 4 -or [Math]::Abs($at.Y - $y) -gt 4) {
+        throw "the pointer is at $($at.X),$($at.Y), not $x,$y; another program moved it"
+    }
+    $flag = if ($button -eq 'right') { if ($down) { 0x8 } else { 0x10 } } else { if ($down) { 0x2 } else { 0x4 } }
+    [Native.Mouse]::mouse_event($flag, 0, 0, 0, [UIntPtr]::Zero)
 }
 
 # A borderless, topmost window of one color at x,y in physical pixels of the main display,
