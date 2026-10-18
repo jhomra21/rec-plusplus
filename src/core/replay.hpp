@@ -19,9 +19,10 @@ public:
 
     void video(std::uint32_t ms, bool key, bool header, const Bytes& body);
     void audio(std::uint32_t ms, bool header, const Bytes& body);
-    // The AAC encoder's leading frames. Audio timestamps already account for them; a saved
-    // file declares them in its edit list, as AVFoundation trims that much from AAC tracks
-    // whose edit list does not.
+    // The AAC encoder's leading frames. Audio timestamps already account for them, but a
+    // saved clip starts its audio at least this much before the video and skips it in a
+    // single edit, the layout AVAssetWriter uses: AVFoundation trims this much from AAC
+    // tracks that do not, and it misreads an AAC track that starts with an empty edit.
     void set_priming(std::uint32_t frames);
 
     // Writes the buffered window to path (which must not exist). Empty on success; seconds is
@@ -43,7 +44,7 @@ private:
     Bytes avc_config_, aac_config_;  // AVCDecoderConfigurationRecord, AudioSpecificConfig.
     std::deque<Packet> video_, audio_;
     std::size_t bytes_ = 0;
-    std::uint32_t priming_ = 0;
+    std::uint32_t priming_ms_ = 0;
 };
 
 } // namespace rec::core
