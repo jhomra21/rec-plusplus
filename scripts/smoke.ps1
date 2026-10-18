@@ -114,6 +114,25 @@ try {
     Expect-Within $pause 'av_sync_events' 3 3
     Expect-Within $pause 'av_offset_max_ms' 0 20
 
+    # Replay: "save" writes the last 5 s (from a keyframe) to an MP4 while the recording continues.
+    Expect-Failure 'replay must be between' @('record', '--test-pattern', '--replay', '2')
+    $replayPath = Join-Path $artifacts 'replay.mp4'
+    $run = Start-RecProcess $rec @('record', '--test-pattern', '--test-tone', '-f', '30', '-t', '10', '--replay', '5', '-o', $replayPath)
+    Start-Sleep -Milliseconds 8000
+    Send-RecCommand $run 'save'
+    $replayed = Stop-RecProcess $run
+    Set-Content -Path (Join-Path $artifacts 'replay.record.log') -Value $replayed.Text
+    Write-Host $replayed.Text
+    if ($replayed.Code -ne 0) { throw "replay recording failed: $($replayed.Text)" }
+    Expect-Text $replayed.Text 'Saved replay'
+    Expect-Text $replayed.Text 'written 300, dropped 0'
+    $replay = Get-Probe $rec (Join-Path $artifacts 'replay-replay-1.mp4') (Join-Path $artifacts 'replay-clip.probe')
+    Expect-Field $replay 'codec' 'h264'
+    Expect-Within $replay 'frames' 150 215
+    Expect-Within $replay 'audio_duration' 4.8 7.2
+    Expect-Within $replay 'av_sync_events' 4 8
+    Expect-Within $replay 'av_offset_max_ms' 0 25
+
     # Crash safety: a recording killed mid-write still decodes up to its last fragment.
     $crashPath = Join-Path $artifacts 'crash.mp4'
     $run = Start-RecProcess $rec @('record', '--test-pattern', '--test-tone', '-f', '30', '-t', '0', '--codec', 'h264', '-o', $crashPath)

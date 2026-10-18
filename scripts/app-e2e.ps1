@@ -8,9 +8,10 @@
 #   2. Start and stop with the global hotkey Ctrl+Alt+R.
 #   3. Go live to a local MediaMTX server while recording; the server's copy decodes.
 #   4. Closing the window while recording keeps recording; the next stop saves the movie.
-#   5. Settings persist without the stream key, which Credential Manager holds.
-#   6. Quit Rec from the notification-area menu while recording saves the movie, then exits.
-#   7. Logging off while recording saves the movie before WM_ENDSESSION returns.
+#   5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
+#   6. Settings persist without the stream key, which Credential Manager holds.
+#   7. Quit Rec from the notification-area menu while recording saves the movie, then exits.
+#   8. Logging off while recording saves the movie before WM_ENDSESSION returns.
 param([string]$Rec, [string]$App, [string]$Artifacts)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
@@ -198,7 +199,37 @@ try {
     $hidden = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-hidden.probe')
     Expect-Within $hidden 'duration' 1.5 3.5
 
-    # 5. Closing when idle quits and saves settings, without the key.
+    # 5. Replay buffer: save the last seconds mid-recording, then keep recording.
+    [AppWindow]::SetForegroundWindow($ui.Window) | Out-Null
+    Set-Check $ui 'Keep the last' $true
+    Press $ui 'Start Recording'
+    Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    Start-Sleep -Seconds 5
+    Press $ui 'Save Replay'
+    $deadline = (Get-Date).AddSeconds(5)
+    while (-not (Text-Of $ui 101).StartsWith('Saved replay')) {
+        if ((Get-Date) -gt $deadline) { throw "Save Replay: $(Text-Of $ui 101)" }
+        Start-Sleep -Milliseconds 100
+    }
+    Start-Sleep -Seconds 1
+    # Show Last Recording must reveal the clip until the recording itself is saved.
+    $last = (Get-Content (Join-Path $appHome 'settings.conf') | Where-Object { $_ -like 'last_recording=*' }) -replace '^last_recording=', ''
+    if ((Split-Path -Leaf $last) -notlike 'replay-*.mp4') { throw "after Save Replay the last recording is $last" }
+    Press $ui 'Stop Recording'
+    Wait-Status $ui 'Ready to record' | Out-Null
+    $clip = Get-ChildItem $folder -Filter 'replay-*.mp4' | Select-Object -First 1
+    if (-not $clip) { throw 'Save Replay wrote no file' }
+    Copy-Item $clip.FullName (Join-Path $Artifacts 'app-replay.mp4')
+    $replay = Get-Probe $Rec $clip.FullName (Join-Path $Artifacts 'app-replay.probe')
+    Expect-Field $replay 'codec' 'h264'
+    Expect-Within $replay 'duration' 3 6
+    Expect-Within $replay 'av_sync_events' 2 6
+    Expect-Within $replay 'av_offset_max_ms' 0 25
+    $full = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-replay-recording.probe')
+    Expect-Within $full 'duration' 5 7.5
+    Write-Host "5. replay: $($replay['frames']) frames ($($replay['duration']) s), $($replay['av_sync_events']) pairs, worst $($replay['av_offset_max_ms']) ms"
+
+    # 6. Closing when idle quits and saves settings, without the key.
     [AppWindow]::PostMessage($handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     if (-not $ui.Process.WaitForExit(15000)) { throw 'the app did not quit' }
     $settings = Get-Content -Raw (Join-Path $appHome 'settings.conf')
@@ -207,9 +238,10 @@ try {
     Expect-Text $settings 'destination=custom'
     Expect-Text $settings 'stream_kbps=3000'
     Expect-Text $settings 'last_recording='
+    Expect-Text $settings 'replay=1'
     if ($settings.Contains('appkey')) { throw 'the stream key was written to the settings file' }
 
-    # 6. Quit from the notification-area menu while recording: the app saves the movie, then exits.
+    # 7. Quit from the notification-area menu while recording: the app saves the movie, then exits.
     $before = @(Get-ChildItem $folder -Filter '*.mp4').Count
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
@@ -222,9 +254,9 @@ try {
     $quit = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-quit.probe')
     Expect-Within $quit 'duration' 1.5 3.5
     Expect-Within $quit 'av_offset_max_ms' 0 20
-    Write-Host "6. quit while recording: $($quit['frames']) frames"
+    Write-Host "7. quit while recording: $($quit['frames']) frames"
 
-    # 7. Log off while recording: the movie is complete when WM_ENDSESSION returns, after which
+    # 8. Log off while recording: the movie is complete when WM_ENDSESSION returns, after which
     # Windows may end the process at any moment.
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
@@ -240,7 +272,7 @@ try {
     $ended = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-logoff.probe')
     Expect-Within $ended 'duration' 1.5 3.5
     Expect-Within $ended 'av_offset_max_ms' 0 20
-    Write-Host "7. log off while recording: $($ended['frames']) frames"
+    Write-Host "8. log off while recording: $($ended['frames']) frames"
     Write-Host 'app e2e passed'
 } finally {
     if ($ui -and -not $ui.Process.HasExited) { $ui.Process.Kill() }

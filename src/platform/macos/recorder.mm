@@ -501,8 +501,10 @@ public:
     Result start() {
         @autoreleasepool {
             if (active_) return {"already recording"};
-            if (!options_.stream_url.empty() && (options_.stream_kbps < 500 || options_.stream_kbps > 50000))
+            if ((!options_.stream_url.empty() || options_.replay_seconds) && (options_.stream_kbps < 500 || options_.stream_kbps > 50000))
                 return {"stream bitrate must be between 500 and 50000 kb/s"};
+            if (options_.replay_seconds && (options_.replay_seconds < 5 || options_.replay_seconds > 300))
+                return {"replay must be between 5 and 300 seconds"};
             if (options_.fps == 0 || options_.fps > 120) return {"invalid frame rate"};
             if ((options_.test_tone || options_.test_mic) && !options_.test_pattern)
                 return {"synthetic audio needs the test pattern"};
@@ -539,15 +541,19 @@ public:
                 captured_.store(1);
                 active_.store(true);
             }
-            if (!options_.stream_url.empty()) {
+            if (!options_.stream_url.empty() || options_.replay_seconds) {
                 mac::LiveSettings live;
                 live.url = options_.stream_url;
+                live.replay_seconds = options_.replay_seconds;
                 live.width = size_.width;
                 live.height = size_.height;
                 live.fps = options_.fps;
                 live.video_kbps = options_.stream_kbps;
                 live_ = std::make_unique<mac::LiveStream>();
-                if (auto started = live_->start(live); !started) { stop(); return {"stream: " + started.error}; }
+                if (auto started = live_->start(live); !started) {
+                    stop();
+                    return {(options_.stream_url.empty() ? "replay: " : "stream: ") + started.error};
+                }
             }
             auto ready = create_writer();
             if (!ready) { stop(); return ready; }
@@ -682,11 +688,17 @@ public:
             stats.stream_frames = live.frames;
             stats.stream_dropped = live.dropped;
             stats.stream_bytes = live.bytes;
+            stats.replay_seconds = live.replay_seconds;
         }
         return stats;
     }
     std::string failure() const { std::lock_guard lock(mutex_); return failure_; }
     std::string stream_failure() const { return live_ ? live_->failure() : std::string(); }
+    Result save_replay(const std::string& path, double& seconds) const {
+        seconds = 0;
+        if (!live_ || !options_.replay_seconds) return {"the replay buffer is off"};
+        return live_->save_replay(path, seconds);
+    }
 
     Result pause() {
         if (!recording_.load() || finished_.load()) return {"not recording"};
@@ -764,7 +776,7 @@ private:
         config.minimumFrameInterval = CMTimeMake(9, static_cast<int32_t>(options_.fps * 10));
         // Up to three pending frames plus the current one and the encoder's in-flight surfaces;
         // a live stream's queue and encoder hold a few more.
-        config.queueDepth = options_.stream_url.empty() ? 6 : 8;
+        config.queueDepth = options_.stream_url.empty() && !options_.replay_seconds ? 6 : 8;
         config.showsCursor = options_.cursor;
         config.capturesAudio = options_.system_audio;
         config.sampleRate = kMixRate;
@@ -1367,5 +1379,11 @@ bool Recorder::finished() const noexcept { return impl_->capture.finished(); }
 Stats Recorder::stats() const noexcept { return impl_->capture.stats(); }
 std::string Recorder::failure() const { return impl_->capture.failure(); }
 std::string Recorder::stream_failure() const { return impl_->capture.stream_failure(); }
+Result Recorder::save_replay(const std::string& path, double* seconds) {
+    double saved = 0;
+    auto result = impl_->capture.save_replay(path, saved);
+    if (seconds) *seconds = saved;
+    return result;
+}
 
 } // namespace rec

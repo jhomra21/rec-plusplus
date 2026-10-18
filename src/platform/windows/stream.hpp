@@ -13,7 +13,8 @@ struct IMFDXGIDeviceManager;
 namespace rec::win {
 
 struct LiveSettings {
-    std::string url;
+    std::string url;                          // Empty: encode only for the replay buffer.
+    std::uint32_t replay_seconds = 0;
     std::uint32_t width = 0, height = 0, fps = 60;
     std::uint32_t video_kbps = 6000, audio_kbps = 160;
     IMFDXGIDeviceManager* manager = nullptr;  // Set to use the hardware encoder on that device.
@@ -26,10 +27,11 @@ struct LiveCounters {
     std::uint32_t reconnects = 0;
     bool hardware = false;
     std::uint64_t frames = 0, dropped = 0, bytes = 0;
+    double replay_seconds = 0;
 };
 
-// A second, independent encode of the recording timeline for RTMP: its own H.264 and AAC
-// encoders and bitrate, so the file keeps its quality. video() and audio() only queue (four
+// A second, independent encode of the recording timeline for RTMP and the replay buffer: its
+// own H.264 and AAC encoders and bitrate, so the file keeps its quality. video() and audio() only queue (four
 // frames, two seconds of audio, oldest dropped on overflow); one thread encodes and packages.
 class LiveStream {
 public:
@@ -45,6 +47,7 @@ public:
     void stop();  // Drains the encoders, sends what is queued (up to 3 s), disconnects.
     LiveCounters counters() const;
     std::string failure() const;
+    Result save_replay(const std::string& path, double& seconds) const;
 
 private:
     class Impl;

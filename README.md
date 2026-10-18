@@ -62,6 +62,16 @@ While recording in a terminal, press `p` or space to pause and resume, and `q` o
 
 Recordings are written in fragments, so a crash, kill or power loss keeps everything up to the last fragment (about 1 s on macOS). On macOS a normal stop turns the fragments into a regular movie. On Windows, H.264 files stay fragmented MP4, which players read normally. Windows HEVC uses the regular MP4 writer and is **not** crash-safe, because Windows' fragmented MP4 writer rejects HEVC.
 
+### Replay buffer
+
+`--replay SECONDS` (5 to 300) keeps the last seconds of the recording in memory, already encoded, so you can save a clip of something that just happened without stopping. Press `s` in the terminal, or send `save` on stdin, and rec writes `NAME-replay-1.mp4` (then `-2`, and so on) beside the recording:
+
+```sh
+./build/rec record --system-audio --replay 30 -t 0 -o session.mov
+```
+
+The buffer holds H.264 at `--stream-bitrate` and 160 kb/s AAC, the same encode a live stream uses, so replay and streaming together cost one extra encoder, not two. A clip starts at a keyframe (one every 2 s), so it can be up to 2 s longer than asked for; the buffer is also capped at about 50 Mb/s times its length. Paused time is not in the buffer.
+
 ### Live streaming
 
 ```sh
@@ -88,7 +98,8 @@ Both platforms have a small native app on the same recording core: `Rec.app` on 
 
 - One window shows the status and recorded time, level meters for system audio and the microphone, Start/Stop and Pause/Resume. Below are the source (a display, a window or a region), audio, cursor, resolution, frame rate, codec, format, live stream and recordings folder settings, which lock while recording.
 - ⇧⌘R on macOS, Ctrl+Alt+R on Windows, starts and stops recording from any app. If another app already owns the shortcut, the window says so.
-- A menu bar item (macOS) or notification-area icon (Windows) shows when Rec is recording and offers Start/Stop, Pause, Show Rec, Open Recordings Folder and Quit.
+- With "Keep the last" on (15 s to 5 minutes), Save Replay, ⌥⇧⌘R on macOS or Ctrl+Alt+Shift+R on Windows saves that much of the recording so far as `replay-YYYY-MM-DD-HHMMSS.mp4` in the recordings folder, while the recording goes on.
+- A menu bar item (macOS) or notification-area icon (Windows) shows when Rec is recording and offers Start/Stop, Pause, Save Replay, Show Rec, Open Recordings Folder and Quit.
 - Closing the window never stops a recording; the menu bar item or tray icon brings the window back. On macOS Rec stays in the menu bar; on Windows closing the window while idle quits. Quitting during a recording saves the movie first.
 - Go live while recording to Twitch, YouTube or a custom RTMP server. The stream key is kept per server URL in the login keychain (macOS) or Credential Manager (Windows), never in the settings file.
 - Settings are saved in `~/Library/Application Support/rec/settings.conf` or `%APPDATA%\rec\settings.conf`. Recordings go to Movies or Videos as `rec-YYYY-MM-DD-HHMMSS.mov` (`.mp4` on Windows). Show Last Recording reveals the newest one in Finder or Explorer.
@@ -99,11 +110,11 @@ By default `Rec.app` is signed ad-hoc, and macOS ties its Screen Recording permi
 cmake -S . -B build -DREC_SIGN_IDENTITY="Apple Development: Your Name (TEAMID)"
 ```
 
-The smoke scripts run an app end-to-end check on both platforms. `REC_APP_HOME` puts settings and recordings in one folder and `REC_APP_TEST_PATTERN=1` records the synthetic flash/beep source. The check records with both audio sources and pauses, starts and stops with the hotkey, goes live to MediaMTX, closes the window mid-recording and stops from the menu bar or tray, and checks the saved settings. On Windows it also quits from the tray menu and logs off (`WM_QUERYENDSESSION`/`WM_ENDSESSION`) during a recording and checks that each movie was saved. Every movie and what the server received are probed for frames and sync. On Windows, `scripts/app-e2e.ps1` drives the window through Microsoft Active Accessibility, as a screen reader would: each control is found by its accessible name and operated with its default action, and the hotkey is typed. Driving another app on macOS needs Accessibility permission, which CI runners lack. There, `scripts/app-e2e.sh` starts the app with `REC_APP_SELF_TEST`, and the app presses its own controls and menu bar menu, checks that each control has an accessible name, delivers the hotkey event to its registered handler, and quits during a recording.
+The smoke scripts run an app end-to-end check on both platforms. `REC_APP_HOME` puts settings and recordings in one folder and `REC_APP_TEST_PATTERN=1` records the synthetic flash/beep source. The check records with both audio sources and pauses, starts and stops with the hotkey, goes live to MediaMTX, saves a replay while recording, closes the window mid-recording and stops from the menu bar or tray, and checks the saved settings. On Windows it also quits from the tray menu and logs off (`WM_QUERYENDSESSION`/`WM_ENDSESSION`) during a recording and checks that each movie was saved. Every movie and what the server received are probed for frames and sync. On Windows, `scripts/app-e2e.ps1` drives the window through Microsoft Active Accessibility, as a screen reader would: each control is found by its accessible name and operated with its default action, and the hotkey is typed. Driving another app on macOS needs Accessibility permission, which CI runners lack. There, `scripts/app-e2e.sh` starts the app with `REC_APP_SELF_TEST`, and the app presses its own controls and menu bar menu, checks that each control has an accessible name, delivers the hotkey event to its registered handler, and quits during a recording.
 
 The Windows app's manifest has no Windows 10 compatibility entry, on purpose. The Media Foundation MP4 sink stamps the Windows version the process sees into each file. Media Foundation's reader returned out-of-order video timestamps from the third keyframe on in fragmented files stamped 10.0.26200, and read the same files correctly once restamped 6.2 (the version a process without the entry sees). A host app that embeds `rec::Recorder` and declares Windows 10 compatibility would hit the same problem.
 
-The app has no live preview, camera, scenes, replay buffer or launch at login yet. On a Mac the app recorded the real display with system audio and a microphone, paused, saved, revealed the file, started from ⇧⌘R in another app, kept recording with its window closed, stopped from the menu bar and saved on ⌘Q ([evidence](docs/evidence/2026-10-17-app-mac/README.md)). That run found that sound already playing when recording started was recorded as silence on macOS. After the fix, a Mac run with the stimulus started first passed (9 pairs, mean +29.6 ms, worst 37.9 ms), and a voice clip playing before Start was in the movie from 0.0 s. On Windows a tone playing before Start was in the app's movie from the first 100 ms ([Windows evidence](docs/evidence/2026-10-17-windows-preplay/README.md)).
+The app has no live preview, camera, scenes or launch at login yet. On a Mac the app recorded the real display with system audio and a microphone, paused, saved, revealed the file, started from ⇧⌘R in another app, kept recording with its window closed, stopped from the menu bar and saved on ⌘Q ([evidence](docs/evidence/2026-10-17-app-mac/README.md)). That run found that sound already playing when recording started was recorded as silence on macOS. After the fix, a Mac run with the stimulus started first passed (9 pairs, mean +29.6 ms, worst 37.9 ms), and a voice clip playing before Start was in the movie from 0.0 s. On Windows a tone playing before Start was in the app's movie from the first 100 ms ([Windows evidence](docs/evidence/2026-10-17-windows-preplay/README.md)).
 ## Audio and sync
 
 ```sh

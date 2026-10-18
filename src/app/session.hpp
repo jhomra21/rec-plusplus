@@ -40,6 +40,8 @@ struct Settings {
     std::string destination = "twitch"; // twitch, youtube, custom.
     std::string server;               // Custom destination: rtmp[s]://host[:port]/app.
     std::uint32_t stream_kbps = 6000;
+    bool replay = false;              // Keep the last replay_seconds for Save Replay.
+    std::uint32_t replay_seconds = 30;
     std::string last_recording;
 };
 
@@ -53,6 +55,7 @@ inline constexpr std::array<Choice, 5> kResolutions{
 inline constexpr std::array<std::uint32_t, 6> kFrameRates{24, 25, 30, 50, 60, 120};
 inline constexpr std::array<Choice, 3> kCodecs{{{"auto", "Automatic"}, {"h264", "H.264"}, {"hevc", "HEVC"}}};
 inline constexpr std::array<Choice, 2> kFormats{{{"mp4", "MP4"}, {"mov", "MOV"}}};
+inline constexpr std::array<std::uint32_t, 5> kReplayLengths{15, 30, 60, 120, 300};
 inline constexpr std::array<Choice, 3> kServices{
     {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
 
@@ -92,8 +95,10 @@ struct Status {
     std::uint32_t reconnects = 0;
     std::uint64_t stream_dropped = 0;
     std::string stream_error;        // Why the stream ended; the recording continues.
+    bool replay = false;             // This recording keeps a replay buffer.
+    double replay_seconds = 0;       // Media the replay buffer holds now.
     std::string error;               // Why the last recording failed or ended early.
-    std::string saved;               // Path of the last completed recording.
+    std::string saved;               // Movie the last recording saved; empty while one runs.
 };
 
 // One recording at a time, owned by a worker thread: start() checks the settings and
@@ -115,6 +120,9 @@ public:
     void stop();
     Result pause();
     Result resume();
+    // Writes the replay buffer to a new replay-YYYY-MM-DD-HHMMSS.mp4 in folder; path and
+    // seconds receive where and how much. Takes as long as writing the file.
+    Result save_replay(const std::string& folder, std::string& path, double& seconds);
     Status status();
     void wait();  // Blocks until a stop in progress has saved the movie.
 
@@ -130,12 +138,12 @@ private:
     bool stop_requested_ = false;
     std::thread worker_;
     std::string error_, stream_error_, saved_;
-    bool streaming_ = false;
+    bool streaming_ = false, replay_ = false;
     Stats last_{};
 };
 
-// rec-YYYY-MM-DD-HHMMSS.<format> in folder, with -2, -3 ... if that file exists.
-std::string next_output(const std::string& folder, const std::string& format);
+// <prefix>-YYYY-MM-DD-HHMMSS.<format> in folder, with -2, -3 ... if that file exists.
+std::string next_output(const std::string& folder, const std::string& format, const char* prefix = "rec");
 std::string redact(const std::string& url);  // The URL without its stream key.
 
 } // namespace rec::app

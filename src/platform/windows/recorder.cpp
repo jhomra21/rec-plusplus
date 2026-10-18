@@ -708,13 +708,18 @@ public:
             if (auto opened = open_audio(); !opened) { stop(); return opened; }
             if (auto started = start_capture(); !started) { stop(); return started; }
         }
-        if (!options_.stream_url.empty()) {
+        if (!options_.stream_url.empty() || options_.replay_seconds) {
             if (options_.stream_kbps < 500 || options_.stream_kbps > 50000) {
                 stop();
                 return {"stream bitrate must be between 500 and 50000 kb/s"};
             }
+            if (options_.replay_seconds && (options_.replay_seconds < 5 || options_.replay_seconds > 300)) {
+                stop();
+                return {"replay must be between 5 and 300 seconds"};
+            }
             win::LiveSettings live;
             live.url = options_.stream_url;
+            live.replay_seconds = options_.replay_seconds;
             live.width = size_.width;
             live.height = size_.height;
             live.fps = options_.fps;
@@ -722,7 +727,10 @@ public:
             live.manager = manager_.Get();
             live.vendor = vendor_;
             live_ = std::make_unique<win::LiveStream>();
-            if (auto started = live_->start(live); !started) { stop(); return {"stream: " + started.error}; }
+            if (auto started = live_->start(live); !started) {
+                stop();
+                return {(options_.stream_url.empty() ? "replay: " : "stream: ") + started.error};
+            }
         }
         active_.store(true);
         if (auto ready = create_writer(); !ready) { stop(); return ready; }
@@ -823,11 +831,17 @@ public:
             stats.stream_frames = live.frames;
             stats.stream_dropped = live.dropped;
             stats.stream_bytes = live.bytes;
+            stats.replay_seconds = live.replay_seconds;
         }
         return stats;
     }
     std::string failure() const { std::lock_guard lock(mutex_); return failure_; }
     std::string stream_failure() const { return live_ ? live_->failure() : std::string(); }
+    Result save_replay(const std::string& path, double& seconds) const {
+        seconds = 0;
+        if (!live_ || !options_.replay_seconds) return {"the replay buffer is off"};
+        return live_->save_replay(path, seconds);
+    }
 
     Result pause() {
         if (!recording_.load() || finished_.load()) return {"not recording"};
@@ -1661,5 +1675,11 @@ bool Recorder::finished() const noexcept { return impl_->capture.finished(); }
 Stats Recorder::stats() const noexcept { return impl_->capture.stats(); }
 std::string Recorder::failure() const { return impl_->capture.failure(); }
 std::string Recorder::stream_failure() const { return impl_->capture.stream_failure(); }
+Result Recorder::save_replay(const std::string& path, double* seconds) {
+    double saved = 0;
+    auto result = impl_->capture.save_replay(path, saved);
+    if (seconds) *seconds = saved;
+    return result;
+}
 
 } // namespace rec

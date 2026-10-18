@@ -70,7 +70,11 @@ Settings load_settings(const std::string& path) {
         else if (key == "destination" && (value == "twitch" || value == "youtube" || value == "custom")) s.destination = value;
         else if (key == "server") s.server = value;
         else if (key == "stream_kbps") s.stream_kbps = std::clamp(number(value, 6000), 500u, 50000u);
-        else if (key == "last_recording") s.last_recording = value;
+        else if (key == "replay") s.replay = yes;
+        else if (key == "replay_seconds") {
+            const auto seconds = number(value, 30);
+            if (std::find(kReplayLengths.begin(), kReplayLengths.end(), seconds) != kReplayLengths.end()) s.replay_seconds = seconds;
+        } else if (key == "last_recording") s.last_recording = value;
     }
     return s;
 }
@@ -91,7 +95,8 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\ncursor=" << s.cursor << "\nsystem_audio=" << s.system_audio
             << "\nmicrophone=" << s.microphone << "\nmicrophone_device=" << s.microphone_device
             << "\nstream=" << s.stream << "\ndestination=" << s.destination << "\nserver=" << s.server
-            << "\nstream_kbps=" << s.stream_kbps << "\nlast_recording=" << s.last_recording << '\n';
+            << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
+            << "\nlast_recording=" << s.last_recording << '\n';
         if (!out) return false;
     }
     // Replace in one step so a crash never leaves half a settings file.
@@ -144,7 +149,7 @@ std::string redact(const std::string& url) {
     return last == std::string::npos ? url : url.substr(0, last + 1) + "****";
 }
 
-std::string next_output(const std::string& folder, const std::string& format) {
+std::string next_output(const std::string& folder, const std::string& format, const char* prefix) {
     const std::time_t now = std::time(nullptr);
     std::tm local{};
 #ifdef _WIN32
@@ -153,9 +158,10 @@ std::string next_output(const std::string& folder, const std::string& format) {
     localtime_r(&now, &local);
 #endif
     char stamp[32];
-    std::strftime(stamp, sizeof stamp, "rec-%Y-%m-%d-%H%M%S", &local);
+    std::strftime(stamp, sizeof stamp, "-%Y-%m-%d-%H%M%S", &local);
     std::string base = folder;
     if (!base.empty() && base.back() != '/' && base.back() != '\\') base += '/';
+    base += prefix;
     base += stamp;
     std::string path = base + "." + format;
     std::error_code error;
@@ -212,16 +218,19 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
         if (server.empty()) return {"enter the stream server URL"};
         if (stream_key.empty()) return {"enter the stream key"};
         o.stream_url = server + "/" + stream_key;
-        o.stream_kbps = s.stream_kbps;
     }
+    o.stream_kbps = s.stream_kbps;
+    if (s.replay) o.replay_seconds = s.replay_seconds;
     {
         std::lock_guard lock(mutex_);
         options_ = o;
         state_ = State::starting;
         stop_requested_ = false;
         streaming_ = s.stream;
+        replay_ = s.replay;
         error_.clear();
         stream_error_.clear();
+        saved_.clear();
         last_ = {};
     }
     worker_ = std::thread([this, recorder = std::make_unique<Recorder>(o)]() mutable { run(std::move(recorder)); });
@@ -287,6 +296,18 @@ Result Session::resume() {
     return resumed;
 }
 
+Result Session::save_replay(const std::string& folder, std::string& path, double& seconds) {
+    path.clear();
+    seconds = 0;
+    std::lock_guard lock(mutex_);
+    if ((state_ != State::recording && state_ != State::paused) || stop_requested_) return {"not recording"};
+    if (!replay_) return {"turn on the replay buffer before recording"};
+    const auto target = next_output(folder, "mp4", "replay");
+    auto saved = recorder_->save_replay(target, &seconds);
+    if (saved) path = target;
+    return saved;
+}
+
 Status Session::status() {
     bool ended = false;
     Status s;
@@ -303,6 +324,7 @@ Status Session::status() {
         s.stream_error = stream_error_;
         s.saved = saved_;
         s.streaming = streaming_;
+        s.replay = replay_;
         const Stats& st = last_;
         s.frames = st.written;
         s.seconds = options_.fps ? static_cast<double>(st.written) / options_.fps : 0;
@@ -314,6 +336,7 @@ Status Session::status() {
         s.reconnecting = active && st.stream_reconnecting;
         s.reconnects = st.stream_reconnects;
         s.stream_dropped = st.stream_dropped;
+        s.replay_seconds = active ? st.replay_seconds : 0;
     }
     if (ended) stop();
     return s;

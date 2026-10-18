@@ -8,7 +8,8 @@
 #   3. start and stop through the Shift-Command-R hotkey handler;
 #   4. Go Live to a local MediaMTX server: the server's copy decodes, the key is in the keychain;
 #   5. closing the window keeps recording, and the menu bar item's menu stops it;
-#   6. quitting during a recording saves the movie; settings persist without the stream key.
+#   6. with the replay buffer on, Save Replay writes the last seconds while recording goes on;
+#   7. quitting during a recording saves the movie; settings persist without the stream key.
 # Usage: app-e2e.sh REC REC_APP ARTIFACTS
 set -euo pipefail
 
@@ -86,6 +87,14 @@ within "$(value av_offset_max_ms "$artifacts/app-stream-received.probe")" 0 55
 probe "$(step hidden)" app-hidden
 within "$(value duration "$artifacts/app-hidden.probe")" 1.5 3.5
 
+probe "$(step replay)" app-replay
+grep -qx 'codec=h264' "$artifacts/app-replay.probe"
+within "$(value duration "$artifacts/app-replay.probe")" 3 6
+within "$(value av_sync_events "$artifacts/app-replay.probe")" 2 6
+within "$(value av_offset_max_ms "$artifacts/app-replay.probe")" 0 25
+probe "$(step replay-recording)" app-replay-recording
+within "$(value duration "$artifacts/app-replay-recording.probe")" 5 7.5
+
 settings="$home/settings.conf"
 cp "$settings" "$artifacts/app-settings.conf"
 quit="$(value last_recording "$settings")"
@@ -96,5 +105,6 @@ grep -qx 'server=rtmp://127.0.0.1:1935/live' "$settings"
 grep -qx 'destination=custom' "$settings"
 grep -qx 'stream_kbps=3000' "$settings"
 grep -qx 'fps=30' "$settings"
+grep -qx 'replay=1' "$settings"
 if grep -q appkey "$settings"; then echo 'the stream key was written to the settings file' >&2; exit 1; fi
 echo 'app e2e passed'

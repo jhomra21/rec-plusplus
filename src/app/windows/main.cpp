@@ -36,21 +36,22 @@ using rec::app::Status;
 constexpr UINT kSessionChanged = WM_APP + 1;
 constexpr UINT kTrayMessage = WM_APP + 2;
 constexpr UINT_PTR kPollTimer = 1;
-constexpr int kHotkey = 1;
+constexpr int kHotkey = 1, kReplayHotkey = 2;
 constexpr UINT kTrayId = 1;
 // Sent as the WM_COMMAND code for the Source list once its selection change is handled.
 constexpr int kPickRegion = 0x7001;
 
 enum Control : int {
     kStatus = 100, kDetail, kLive, kSystemLabel, kSystemMeter, kMicLabel, kMicMeter,
-    kRecord, kPause,
+    kRecord, kPause, kSaveReplay,
     kCaptureHeader, kSourceLabel, kSource, kSystemAudio, kMicrophone, kMicDevice, kCursor,
     kQualityHeader, kResolutionLabel, kResolution, kFpsLabel, kFps, kCodecLabel, kCodec, kFormatLabel, kFormat,
     kStreamHeader, kStream, kServiceLabel, kService, kServerLabel, kServer, kKeyLabel, kKey, kBitrateLabel, kBitrate,
+    kReplayHeader, kReplay, kReplayLength,
     kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast,
 };
 
-enum Command : UINT { kMenuRecord = 1000, kMenuPause, kMenuShow, kMenuFolder, kMenuQuit };
+enum Command : UINT { kMenuRecord = 1000, kMenuPause, kMenuShow, kMenuFolder, kMenuQuit, kMenuReplay };
 
 using rec::app::choice_index;
 using rec::app::kCodecs;
@@ -93,6 +94,11 @@ std::wstring text_of(HWND control) {
     std::wstring out(static_cast<std::size_t>(GetWindowTextLengthW(control)), L'\0');
     if (!out.empty()) GetWindowTextW(control, out.data(), static_cast<int>(out.size()) + 1);
     return out;
+}
+
+std::wstring duration_label(std::uint32_t seconds) {
+    return seconds < 60 ? std::to_wstring(seconds) + L" seconds"
+                        : std::to_wstring(seconds / 60) + (seconds == 60 ? L" minute" : L" minutes");
 }
 
 std::wstring clock(double seconds) {
@@ -387,6 +393,7 @@ private:
             return 0;
         case WM_HOTKEY:
             if (w == kHotkey) toggle_record();
+            else if (w == kReplayHotkey) save_replay();
             return 0;
         case kTrayMessage:
             tray_event(LOWORD(l));
@@ -410,6 +417,7 @@ private:
             return 0;
         case WM_DESTROY:
             UnregisterHotKey(window_, kHotkey);
+            UnregisterHotKey(window_, kReplayHotkey);
             Shell_NotifyIconW(NIM_DELETE, &tray_);
             PostQuitMessage(0);
             return 0;
@@ -471,6 +479,7 @@ private:
         add(kMicMeter, PROGRESS_CLASSW, L"", PBS_SMOOTH);
         button(kRecord, L"&Start Recording", BS_DEFPUSHBUTTON);
         button(kPause, L"&Pause");
+        button(kSaveReplay, L"Save Rep&lay");
 
         label(kCaptureHeader, L"Capture");
         label(kSourceLabel, L"&Source");
@@ -501,6 +510,10 @@ private:
         label(kBitrateLabel, L"&Bitrate (kb/s)");
         edit(kBitrate, ES_NUMBER);
 
+        label(kReplayHeader, L"Replay");
+        check(kReplay, L"Keep the las&t");
+        HWND replay = combo(kReplayLength);
+
         label(kFolderHeader, L"Recordings");
         label(kFolder, L"");
         button(kChangeFolder, L"C&hange Folder...");
@@ -519,6 +532,8 @@ private:
         fill(codec, kCodecs);
         fill(format, kFormats);
         fill(service, kServices);
+        for (auto seconds : rec::app::kReplayLengths)
+            SendMessageW(replay, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(duration_label(seconds).c_str()));
         for (auto rate : kFrameRates) SendMessageW(fps, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>((std::to_wstring(rate) + L" fps").c_str()));
         for (int meter : {kSystemMeter, kMicMeter}) SendMessageW(get(meter), PBM_SETRANGE32, 0, 1000);
 
@@ -533,6 +548,7 @@ private:
         SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(recording_icon_));
         add_tray();
         hotkey_ = RegisterHotKey(window_, kHotkey, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'R') != FALSE;
+        replay_hotkey_ = RegisterHotKey(window_, kReplayHotkey, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, 'R') != FALSE;
         refresh();
     }
 
@@ -546,7 +562,8 @@ private:
             place(label_id, margin, y + px(4), label_width - gap, px(20));
             // A drop-down list's height includes its open list.
             const bool list = control_id == kSource || control_id == kMicDevice || control_id == kResolution ||
-                              control_id == kFps || control_id == kCodec || control_id == kFormat || control_id == kService;
+                              control_id == kFps || control_id == kCodec || control_id == kFormat || control_id == kService ||
+                              control_id == kReplayLength;
             place(control_id, margin + label_width, y, width - label_width, list ? px(240) : h);
             y += h + gap;
         };
@@ -558,8 +575,9 @@ private:
         y += px(20) + gap;
         pair(kSystemLabel, kSystemMeter, px(14));
         pair(kMicLabel, kMicMeter, px(14));
-        place(kRecord, margin, y, width - px(130), px(40));
-        place(kPause, margin + width - px(120), y, px(120), px(40));
+        place(kRecord, margin, y, width - 2 * (px(120) + gap), px(40));
+        place(kPause, margin + width - 2 * px(120) - gap, y, px(120), px(40));
+        place(kSaveReplay, margin + width - px(120), y, px(120), px(40));
         y += px(40) + gap;
 
         header(kCaptureHeader);
@@ -582,6 +600,11 @@ private:
         pair(kServerLabel, kServer, row);
         pair(kKeyLabel, kKey, row);
         pair(kBitrateLabel, kBitrate, row);
+
+        header(kReplayHeader);
+        place(kReplay, margin, y, label_width - gap, px(22));
+        place(kReplayLength, margin + label_width, y, width - label_width, px(240));
+        y += row + gap;
 
         header(kFolderHeader);
         line(kFolder, px(20));
@@ -635,6 +658,9 @@ private:
         set_check(kStream, s.stream);
         select(kService, choice_index(kServices, s.destination));
         SetWindowTextW(get(kBitrate), std::to_wstring(s.stream_kbps).c_str());
+        set_check(kReplay, s.replay);
+        select(kReplayLength, static_cast<int>(std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds) -
+                                               rec::app::kReplayLengths.begin()) % static_cast<int>(rec::app::kReplayLengths.size()));
         show_server();
         SetWindowTextW(get(kFolder), wide(s.folder).c_str());
     }
@@ -753,6 +779,8 @@ private:
         s.codec = kCodecs[at(kCodec)].value;
         s.format = kFormats[at(kFormat)].value;
         s.stream = checked(kStream);
+        s.replay = checked(kReplay);
+        s.replay_seconds = rec::app::kReplayLengths[at(kReplayLength)];
         s.destination = kServices[at(kService)].value;
         if (s.destination == "custom") s.server = narrow(text_of(get(kServer)));
         const auto kbps = std::wcstoul(text_of(get(kBitrate)).c_str(), nullptr, 10);
@@ -768,6 +796,7 @@ private:
         switch (id) {
         case kRecord: case kMenuRecord: toggle_record(); return;
         case kPause: case kMenuPause: toggle_pause(); return;
+        case kSaveReplay: case kMenuReplay: save_replay(); return;
         case kMenuShow: show_window(); return;
         case kOpenFolder: case kMenuFolder: open_folder(); return;
         case kMenuQuit: quit(); return;
@@ -844,6 +873,24 @@ private:
         }
         remember();
         DestroyWindow(window_);
+    }
+
+    void save_replay() {
+        std::string path;
+        double seconds = 0;
+        if (auto saved = session_.save_replay(settings_.folder, path, seconds); !saved) {
+            note_ = L"Replay not saved: " + wide(saved.error);
+            note_attention_ = true;
+        } else {
+            wchar_t length[32];
+            std::swprintf(length, 32, L"%.1f s", seconds);
+            note_ = L"Saved replay (" + std::wstring(length) + L"): " + wide(path.substr(path.find_last_of("/\\") + 1));
+            note_attention_ = false;
+            settings_.last_recording = path;
+            rec::app::save_settings(settings_path_, settings_);
+        }
+        note_until_ = GetTickCount64() + 5000;
+        refresh();
     }
 
     void show_window() {
@@ -926,6 +973,8 @@ private:
         AppendMenuW(menu, MF_STRING | (state == State::starting || state == State::finishing ? MF_GRAYED : 0), kMenuRecord,
                     active ? L"Stop Recording\tCtrl+Alt+R" : L"Start Recording\tCtrl+Alt+R");
         AppendMenuW(menu, MF_STRING | (active ? 0 : MF_GRAYED), kMenuPause, state == State::paused ? L"Resume" : L"Pause");
+        AppendMenuW(menu, MF_STRING | (active && session_.status().replay ? 0 : MF_GRAYED), kMenuReplay,
+                    L"Save Replay\tCtrl+Alt+Shift+R");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuShow, L"Show Rec");
         AppendMenuW(menu, MF_STRING, kMenuFolder, L"Open Recordings Folder");
@@ -960,6 +1009,7 @@ private:
         if (!s.saved.empty() && s.saved != settings_.last_recording) {
             settings_.last_recording = s.saved;
             rec::app::save_settings(settings_path_, settings_);
+            note_.clear();
         }
 
         std::wstring status, detail;
@@ -984,6 +1034,11 @@ private:
             if (s.streaming && !s.stream_error.empty()) { detail += L". Stream lost: " + wide(s.stream_error); attention_ = true; }
             else if (s.stream_dropped) { detail += L", stream skipped " + std::to_wstring(s.stream_dropped); attention_ = true; }
             if (s.reconnects) detail += L", stream reconnected " + std::to_wstring(s.reconnects) + (s.reconnects == 1 ? L" time" : L" times");
+            if (s.replay) detail += L", replay " + std::to_wstring(static_cast<int>(s.replay_seconds)) + L" s";
+        }
+        if (!note_.empty() && GetTickCount64() < note_until_) {
+            detail = note_;
+            attention_ = note_attention_;
         }
         set_text(kStatus, status);
         set_text(kDetail, detail);
@@ -1001,9 +1056,10 @@ private:
         set_text(kPause, s.state == State::paused ? L"&Resume" : L"&Pause");
         EnableWindow(get(kRecord), s.state == State::idle || active);
         EnableWindow(get(kPause), active);
+        EnableWindow(get(kSaveReplay), active && s.replay);
         const bool editable = s.state == State::idle;
         for (int id : {kSource, kSystemAudio, kMicrophone, kCursor, kResolution, kFps, kCodec, kFormat, kStream,
-                       kService, kKey, kBitrate, kChangeFolder})
+                       kService, kKey, kBitrate, kReplay, kReplayLength, kChangeFolder})
             EnableWindow(get(id), editable);
         EnableWindow(get(kMicDevice), editable && checked(kMicrophone));
         EnableWindow(get(kServer), editable);
@@ -1034,7 +1090,10 @@ private:
     int content_height_ = 0;
     std::wstring home_;
     bool test_pattern_ = false;
-    bool hotkey_ = false;
+    bool hotkey_ = false, replay_hotkey_ = false;
+    std::wstring note_;  // A message that replaces the detail line for a few seconds.
+    ULONGLONG note_until_ = 0;
+    bool note_attention_ = false;
     bool polling_ = false;
     bool quitting_ = false;
     bool attention_ = false;

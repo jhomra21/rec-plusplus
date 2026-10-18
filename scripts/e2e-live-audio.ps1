@@ -10,6 +10,8 @@
 # playing when capture starts.
 # REC_E2E_SOURCE=window records only the stimulus window (found by its title), and
 # REC_E2E_SOURCE=region records a 1280x720 region of the display.
+# REC_E2E_REPLAY=1 keeps a 5 s replay buffer and saves it when the stimulus ends; the clip
+# must be in sync too.
 # Nothing else may play: the beep detector cannot tell other sound from beeps. The script
 # stops if the output device is not silent for 2 s first; REC_E2E_ALLOW_SOUND=1 skips that.
 $ErrorActionPreference = 'Stop'
@@ -33,6 +35,8 @@ $target = switch ($source) {
 }
 $arguments = @('record') + $target + @('--system-audio', '-r', '1080p', '-f', '60', '-t', '12', '--codec', 'h264', '-o', $movie)
 if ($env:REC_E2E_MIC -eq '1') { $arguments += @('--mic', 'default') }
+$replay = $env:REC_E2E_REPLAY -eq '1'
+if ($replay) { $arguments += @('--replay', '5') }
 $stream = $env:REC_E2E_STREAM -eq '1'
 $server = $null
 if ($stream) {
@@ -79,6 +83,7 @@ try {
     }
     $stimulus.WaitForExit()
     if ($stimulus.ExitCode -ne 0) { throw 'stimulus failed' }
+    if ($replay) { Send-RecCommand $run 'save' }
 } finally {
     if ($stimulus -and -not $stimulus.HasExited) { $stimulus.Kill() }
 }
@@ -101,6 +106,17 @@ if ($events -lt 4) { throw "only $events flash/beep pairs found" }
 Expect-Within $probe 'av_offset_ms' -45 125
 
 Write-Host "Live A/V sync: $events flash/beep pairs, mean offset $($probe['av_offset_ms']) ms (positive = audio late), worst $($probe['av_offset_max_ms']) ms."
+
+if ($replay) {
+    Expect-Text $result.Text 'Saved replay'
+    $clip = Get-Probe $rec (Join-Path $artifacts 'recording-replay-1.mp4') (Join-Path $artifacts 'replay.probe')
+    Expect-Field $clip 'codec' 'h264'
+    Expect-Within $clip 'duration' 4.5 7.5
+    $pairs = [int]$clip['av_sync_events']
+    if ($pairs -lt 4) { throw "only $pairs flash/beep pairs in the replay" }
+    Expect-Within $clip 'av_offset_ms' -45 125
+    Write-Host "Replay: $($clip['frames']) frames, $pairs pairs, mean offset $($clip['av_offset_ms']) ms, worst $($clip['av_offset_max_ms']) ms."
+}
 
 if ($stream) {
     Expect-Text $result.Text 'skipped 0'

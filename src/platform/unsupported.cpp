@@ -27,4 +27,8 @@ bool Recorder::finished() const noexcept { return true; }
 Stats Recorder::stats() const noexcept { return {}; }
 std::string Recorder::failure() const { return {}; }
 std::string Recorder::stream_failure() const { return {}; }
+Result Recorder::save_replay(const std::string&, double* seconds) {
+    if (seconds) *seconds = 0;
+    return {"not recording"};
+}
 } // namespace rec

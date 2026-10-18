@@ -189,6 +189,7 @@ NSString* window_label(const std::string& app, const std::string& title) {
 
 @interface RecController : NSObject <NSApplicationDelegate, NSMenuDelegate, NSTextFieldDelegate>
 - (void)toggleRecord:(id)sender;
+- (void)saveReplay:(id)sender;
 - (void)refresh;
 @end
 
@@ -202,18 +203,21 @@ NSString* window_label(const std::string& app, const std::string& title) {
     std::vector<Source> _sources;
     NSArray<NSWindow*>* _pickers;  // The region picker while it is open.
     bool _testPattern;
-    bool _hotkey;
+    bool _hotkey, _replayHotkey;
+    NSString* _note;  // A message that replaces the detail line for a few seconds.
+    NSDate* _noteUntil;
+    bool _noteAttention;
     bool _quitting;
     bool _attention;
     bool _saved;
     State _state;
     float _systemShown, _micShown;
-    EventHotKeyRef _hotkeyRef;
+    EventHotKeyRef _hotkeyRef, _replayHotkeyRef;
     NSWindow* _window;
     NSTextField *_status, *_detail, *_live, *_folder;
     NSLevelIndicator *_systemMeter, *_micMeter;
-    NSButton *_record, *_pause, *_systemAudio, *_microphone, *_cursor, *_stream, *_changeFolder, *_openFolder, *_showLast;
-    NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service;
+    NSButton *_record, *_pause, *_saveReplay, *_replay, *_systemAudio, *_microphone, *_cursor, *_stream, *_changeFolder, *_openFolder, *_showLast;
+    NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service, *_replayLength;
     NSTextField *_server, *_bitrate;
     NSSecureTextField* _key;
     NSStatusItem* _statusItem;
@@ -427,8 +431,10 @@ NSString* window_label(const std::string& app, const std::string& title) {
 - (void)registerHotkey {
     EventTypeSpec spec{kEventClassKeyboard, kEventHotKeyPressed};
     InstallApplicationEventHandler(&on_hotkey, 1, &spec, (__bridge void*)self, nullptr);
-    const EventHotKeyID id{'recR', 1};
+    const EventHotKeyID id{'recR', 1}, replay{'recR', 2};
     _hotkey = RegisterEventHotKey(kVK_ANSI_R, cmdKey | shiftKey, id, GetApplicationEventTarget(), 0, &_hotkeyRef) == noErr;
+    _replayHotkey = RegisterEventHotKey(kVK_ANSI_R, cmdKey | shiftKey | optionKey, replay, GetApplicationEventTarget(), 0,
+                                        &_replayHotkeyRef) == noErr;
 }
 
 // MARK: - Interface
@@ -482,6 +488,10 @@ NSString* window_label(const std::string& app, const std::string& title) {
     NSMenuItem* pause = [self item:state == State::paused ? @"Resume" : @"Pause" action:@selector(togglePause:) key:@""];
     pause.enabled = active;
     [menu addItem:pause];
+    NSMenuItem* replay = [self item:@"Save Replay" action:@selector(saveReplay:) key:@"r"];
+    replay.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift | NSEventModifierFlagOption;
+    replay.enabled = active && _session->status().replay;
+    [menu addItem:replay];
     if (menu == _statusItem.menu) {
         [menu addItem:NSMenuItem.separatorItem];
         [menu addItem:[self item:@"Show Rec" action:@selector(showWindow:) key:@""]];
@@ -603,8 +613,11 @@ NSString* window_label(const std::string& app, const std::string& title) {
     _record.keyEquivalent = @"\r";
     _pause = [self button:@"Pause" action:@selector(togglePause:)];
     _pause.controlSize = NSControlSizeLarge;
-    [_pause.widthAnchor constraintEqualToConstant:120].active = YES;
-    NSStackView* buttons = [NSStackView stackViewWithViews:@[_record, _pause]];
+    [_pause.widthAnchor constraintEqualToConstant:110].active = YES;
+    _saveReplay = [self button:@"Save Replay" action:@selector(saveReplay:)];
+    _saveReplay.controlSize = NSControlSizeLarge;
+    [_saveReplay.widthAnchor constraintEqualToConstant:110].active = YES;
+    NSStackView* buttons = [NSStackView stackViewWithViews:@[_record, _pause, _saveReplay]];
     buttons.distribution = NSStackViewDistributionFill;
     [_record setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
@@ -635,6 +648,13 @@ NSString* window_label(const std::string& app, const std::string& title) {
     NSGridView* live = [self grid:@[@[_stream], @[label(@"Service"), _service], @[label(@"Server URL"), _server],
                                     @[label(@"Stream key"), _key], @[label(@"Bitrate (kb/s)"), _bitrate]]];
 
+    _replay = [self check:@"Keep the last"];
+    _replayLength = [self popup:@"Replay length"];
+    for (auto seconds : rec::app::kReplayLengths)
+        [_replayLength addItemWithTitle:seconds < 60 ? [NSString stringWithFormat:@"%u seconds", seconds]
+                                       : [NSString stringWithFormat:@"%u %@", seconds / 60, seconds == 60 ? @"minute" : @"minutes"]];
+    NSGridView* replay = [self grid:@[@[_replay, _replayLength]]];
+
     _folder = label(@"");
     _folder.textColor = NSColor.secondaryLabelColor;
     _folder.lineBreakMode = NSLineBreakByTruncatingMiddle;
@@ -648,13 +668,13 @@ NSString* window_label(const std::string& app, const std::string& title) {
 
     NSArray<NSView*>* views = @[_status, detailRow, meters, buttons,
                                 header(@"Capture"), capture, header(@"Quality"), quality,
-                                header(@"Live stream"), live, header(@"Recordings"), _folder, folderButtons];
+                                header(@"Live stream"), live, header(@"Replay"), replay, header(@"Recordings"), _folder, folderButtons];
     NSStackView* stack = [NSStackView stackViewWithViews:views];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment = NSLayoutAttributeLeading;
     stack.spacing = 8;
     stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
-    for (NSView* view in @[buttons, capture, quality, live]) [stack setCustomSpacing:18 afterView:view];
+    for (NSView* view in @[buttons, capture, quality, live, replay]) [stack setCustomSpacing:18 afterView:view];
     for (NSView* view in views) [view.widthAnchor constraintEqualToConstant:440].active = YES;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     NSView* content = _window.contentView;
@@ -681,6 +701,9 @@ NSString* window_label(const std::string& app, const std::string& title) {
     _stream.state = s.stream ? NSControlStateValueOn : NSControlStateValueOff;
     [_service selectItemAtIndex:choice_index(kServices, s.destination)];
     _bitrate.stringValue = [NSString stringWithFormat:@"%u", s.stream_kbps];
+    _replay.state = s.replay ? NSControlStateValueOn : NSControlStateValueOff;
+    const auto length = std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds);
+    [_replayLength selectItemAtIndex:length == rec::app::kReplayLengths.end() ? 1 : length - rec::app::kReplayLengths.begin()];
     _folder.stringValue = ns(s.folder);
     _folder.toolTip = ns(s.folder);
     [self showServer];
@@ -723,6 +746,8 @@ NSString* window_label(const std::string& app, const std::string& title) {
     s.stream = _stream.state == NSControlStateValueOn;
     s.destination = kServices[at(_service)].value;
     if (s.destination == "custom") s.server = utf8(_server.stringValue);
+    s.replay = _replay.state == NSControlStateValueOn;
+    s.replay_seconds = rec::app::kReplayLengths[std::min(at(_replayLength), rec::app::kReplayLengths.size() - 1)];
     const int kbps = _bitrate.intValue;
     s.stream_kbps = static_cast<std::uint32_t>(std::clamp(kbps > 0 ? kbps : 6000, 500, 50000));
 }
@@ -775,6 +800,22 @@ NSString* window_label(const std::string& app, const std::string& title) {
         }
         if (_settings.stream) store_key(rec::app::server_url(_settings), key);
     }
+    [self refresh];
+}
+
+- (void)saveReplay:(id)sender {
+    std::string path;
+    double seconds = 0;
+    if (auto saved = _session->save_replay(_settings.folder, path, seconds); !saved) {
+        _note = [@"Replay not saved: " stringByAppendingString:ns(saved.error)];
+        _noteAttention = true;
+    } else {
+        _note = [NSString stringWithFormat:@"Saved replay (%.1f s): %@", seconds, ns(path).lastPathComponent];
+        _noteAttention = false;
+        _settings.last_recording = path;
+        rec::app::save_settings(_settingsPath, _settings);
+    }
+    _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
     [self refresh];
 }
 
@@ -875,6 +916,7 @@ NSString* window_label(const std::string& app, const std::string& title) {
 - (void)applicationWillTerminate:(NSNotification*)notification {
     if (!_saved) [self remember];
     if (_hotkeyRef) UnregisterEventHotKey(_hotkeyRef);
+    if (_replayHotkeyRef) UnregisterEventHotKey(_replayHotkeyRef);
 }
 
 // MARK: - Status
@@ -896,6 +938,7 @@ NSString* window_label(const std::string& app, const std::string& title) {
     if (!s.saved.empty() && s.saved != _settings.last_recording) {
         _settings.last_recording = s.saved;
         rec::app::save_settings(_settingsPath, _settings);
+        _note = nil;
     }
 
     NSString* status = @"";
@@ -921,7 +964,12 @@ NSString* window_label(const std::string& app, const std::string& title) {
         if (s.streaming && !s.stream_error.empty()) { [text appendFormat:@". Stream lost: %@", ns(s.stream_error)]; _attention = true; }
         else if (s.stream_dropped) { [text appendFormat:@", stream skipped %llu", static_cast<unsigned long long>(s.stream_dropped)]; _attention = true; }
         if (s.reconnects) [text appendFormat:@", stream reconnected %u %@", s.reconnects, s.reconnects == 1 ? @"time" : @"times"];
+        if (s.replay) [text appendFormat:@", replay %d s", static_cast<int>(s.replay_seconds)];
         detail = text;
+    }
+    if (_note && _noteUntil.timeIntervalSinceNow > 0) {
+        detail = _note;
+        _attention = _noteAttention;
     }
     if (![_status.stringValue isEqualToString:status]) _status.stringValue = status;
     if (![_detail.stringValue isEqualToString:detail]) _detail.stringValue = detail;
@@ -940,9 +988,10 @@ NSString* window_label(const std::string& app, const std::string& title) {
     _pause.title = s.state == State::paused ? @"Resume" : @"Pause";
     _record.enabled = s.state == State::idle || active;
     _pause.enabled = active;
+    _saveReplay.enabled = active && s.replay;
     const bool editable = s.state == State::idle;
     for (NSControl* control in @[_source, _systemAudio, _microphone, _cursor, _resolution, _fps, _codec, _format,
-                                 _stream, _service, _server, _key, _bitrate, _changeFolder])
+                                 _stream, _service, _server, _key, _bitrate, _replay, _replayLength, _changeFolder])
         control.enabled = editable;
     _micDevice.enabled = editable && _microphone.state == NSControlStateValueOn;
     _showLast.enabled = !_settings.last_recording.empty();
@@ -1028,7 +1077,7 @@ NSString* window_label(const std::string& app, const std::string& title) {
     // Every control has an accessible name.
     __block NSString* unnamed = nil;
     ui(^{
-        for (NSControl* control in @[self->_record, self->_pause, self->_source, self->_systemAudio, self->_microphone,
+        for (NSControl* control in @[self->_record, self->_pause, self->_saveReplay, self->_replay, self->_replayLength, self->_source, self->_systemAudio, self->_microphone,
                                      self->_micDevice, self->_cursor, self->_resolution, self->_fps, self->_codec,
                                      self->_format, self->_stream, self->_service, self->_server, self->_key,
                                      self->_bitrate, self->_changeFolder, self->_openFolder, self->_showLast,
@@ -1131,8 +1180,25 @@ NSString* window_label(const std::string& app, const std::string& title) {
     wait_for(@"Ready to record", 30);
     saved(@"hidden");
 
-    // 5. Quitting during a recording saves the movie, then the app exits.
+    // 5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
     ui(^{ [self showWindow:nil]; });
+    set_check(_replay, true);
+    press(_record);
+    wait_for(recording, 20);
+    sleep(5);
+    press(_saveReplay);
+    if (![detail() hasPrefix:@"Saved replay"]) fail([@"Save Replay: " stringByAppendingString:detail()]);
+    {
+        __block NSString* path;
+        ui(^{ path = ns(self->_settings.last_recording); });
+        note([@"replay=" stringByAppendingString:path]);
+    }
+    sleep(1);
+    press(_record);
+    wait_for(@"Ready to record", 30);
+    saved(@"replay-recording");
+
+    // 6. Quitting during a recording saves the movie, then the app exits.
     press(_record);
     wait_for(recording, 20);
     sleep(2);
@@ -1142,8 +1208,11 @@ NSString* window_label(const std::string& app, const std::string& title) {
 @end
 
 namespace {
-OSStatus on_hotkey(EventHandlerCallRef, EventRef, void* context) {
-    [(__bridge RecController*)context toggleRecord:nil];
+OSStatus on_hotkey(EventHandlerCallRef, EventRef event, void* context) {
+    EventHotKeyID id{};
+    GetEventParameter(event, kEventParamDirectObject, typeEventHotKeyID, nullptr, sizeof id, nullptr, &id);
+    if (id.id == 2) [(__bridge RecController*)context saveReplay:nil];
+    else [(__bridge RecController*)context toggleRecord:nil];
     return noErr;
 }
 } // namespace

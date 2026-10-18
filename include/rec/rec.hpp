@@ -52,6 +52,9 @@ struct Options {
     // Live stream of the same timeline, encoded separately: rtmp[s]://host[:port]/app/stream-key.
     std::string stream_url;
     std::uint32_t stream_kbps = 6000; // Stream video bitrate; audio is 160 kb/s AAC.
+    // Keep the last N seconds (5 to 300) of the stream encode in memory for save_replay();
+    // 0 = off. Without stream_url the stream encoders run for the replay alone.
+    std::uint32_t replay_seconds = 0;
 };
 
 struct Display {
@@ -96,6 +99,7 @@ struct Stats {
     std::uint64_t stream_frames = 0; // Video frames sent to the stream.
     std::uint64_t stream_dropped = 0; // Video frames the stream skipped to keep up.
     std::uint64_t stream_bytes = 0;
+    double replay_seconds = 0; // Media the replay buffer holds now.
 };
 
 struct Probe {
@@ -147,6 +151,9 @@ public:
     std::string failure() const;
     // Why the stream ended early. The recording continues without it.
     std::string stream_failure() const;
+    // Writes the replay buffer to a new MP4 at path while recording continues: the last
+    // replay_seconds, from a keyframe, so up to 2 s more. seconds receives the saved length.
+    Result save_replay(const std::string& path, double* seconds = nullptr);
 
 private:
     class Impl;

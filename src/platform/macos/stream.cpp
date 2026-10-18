@@ -1,4 +1,5 @@
 #include "platform/macos/stream.hpp"
+#include "core/replay.hpp"
 #include "core/rtmp.hpp"
 
 #include <AudioToolbox/AudioToolbox.h>
@@ -52,8 +53,11 @@ public:
         if (auto made = create_video(); !made) { release(); return made; }
         if (auto made = create_audio(); !made) { release(); return made; }
         ring_.assign(kAudioFrames * 2, 0.0f);
+        if (settings_.replay_seconds)
+            replay_ = std::make_unique<core::ReplayBuffer>(settings_.replay_seconds, settings_.width, settings_.height, settings_.fps);
         core::StreamInfo info{settings_.width, settings_.height, settings_.fps, settings_.video_kbps, settings_.audio_kbps};
-        if (auto error = publisher_.open(settings_.url, info); !error.empty()) { release(); return {error}; }
+        if (!settings_.url.empty())
+            if (auto error = publisher_.open(settings_.url, info); !error.empty()) { release(); return {error}; }
         thread_ = std::thread([this] { run(); });
         return {};
     }
@@ -126,7 +130,14 @@ public:
         c.bytes = publisher_.bytes();
         c.reconnecting = publisher_.reconnecting() && !broken_.load();
         c.reconnects = publisher_.reconnects();
+        c.replay_seconds = replay_ ? replay_->seconds() : 0;
         return c;
+    }
+
+    Result save_replay(const std::string& path, double& seconds) const {
+        seconds = 0;
+        if (!replay_) return {"the replay buffer is off"};
+        return {replay_->save(path, seconds)};
     }
 
     std::string failure() const {
@@ -345,7 +356,7 @@ private:
                     !std::equal(pps, pps + pps_size, pps_.begin(), pps_.end())) {
                     sps_.assign(sps, sps + sps_size);
                     pps_.assign(pps, pps + pps_size);
-                    publisher_.video(ms, true, true, core::flv::avc_sequence_header(sps_, pps_));
+                    send_video(ms, true, true, core::flv::avc_sequence_header(sps_, pps_));
                 }
             }
         }
@@ -377,7 +388,17 @@ private:
         }
         if (body.size() == 5) { dropped_.fetch_add(1); return; }
         started_ = true;
-        if (publisher_.video(ms, key, false, std::move(body))) frames_sent_.fetch_add(1);
+        send_video(ms, key, false, std::move(body));
+    }
+
+    void send_video(std::uint32_t ms, bool key, bool header, core::Bytes body) {
+        if (replay_) replay_->video(ms, key, header, body);
+        if (!settings_.url.empty() && publisher_.video(ms, key, header, std::move(body)) && !header) frames_sent_.fetch_add(1);
+    }
+
+    void send_audio(std::uint32_t ms, bool header, core::Bytes body) {
+        if (replay_) replay_->audio(ms, header, body);
+        if (!settings_.url.empty()) publisher_.audio(ms, header, std::move(body));
     }
 
     static OSStatus supply(AudioConverterRef, UInt32* packets, AudioBufferList* data,
@@ -439,16 +460,17 @@ private:
             if (first + static_cast<std::int64_t>(kAacFrames) <= 0) continue;
             const auto ms = static_cast<std::uint32_t>(std::max<std::int64_t>(0, (first * 1000 + kRate / 2) / kRate));
             if (!audio_header_) {
-                publisher_.audio(ms, true, core::flv::aac_sequence_header(kRate, 2));
+                send_audio(ms, true, core::flv::aac_sequence_header(kRate, 2));
                 audio_header_ = true;
             }
             if (out.mBuffers[0].mDataByteSize)
-                publisher_.audio(ms, false, core::flv::aac_frame(packet_.data(), out.mBuffers[0].mDataByteSize));
+                send_audio(ms, false, core::flv::aac_frame(packet_.data(), out.mBuffers[0].mDataByteSize));
         }
     }
 
     LiveSettings settings_;
     core::RtmpPublisher publisher_;
+    std::unique_ptr<core::ReplayBuffer> replay_;
     VTCompressionSessionRef session_ = nullptr;
     AudioConverterRef converter_ = nullptr;
     bool hardware_ = false;
@@ -493,5 +515,6 @@ void LiveStream::audio(std::int64_t start, const float* stereo, std::size_t fram
 void LiveStream::stop() { impl_->stop(); }
 LiveCounters LiveStream::counters() const { return impl_->counters(); }
 std::string LiveStream::failure() const { return impl_->failure(); }
+Result LiveStream::save_replay(const std::string& path, double& seconds) const { return impl_->save_replay(path, seconds); }
 
 } // namespace rec::mac

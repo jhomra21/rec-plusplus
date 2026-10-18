@@ -11,6 +11,8 @@
 # playing when capture starts.
 # REC_E2E_SOURCE=window records only the stimulus window (found by its title), and
 # REC_E2E_SOURCE=region records a 1280x720 region of the display.
+# REC_E2E_REPLAY=1 keeps a 5 s replay buffer and saves it when the stimulus ends; the clip
+# must be in sync too.
 set -euo pipefail
 
 [[ "$(uname -s)" == Darwin ]] || { echo 'live A/V sync E2E requires macOS' >&2; exit 1; }
@@ -44,6 +46,8 @@ case "$source" in
 esac
 args=(record "${target[@]}" --system-audio -r 1080p -f 60 -t 12 --codec h264 -o "$artifacts/recording.mov")
 if [[ "${REC_E2E_MIC:-0}" == 1 ]]; then args+=(--mic default); fi
+replay="${REC_E2E_REPLAY:-0}"
+if [[ "$replay" == 1 ]]; then args+=(--replay 5); fi
 stream="${REC_E2E_STREAM:-0}"
 if [[ "$stream" == 1 ]]; then
   start_mediamtx "$(get_mediamtx "$root/build/tools")" "$artifacts/stream-server" "$artifacts/mediamtx"
@@ -91,6 +95,7 @@ if [[ "$pause" == 1 ]]; then
   echo resume >&3
 fi
 wait "$stimulus_pid"
+if [[ "$replay" == 1 ]]; then echo save >&3; fi
 wait "$capture_pid" || { echo "Recorder failed; see $artifacts/record.log" >&2; exit 1; }
 capture_pid=""
 exec 3>&-
@@ -118,6 +123,19 @@ awk -v n="$events" 'BEGIN { exit !(n >= 4) }' || { echo "only $events flash/beep
 awk -v m="$offset" 'BEGIN { exit !(m >= -45 && m <= 125) }' || { echo "A/V offset $offset ms is noticeable" >&2; exit 1; }
 
 echo "Live A/V sync: $events flash/beep pairs, mean offset $offset ms (positive = audio late), worst $worst ms."
+
+if [[ "$replay" == 1 ]]; then
+  grep -q 'Saved replay' "$artifacts/record.log" || { echo 'no replay was saved' >&2; exit 1; }
+  clip="$artifacts/replay.probe"
+  "$rec" probe "$artifacts/recording-replay-1.mp4" | tee "$clip"
+  field() { awk -F= -v key="$1" '$1 == key { print $2 }' "$clip"; }
+  grep -qx 'codec=h264' "$clip"
+  awk -v d="$(field duration)" 'BEGIN { exit !(d >= 4.5 && d <= 7.5) }' || { echo "the replay lasts $(field duration) s" >&2; exit 1; }
+  pairs="$(field av_sync_events)"
+  awk -v n="$pairs" 'BEGIN { exit !(n >= 4) }' || { echo "only $pairs flash/beep pairs in the replay" >&2; exit 1; }
+  awk -v m="$(field av_offset_ms)" 'BEGIN { exit !(m >= -45 && m <= 125) }' || { echo "replay A/V offset $(field av_offset_ms) ms is noticeable" >&2; exit 1; }
+  echo "Replay: $(field frames) frames, $pairs pairs, mean offset $(field av_offset_ms) ms, worst $(field av_offset_max_ms) ms."
+fi
 
 if [[ "$stream" == 1 ]]; then
   grep -q 'skipped 0' "$artifacts/record.log" || { echo 'the stream skipped frames' >&2; exit 1; }

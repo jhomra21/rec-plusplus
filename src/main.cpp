@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <filesystem>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -36,7 +37,7 @@ std::atomic_bool interrupted{false};
 
 extern "C" void on_signal(int) { interrupted.store(true); }
 
-enum class Command { toggle, pause, resume, stop };
+enum class Command { toggle, pause, resume, stop, save_replay };
 std::mutex commands_mutex;
 std::deque<Command> commands;
 
@@ -72,8 +73,8 @@ void restore_terminal() {
 }
 #endif
 
-// Keys in a terminal: p or space toggles pause, q stops. Piped stdin takes one command per
-// line (pause, resume, toggle, stop), so scripts can drive a recording. The reader thread is
+// Keys in a terminal: p or space toggles pause, s saves the replay, q stops. Piped stdin takes
+// one command per line (pause, resume, toggle, save, stop), so scripts can drive a recording. The reader thread is
 // detached: a pending read must not keep the process alive after the movie is saved.
 void watch_input() {
     if (keyboard()) {
@@ -97,6 +98,7 @@ void watch_input() {
 #endif
                 if (key == EOF) return;
                 if (key == 'p' || key == 'P' || key == ' ') post(Command::toggle);
+                else if (key == 's' || key == 'S') post(Command::save_replay);
                 else if (key == 'q' || key == 'Q') post(Command::stop);
             }
         }).detach();
@@ -113,9 +115,22 @@ void watch_input() {
             if (line == "pause") post(Command::pause);
             else if (line == "resume") post(Command::resume);
             else if (line == "toggle") post(Command::toggle);
+            else if (line == "save") post(Command::save_replay);
             else if (line == "stop") post(Command::stop);
         }
     }).detach();
+}
+
+// rec.mov -> rec-replay-1.mp4, then -2 and so on, skipping names that exist.
+std::string replay_path(const std::string& output, unsigned& count) {
+    const auto slash = output.find_last_of("/\\");
+    const auto dot = output.find_last_of('.');
+    const std::string stem = dot != std::string::npos && (slash == std::string::npos || dot > slash) ? output.substr(0, dot) : output;
+    for (;;) {
+        const std::string path = stem + "-replay-" + std::to_string(++count) + ".mp4";
+        std::error_code error;
+        if (!std::filesystem::exists(std::filesystem::path(reinterpret_cast<const char8_t*>(path.c_str())), error)) return path;
+    }
 }
 
 std::string clock_text(double seconds) {
@@ -152,11 +167,12 @@ void usage() {
                  "  --mic-offset-ms MS             Delay the microphone (default: 0)\n"
                  "  --stream URL                   Also stream live: rtmp[s]://host[:port]/app/stream-key\n"
                  "  --stream-bitrate KBPS          Stream video kilobits/second (default: 6000)\n"
+                 "  --replay SECONDS               Keep the last 5 to 300 seconds in memory; s saves them as an MP4\n"
                  "  --test-pattern                 Synthetic video that flashes once a second\n"
                  "  --test-tone                    Add a beep with each flash as system audio\n"
                  "  --test-mic                     Add a quiet synthetic microphone\n\n"
-                 "While recording, press p or space to pause and resume, q or Ctrl-C to stop.\n"
-                 "With stdin piped, send lines: pause, resume, toggle, stop.\n";
+                 "While recording, press p or space to pause and resume, s to save the replay, q or Ctrl-C to stop.\n"
+                 "With stdin piped, send lines: pause, resume, toggle, save, stop.\n";
 }
 
 bool integer(std::string_view s, std::uint32_t& out) {
@@ -256,6 +272,10 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
         } else if (arg == "--stream") {
             if (value.empty()) { error = "--stream needs an rtmp:// or rtmps:// URL"; return false; }
             o.stream_url = value;
+        } else if (arg == "--replay") {
+            if (!integer(value, o.replay_seconds) || o.replay_seconds < 5 || o.replay_seconds > 300) {
+                error = "replay must be between 5 and 300 seconds"; return false;
+            }
         } else if (arg == "--stream-bitrate") {
             if (!integer(value, o.stream_kbps) || o.stream_kbps < 500 || o.stream_kbps > 50000) {
                 error = "stream bitrate must be between 500 and 50000 kb/s"; return false;
@@ -324,6 +344,7 @@ void show_status(const rec::Stats& stats, double recorded, bool audio, bool stre
         else std::cout << "   \033[33mstream lost\033[0m";
         if (stats.stream_dropped) std::cout << ", \033[33m" << stats.stream_dropped << " skipped\033[0m";
     }
+    if (stats.replay_seconds > 0) std::cout << "   replay " << static_cast<int>(stats.replay_seconds) << " s";
     std::cout << "\033[K" << std::flush;
 }
 } // namespace
@@ -403,7 +424,11 @@ int main(int argc, char** argv) {
     const bool live = terminal();
     const bool streaming = !options.stream_url.empty();
     std::cout << "Recording to " << options.output
-              << (keyboard() ? " (p: pause/resume, q or Ctrl-C: stop)\n" : " (Ctrl-C to stop)\n");
+              << (!keyboard() ? " (Ctrl-C to stop)\n"
+                  : options.replay_seconds ? " (p: pause/resume, s: save replay, q or Ctrl-C: stop)\n"
+                                           : " (p: pause/resume, q or Ctrl-C: stop)\n");
+    if (options.replay_seconds)
+        std::cout << "Keeping the last " << options.replay_seconds << " s for replays at " << options.stream_kbps << " kb/s\n";
     if (streaming) {
         const auto stats = recorder.stats();
         std::cout << "Streaming to " << redact(options.stream_url) << " at " << options.stream_kbps << " kb/s ("
@@ -419,10 +444,27 @@ int main(int argc, char** argv) {
         const std::chrono::duration<double> wall = std::chrono::steady_clock::now() - began;
         return std::max(0.0, wall.count() - recorder.stats().paused_seconds);
     };
+    unsigned replays = 0;
     while (!interrupted.load() && !recorder.finished()) {
         Command command;
         while (next_command(command)) {
             if (command == Command::stop) { interrupted.store(true); break; }
+            if (command == Command::save_replay) {
+                if (live) std::cout << "\r\033[K";
+                if (!options.replay_seconds) {
+                    std::cerr << "No replay buffer; record with --replay SECONDS\n";
+                } else {
+                    const auto path = replay_path(options.output, replays);
+                    double seconds = 0;
+                    if (auto saved = recorder.save_replay(path, &seconds); saved)
+                        std::cout << "Saved replay (" << std::fixed << std::setprecision(1) << seconds << " s) to " << path << '\n';
+                    else
+                        std::cerr << "Replay not saved: " << saved.error << '\n';
+                }
+                std::cout << std::flush;
+                shown -= std::chrono::seconds(1);
+                continue;
+            }
             const bool pause = command == Command::pause ||
                 (command == Command::toggle && !recorder.stats().paused);
             const auto changed = pause ? recorder.pause() : recorder.resume();
