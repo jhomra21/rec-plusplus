@@ -474,6 +474,17 @@ int main(int argc, char** argv) {
                   << "\nav_offset_max_ms=" << probe.av_offset_max_ms << '\n';
         for (std::size_t i = 0; i < probe.samples.size(); ++i)
             std::cout << "sample_" << i << '=' << +probe.samples[i].r << ',' << +probe.samples[i].g << ',' << +probe.samples[i].b << '\n';
+        const auto times = [](const char* key, const std::vector<double>& values) {
+            std::cout << key << '=';
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                char text[32];
+                std::snprintf(text, sizeof text, "%s%.4f", i ? "," : "", values[i]);
+                std::cout << text;
+            }
+            std::cout << '\n';
+        };
+        times("flashes", probe.flashes);
+        times("beeps", probe.beeps);
         return 0;
     }
     if (command != "record") { std::cerr << "unknown command: " << command << '\n'; return 2; }

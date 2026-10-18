@@ -145,6 +145,7 @@ struct Probe {
     std::uint32_t sync_events = 0;
     double av_offset_ms = 0; // Mean audio minus video; positive means audio is late.
     double av_offset_max_ms = 0; // Largest absolute offset.
+    std::vector<double> flashes, beeps;  // Every detected flash and beep, in seconds.
     struct Color { std::uint8_t r = 0, g = 0, b = 0; };
     // With a sample rectangle: its mean color in the first frame of each second.
     std::vector<Color> samples;

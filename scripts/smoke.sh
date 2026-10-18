@@ -123,19 +123,6 @@ else
   within "$(value av_sync_events "$artifacts/pause.probe")" 3 3
   within "$(value av_offset_max_ms "$artifacts/pause.probe")" 0 20
 
-  # Replay: "save" writes the last 5 s (from a keyframe) to an MP4 while the recording continues.
-  expect_failure 'replay must be between' record --test-pattern --replay 2
-  { sleep 8; echo save; sleep 6; } |
-    "$rec" record --test-pattern --test-tone -f 30 -t 10 --replay 5 -o "$artifacts/replay.mov" | tee "$artifacts/replay.record.log"
-  grep -q 'Saved replay' "$artifacts/replay.record.log"
-  grep -q 'written 300, dropped 0' "$artifacts/replay.record.log"
-  "$rec" probe "$artifacts/replay-replay-1.mp4" | tee "$artifacts/replay-clip.probe"
-  grep -qx 'codec=h264' "$artifacts/replay-clip.probe"
-  within "$(value frames "$artifacts/replay-clip.probe")" 150 215
-  within "$(value audio_duration "$artifacts/replay-clip.probe")" 4.8 7.2
-  within "$(value av_sync_events "$artifacts/replay-clip.probe")" 4 8
-  within "$(value av_offset_max_ms "$artifacts/replay-clip.probe")" 0 25
-
   # Overlays: a camera and an image composited into every frame on the GPU; "hide 1" removes
   # the camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
   png="$root/scripts/overlay-test.png"
@@ -278,6 +265,20 @@ else
 
   # The desktop app drives its own controls through a recording session.
   "$root/scripts/app-e2e.sh" "$rec" "$tmp/build/Rec.app" "$artifacts/app"
+
+  # Replay: "save" writes the last 5 s (from a keyframe) to an MP4 while the recording continues.
+  expect_failure 'replay must be between' record --test-pattern --replay 2
+  { sleep 8; echo save; sleep 6; } |
+    "$rec" record --test-pattern --test-tone -f 30 -t 10 --replay 5 -o "$artifacts/replay.mov" | tee "$artifacts/replay.record.log"
+  grep -q 'Saved replay' "$artifacts/replay.record.log"
+  grep -q 'written 300, dropped 0' "$artifacts/replay.record.log"
+  "$rec" probe "$artifacts/replay-replay-1.mp4" | tee "$artifacts/replay-clip.probe"
+  grep -qx 'codec=h264' "$artifacts/replay-clip.probe"
+  within "$(value frames "$artifacts/replay-clip.probe")" 150 215
+  within "$(value audio_duration "$artifacts/replay-clip.probe")" 4.8 7.2
+  within "$(value av_sync_events "$artifacts/replay-clip.probe")" 4 8
+  within "$(value av_offset_max_ms "$artifacts/replay-clip.probe")" 0 25
+
 
   if [[ "${REC_E2E_CAPTURE:-0}" == 1 ]]; then
     "$rec" record --display 1 -r 1080p -f 30 -t 3 --codec h264 -o "$artifacts/screen.mov" | tee "$artifacts/screen.record.log"

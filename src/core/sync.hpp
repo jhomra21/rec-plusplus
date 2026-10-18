@@ -61,6 +61,8 @@ private:
 
 // Pairs each flash with the nearest beep within 500 ms and fills the probe's sync fields.
 inline void measure_sync(const std::vector<double>& flashes, const std::vector<double>& beeps, Probe& probe) {
+    probe.flashes = flashes;
+    probe.beeps = beeps;
     double total = 0;
     for (const double flash : flashes) {
         double best = 1e9;
