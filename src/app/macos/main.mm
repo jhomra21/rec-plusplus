@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -21,7 +22,10 @@
 
 namespace {
 using rec::app::choice_index;
+using rec::app::kCameraSizes;
 using rec::app::kCodecs;
+using rec::app::kCorners;
+using rec::app::kScenes;
 using rec::app::kFormats;
 using rec::app::kFrameRates;
 using rec::app::kResolutions;
@@ -199,6 +203,8 @@ NSString* window_label(const std::string& app, const std::string& title) {
     std::string _settingsPath;
     std::vector<rec::Display> _displays;
     std::vector<rec::AudioDevice> _microphones;
+    std::vector<rec::Camera> _connected;  // Cameras found when Rec opened.
+    std::vector<rec::Camera> _cameras;    // The Camera list: "default" first.
     std::vector<rec::Window> _windows;
     std::vector<Source> _sources;
     NSArray<NSWindow*>* _pickers;  // The region picker while it is open.
@@ -217,8 +223,10 @@ NSString* window_label(const std::string& app, const std::string& title) {
     NSTextField *_status, *_detail, *_live, *_folder;
     NSLevelIndicator *_systemMeter, *_micMeter;
     NSButton *_record, *_pause, *_saveReplay, *_replay, *_systemAudio, *_microphone, *_cursor, *_stream, *_changeFolder, *_openFolder, *_showLast;
+    NSButton *_camera, *_image, *_chooseImage;
     NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service, *_replayLength;
-    NSTextField *_server, *_bitrate;
+    NSPopUpButton *_cameraDevice, *_corner, *_cameraSize, *_scene;
+    NSTextField *_server, *_bitrate, *_imageFile;
     NSSecureTextField* _key;
     NSStatusItem* _statusItem;
     NSTimer* _timer;
@@ -269,9 +277,11 @@ NSString* window_label(const std::string& app, const std::string& title) {
         auto displays = listScreen ? rec::list_displays(error) : std::vector<rec::Display>{};
         auto windows = listScreen ? rec::list_windows(error) : std::vector<rec::Window>{};
         auto microphones = rec::list_microphones(error);
+        auto cameras = rec::list_cameras(error);
         dispatch_async(dispatch_get_main_queue(), ^{
             RecController* strongSelf = weakSelf;
             if (!strongSelf) return;
+            [strongSelf showCameras:cameras];
             [strongSelf showDisplays:displays windows:windows microphones:microphones];
         });
     });
@@ -307,6 +317,25 @@ NSString* window_label(const std::string& app, const std::string& title) {
     }
     [_micDevice selectItemAtIndex:mic];
     [self refresh];
+}
+
+// The default camera, the connected ones, the test camera for self-tests, and the saved
+// camera if it is not connected.
+- (void)showCameras:(const std::vector<rec::Camera>&)cameras {
+    _connected = cameras;
+    _cameras = {{"default", "Default camera"}};
+    _cameras.insert(_cameras.end(), _connected.begin(), _connected.end());
+    if (_testPattern) _cameras.push_back({"test", "Test camera"});
+    const auto& saved = _settings.camera_device;
+    if (std::none_of(_cameras.begin(), _cameras.end(), [&](const rec::Camera& c) { return c.id == saved; }))
+        _cameras.push_back({saved, saved + " (not connected)"});
+    [_cameraDevice removeAllItems];
+    NSInteger chosen = 0;
+    for (std::size_t i = 0; i < _cameras.size(); ++i) {
+        [_cameraDevice.menu addItem:[[NSMenuItem alloc] initWithTitle:ns(_cameras[i].name) action:nil keyEquivalent:@""]];
+        if (_cameras[i].id == saved) chosen = static_cast<NSInteger>(i);
+    }
+    [_cameraDevice selectItemAtIndex:chosen];
 }
 
 // Displays, the saved region, "Select a Region…", then open windows. Each item's tag is its
@@ -492,6 +521,15 @@ NSString* window_label(const std::string& app, const std::string& title) {
     replay.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift | NSEventModifierFlagOption;
     replay.enabled = active && _session->status().replay;
     [menu addItem:replay];
+    if (const auto status = _session->status(); active && status.camera) {
+        [menu addItem:NSMenuItem.separatorItem];
+        for (std::size_t i = 0; i < kScenes.size(); ++i) {
+            NSMenuItem* scene = [self item:ns(kScenes[i].label) action:@selector(chooseScene:) key:@""];
+            scene.tag = static_cast<NSInteger>(i);
+            scene.state = status.scene == kScenes[i].value ? NSControlStateValueOn : NSControlStateValueOff;
+            [menu addItem:scene];
+        }
+    }
     if (menu == _statusItem.menu) {
         [menu addItem:NSMenuItem.separatorItem];
         [menu addItem:[self item:@"Show Rec" action:@selector(showWindow:) key:@""]];
@@ -594,7 +632,7 @@ NSString* window_label(const std::string& app, const std::string& title) {
     _detail = [NSTextField wrappingLabelWithString:@""];
     _detail.textColor = NSColor.secondaryLabelColor;
     _detail.maximumNumberOfLines = 2;
-    _detail.preferredMaxLayoutWidth = 360;
+    _detail.preferredMaxLayoutWidth = 820;
     [_detail setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     _live = label(@"");
     _live.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
@@ -655,6 +693,29 @@ NSString* window_label(const std::string& app, const std::string& title) {
                                        : [NSString stringWithFormat:@"%u %@", seconds / 60, seconds == 60 ? @"minute" : @"minutes"]];
     NSGridView* replay = [self grid:@[@[_replay, _replayLength]]];
 
+    _camera = [self check:@"Camera"];
+    _cameraDevice = [self popup:@"Camera device"];
+    _corner = [self popup:@"Camera position"];
+    for (const auto& choice : kCorners) [_corner addItemWithTitle:ns(choice.label)];
+    _cameraSize = [self popup:@"Camera size"];
+    for (const auto& choice : kCameraSizes) [_cameraSize addItemWithTitle:ns(choice.label)];
+    NSStackView* placement = [NSStackView stackViewWithViews:@[_corner, label(@"Size"), _cameraSize]];
+    placement.distribution = NSStackViewDistributionFill;
+    [_corner.widthAnchor constraintEqualToAnchor:_cameraSize.widthAnchor].active = YES;
+    _scene = [self popup:@"Scene"];
+    for (const auto& choice : kScenes) [_scene addItemWithTitle:ns(choice.label)];
+    _image = [self check:@"Image overlay"];
+    _imageFile = label(@"");
+    _imageFile.textColor = NSColor.secondaryLabelColor;
+    _imageFile.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _imageFile.accessibilityLabel = @"Image file";
+    [_imageFile setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    _chooseImage = [self button:@"Choose…" action:@selector(chooseImage:)];
+    NSStackView* imageRow = [NSStackView stackViewWithViews:@[_imageFile, _chooseImage]];
+    imageRow.distribution = NSStackViewDistributionFill;
+    NSGridView* camera = [self grid:@[@[_camera, _cameraDevice], @[label(@"Position"), placement], @[label(@"Scene"), _scene],
+                                      @[_image, imageRow]]];
+
     _folder = label(@"");
     _folder.textColor = NSColor.secondaryLabelColor;
     _folder.lineBreakMode = NSLineBreakByTruncatingMiddle;
@@ -666,17 +727,33 @@ NSString* window_label(const std::string& app, const std::string& title) {
     NSStackView* folderButtons = [NSStackView stackViewWithViews:@[_changeFolder, _openFolder, _showLast]];
     folderButtons.distribution = NSStackViewDistributionFillEqually;
 
-    NSArray<NSView*>* views = @[_status, detailRow, meters, buttons,
-                                header(@"Capture"), capture, header(@"Quality"), quality,
-                                header(@"Live stream"), live, header(@"Replay"), replay, header(@"Recordings"), _folder, folderButtons];
-    NSStackView* stack = [NSStackView stackViewWithViews:views];
+    // A full-width status area over two columns: what and how to record on the left, where
+    // it goes on the right. One column would be taller than a 13-inch screen.
+    NSArray<NSView*>* top = @[_status, detailRow, meters, buttons];
+    NSArray<NSView*>* left = @[header(@"Capture"), capture, header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons];
+    NSArray<NSView*>* right = @[header(@"Live stream"), live, header(@"Replay"), replay, header(@"Camera and image"), camera];
+    const auto column = [](NSArray<NSView*>* views) {
+        NSStackView* stack = [NSStackView stackViewWithViews:views];
+        stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+        stack.alignment = NSLayoutAttributeLeading;
+        stack.spacing = 8;
+        for (NSView* view in views) [view.widthAnchor constraintEqualToConstant:440].active = YES;
+        return stack;
+    };
+    NSStackView* leftColumn = column(left);
+    NSStackView* rightColumn = column(right);
+    for (NSView* view in @[capture, quality]) [leftColumn setCustomSpacing:18 afterView:view];
+    for (NSView* view in @[live, replay]) [rightColumn setCustomSpacing:18 afterView:view];
+    NSStackView* columns = [NSStackView stackViewWithViews:@[leftColumn, rightColumn]];
+    columns.alignment = NSLayoutAttributeTop;
+    columns.spacing = 30;
+    NSStackView* stack = [NSStackView stackViewWithViews:[top arrayByAddingObject:columns]];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment = NSLayoutAttributeLeading;
     stack.spacing = 8;
     stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
-    for (NSView* view in @[buttons, capture, quality, live, replay]) [stack setCustomSpacing:18 afterView:view];
-    for (NSView* view in views) [view.widthAnchor constraintEqualToConstant:440].active = YES;
-    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [stack setCustomSpacing:18 afterView:buttons];
+    for (NSView* view in top) [view.widthAnchor constraintEqualToConstant:910].active = YES;    stack.translatesAutoresizingMaskIntoConstraints = NO;
     NSView* content = _window.contentView;
     [content addSubview:stack];
     [NSLayoutConstraint activateConstraints:@[
@@ -704,10 +781,23 @@ NSString* window_label(const std::string& app, const std::string& title) {
     _replay.state = s.replay ? NSControlStateValueOn : NSControlStateValueOff;
     const auto length = std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds);
     [_replayLength selectItemAtIndex:length == rec::app::kReplayLengths.end() ? 1 : length - rec::app::kReplayLengths.begin()];
+    _camera.state = s.camera ? NSControlStateValueOn : NSControlStateValueOff;
+    [_corner selectItemAtIndex:choice_index(kCorners, s.camera_corner)];
+    [_cameraSize selectItemAtIndex:choice_index(kCameraSizes, s.camera_size)];
+    [_scene selectItemAtIndex:choice_index(kScenes, s.scene)];
+    _image.state = s.image ? NSControlStateValueOn : NSControlStateValueOff;
+    [self showImage];
+    [self showCameras:_connected];
     _folder.stringValue = ns(s.folder);
     _folder.toolTip = ns(s.folder);
     [self showServer];
     [self showDisplays:_displays windows:_windows microphones:_microphones];
+}
+
+- (void)showImage {
+    const auto& path = _settings.image_path;
+    _imageFile.stringValue = path.empty() ? @"No image chosen" : ns(path).lastPathComponent;
+    _imageFile.toolTip = path.empty() ? nil : ns(path);
 }
 
 // Presets show their fixed server; a custom server is typed in.
@@ -748,6 +838,12 @@ NSString* window_label(const std::string& app, const std::string& title) {
     if (s.destination == "custom") s.server = utf8(_server.stringValue);
     s.replay = _replay.state == NSControlStateValueOn;
     s.replay_seconds = rec::app::kReplayLengths[std::min(at(_replayLength), rec::app::kReplayLengths.size() - 1)];
+    s.camera = _camera.state == NSControlStateValueOn;
+    if (!_cameras.empty()) s.camera_device = _cameras[std::min(at(_cameraDevice), _cameras.size() - 1)].id;
+    s.camera_corner = kCorners[at(_corner)].value;
+    s.camera_size = kCameraSizes[at(_cameraSize)].value;
+    s.scene = kScenes[at(_scene)].value;
+    s.image = _image.state == NSControlStateValueOn;
     const int kbps = _bitrate.intValue;
     s.stream_kbps = static_cast<std::uint32_t>(std::clamp(kbps > 0 ? kbps : 6000, 500, 50000));
 }
@@ -773,7 +869,49 @@ NSString* window_label(const std::string& app, const std::string& title) {
         [self readSettings];
         [self showServer];
     }
+    if (sender == _scene) {
+        [self setScene:kScenes[static_cast<std::size_t>(std::max<NSInteger>(0, _scene.indexOfSelectedItem))].value];
+        return;
+    }
     [self refresh];
+}
+
+- (void)chooseScene:(NSMenuItem*)item {
+    if (item.tag >= 0 && item.tag < static_cast<NSInteger>(kScenes.size())) [self setScene:kScenes[static_cast<std::size_t>(item.tag)].value];
+}
+
+// While recording this moves the camera at once; otherwise it is the scene to start with.
+- (void)setScene:(const std::string&)scene {
+    if (_session->status().camera) {
+        if (auto changed = _session->set_scene(scene); !changed) {
+            _note = [@"Scene not changed: " stringByAppendingString:ns(changed.error)];
+            _noteAttention = true;
+            _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
+        }
+    }
+    _settings.scene = scene;
+    [_scene selectItemAtIndex:choice_index(kScenes, scene)];
+    rec::app::save_settings(_settingsPath, _settings);
+    [self refresh];
+}
+
+- (void)chooseImage:(id)sender {
+    NSOpenPanel* panel = [NSOpenPanel openPanel];
+    panel.canChooseDirectories = NO;
+    panel.canChooseFiles = YES;
+    panel.allowedFileTypes = @[@"png", @"jpg", @"jpeg", @"heic", @"tiff", @"tif", @"gif", @"bmp"];
+    panel.prompt = @"Choose";
+    panel.message = @"Choose an image to show over the recording";
+    __weak RecController* weakSelf = self;
+    [panel beginSheetModalForWindow:_window completionHandler:^(NSModalResponse response) {
+        RecController* strongSelf = weakSelf;
+        if (!strongSelf || response != NSModalResponseOK || !panel.URL.path) return;
+        strongSelf->_settings.image_path = utf8(panel.URL.path);
+        strongSelf->_image.state = NSControlStateValueOn;
+        [strongSelf showImage];
+        [strongSelf remember];
+        [strongSelf refresh];
+    }];
 }
 
 - (void)controlTextDidEndEditing:(NSNotification*)notification {
@@ -994,6 +1132,10 @@ NSString* window_label(const std::string& app, const std::string& title) {
                                  _stream, _service, _server, _key, _bitrate, _replay, _replayLength, _changeFolder])
         control.enabled = editable;
     _micDevice.enabled = editable && _microphone.state == NSControlStateValueOn;
+    for (NSControl* control in @[_camera, _image, _chooseImage]) control.enabled = editable;
+    for (NSControl* control in @[_cameraDevice, _corner, _cameraSize]) control.enabled = editable && _camera.state == NSControlStateValueOn;
+    // The scene is the one setting that changes during a recording, when it draws a camera.
+    _scene.enabled = editable ? _camera.state == NSControlStateValueOn : active && s.camera;
     _showLast.enabled = !_settings.last_recording.empty();
 
     const bool poll = s.state != State::idle;
@@ -1077,7 +1219,9 @@ NSString* window_label(const std::string& app, const std::string& title) {
     // Every control has an accessible name.
     __block NSString* unnamed = nil;
     ui(^{
-        for (NSControl* control in @[self->_record, self->_pause, self->_saveReplay, self->_replay, self->_replayLength, self->_source, self->_systemAudio, self->_microphone,
+        for (NSControl* control in @[self->_record, self->_pause, self->_saveReplay, self->_replay, self->_replayLength,
+                                     self->_camera, self->_cameraDevice, self->_corner, self->_cameraSize, self->_scene,
+                                     self->_image, self->_imageFile, self->_chooseImage, self->_source, self->_systemAudio, self->_microphone,
                                      self->_micDevice, self->_cursor, self->_resolution, self->_fps, self->_codec,
                                      self->_format, self->_stream, self->_service, self->_server, self->_key,
                                      self->_bitrate, self->_changeFolder, self->_openFolder, self->_showLast,
@@ -1198,7 +1342,64 @@ NSString* window_label(const std::string& app, const std::string& title) {
     wait_for(@"Ready to record", 30);
     saved(@"replay-recording");
 
-    // 6. Quitting during a recording saves the movie, then the app exits.
+    // 6. A camera and an image: the test camera in the corner, then full frame from the Scene
+    // list, then hidden from the menu bar item's menu, all during one recording. The image is a
+    // transparent 1080p PNG with a red block in its top-left corner, chosen as Choose… would.
+    NSString* imagePath = [ns(environment("REC_APP_HOME")) stringByAppendingPathComponent:@"overlay.png"];
+    {
+        NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr pixelsWide:1920 pixelsHigh:1080
+            bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO colorSpaceName:NSDeviceRGBColorSpace
+            bytesPerRow:1920 * 4 bitsPerPixel:32];
+        std::memset(rep.bitmapData, 0, 1920 * 4 * 1080);
+        for (int y = 0; y < 216; ++y)
+            for (int x = 0; x < 384; ++x) {
+                unsigned char* p = rep.bitmapData + y * 1920 * 4 + x * 4;
+                p[0] = 220; p[1] = 30; p[2] = 30; p[3] = 255;
+            }
+        if (![[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}] writeToFile:imagePath atomically:YES])
+            fail(@"could not write the overlay image");
+    }
+    set_check(_replay, false);
+    ui(^{
+        self->_settings.image_path = utf8(imagePath);
+        [self showImage];
+        for (std::size_t i = 0; i < self->_cameras.size(); ++i)
+            if (self->_cameras[i].id == "test") [self->_cameraDevice selectItemAtIndex:static_cast<NSInteger>(i)];
+    });
+    set_check(_camera, true);
+    set_check(_image, true);
+    const auto scene = [&](NSInteger index) {
+        ui(^{
+            [self->_scene selectItemAtIndex:index];
+            [self->_scene sendAction:self->_scene.action to:self->_scene.target];
+        });
+    };
+    scene(0);
+    press(_record);
+    wait_for(recording, 20);
+    __block BOOL switchable = NO;
+    ui(^{ switchable = self->_scene.enabled; });
+    if (!switchable) fail(@"the Scene list is disabled while recording with a camera");
+    usleep(2500000);
+    scene(2);  // Camera only
+    usleep(2500000);
+    __block BOOL hidden = NO;
+    ui(^{
+        NSMenu* menu = self->_statusItem.menu;
+        [self menuNeedsUpdate:menu];
+        const NSInteger at = [menu indexOfItemWithTitle:@"Screen only"];
+        if (at >= 0) {
+            [menu performActionForItemAtIndex:at];
+            hidden = YES;
+        }
+    });
+    if (!hidden) fail(@"the menu bar item's menu has no Screen only scene");
+    usleep(2500000);
+    press(_record);
+    wait_for(@"Ready to record", 30);
+    saved(@"camera");
+
+    // 7. Quitting during a recording saves the movie, then the app exits.
     press(_record);
     wait_for(recording, 20);
     sleep(2);

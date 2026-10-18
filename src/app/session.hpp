@@ -42,6 +42,13 @@ struct Settings {
     std::uint32_t stream_kbps = 6000;
     bool replay = false;              // Keep the last replay_seconds for Save Replay.
     std::uint32_t replay_seconds = 30;
+    bool camera = false;              // Draw a camera over the recording.
+    std::string camera_device = "default";  // default, test, or a camera ID.
+    std::string camera_corner = "bottom-right";
+    std::string camera_size = "medium";
+    std::string scene = "screen-camera";  // What the camera does; switchable while recording.
+    bool image = false;               // Draw an image (PNG, JPEG) over everything, fitted.
+    std::string image_path;
     std::string last_recording;
 };
 
@@ -58,6 +65,11 @@ inline constexpr std::array<Choice, 2> kFormats{{{"mp4", "MP4"}, {"mov", "MOV"}}
 inline constexpr std::array<std::uint32_t, 5> kReplayLengths{15, 30, 60, 120, 300};
 inline constexpr std::array<Choice, 3> kServices{
     {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
+inline constexpr std::array<Choice, 3> kScenes{
+    {{"screen-camera", "Screen and camera"}, {"screen", "Screen only"}, {"camera", "Camera only"}}};
+inline constexpr std::array<Choice, 4> kCorners{
+    {{"bottom-right", "Bottom right"}, {"bottom-left", "Bottom left"}, {"top-right", "Top right"}, {"top-left", "Top left"}}};
+inline constexpr std::array<Choice, 3> kCameraSizes{{{"small", "Small"}, {"medium", "Medium"}, {"large", "Large"}}};
 
 // The position of value in choices, or 0.
 template <std::size_t N>
@@ -78,6 +90,10 @@ std::string region_text(const Region& region);
 // first window of that app.
 std::optional<Window> find_window(const Settings& settings);
 
+// Where the camera goes in a scene, as fractions of the frame, and whether it shows.
+Area camera_area(const Settings& settings, const std::string& scene);
+bool camera_visible(const std::string& scene);
+
 // rtmp:// or rtmps://host/app for the destination; the stream key is appended as the last
 // segment. The Twitch and YouTube presets use RTMPS.
 std::string server_url(const Settings& settings);
@@ -97,6 +113,9 @@ struct Status {
     std::string stream_error;        // Why the stream ended; the recording continues.
     bool replay = false;             // This recording keeps a replay buffer.
     double replay_seconds = 0;       // Media the replay buffer holds now.
+    bool camera = false;             // This recording draws a camera, so scenes can switch.
+    std::string scene;               // The current scene while a camera is drawn.
+    std::uint64_t camera_frames = 0;
     std::string error;               // Why the last recording failed or ended early.
     std::string saved;               // Movie the last recording saved; empty while one runs.
 };
@@ -123,6 +142,8 @@ public:
     // Writes the replay buffer to a new replay-YYYY-MM-DD-HHMMSS.mp4 in folder; path and
     // seconds receive where and how much. Takes as long as writing the file.
     Result save_replay(const std::string& folder, std::string& path, double& seconds);
+    // Moves, hides or shows the camera at once (one of kScenes).
+    Result set_scene(const std::string& scene);
     Status status();
     void wait();  // Blocks until a stop in progress has saved the movie.
 
@@ -139,6 +160,9 @@ private:
     std::thread worker_;
     std::string error_, stream_error_, saved_;
     bool streaming_ = false, replay_ = false;
+    std::optional<std::size_t> camera_;  // The camera's overlay index in this recording.
+    Settings camera_settings_;           // Placement for scene changes.
+    std::string scene_;
     Stats last_{};
 };
 

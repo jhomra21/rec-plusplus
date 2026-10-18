@@ -9,9 +9,10 @@
 #   3. Go live to a local MediaMTX server while recording; the server's copy decodes.
 #   4. Closing the window while recording keeps recording; the next stop saves the movie.
 #   5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
-#   6. Settings persist without the stream key, which Credential Manager holds.
-#   7. Quit Rec from the notification-area menu while recording saves the movie, then exits.
-#   8. Logging off while recording saves the movie before WM_ENDSESSION returns.
+#   6. A camera and an image are drawn; the scene moves the camera while recording.
+#   7. Settings persist without the stream key, which Credential Manager holds.
+#   8. Quit Rec from the notification-area menu while recording saves the movie, then exits.
+#   9. Logging off while recording saves the movie before WM_ENDSESSION returns.
 param([string]$Rec, [string]$App, [string]$Artifacts)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
@@ -108,6 +109,18 @@ function Newest-Movie {
 }
 
 $received = Join-Path $Artifacts 'app-stream-server'
+# The camera step's image, and the synthetic camera, chosen as a person would with Browse.
+New-Item -ItemType Directory -Force $appHome | Out-Null
+$overlayImage = Join-Path $Artifacts 'app-overlay.png'
+Add-Type -AssemblyName System.Drawing
+$bitmap = New-Object System.Drawing.Bitmap 1920, 1080, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.Clear([System.Drawing.Color]::Transparent)
+$graphics.FillRectangle((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 220, 30, 30))), 0, 0, 384, 216)
+$graphics.Dispose()
+$bitmap.Save($overlayImage, [System.Drawing.Imaging.ImageFormat]::Png)
+$bitmap.Dispose()
+[IO.File]::WriteAllText((Join-Path $appHome 'settings.conf'), "camera_device=test`nimage_path=$overlayImage`n")
 $mediamtx = Start-MediaMTX (Get-MediaMTX (Join-Path (Split-Path -Parent $PSScriptRoot) 'build\tools')) $received (Join-Path $Artifacts 'app-mediamtx')
 $ui = $null
 try {
@@ -229,7 +242,34 @@ try {
     Expect-Within $full 'duration' 5 7.5
     Write-Host "5. replay: $($replay['frames']) frames ($($replay['duration']) s), $($replay['av_sync_events']) pairs, worst $($replay['av_offset_max_ms']) ms"
 
-    # 6. Closing when idle quits and saves settings, without the key.
+    # 6. Camera and image: the test camera in the corner, then full frame from the Scene list,
+    # then hidden from the notification-area menu, all during one recording. The image is a
+    # transparent 1080p PNG with a red block in its top-left corner.
+    Set-Check $ui 'Keep the last' $false
+    Set-Check $ui 'Camera' $true
+    Set-Check $ui 'Image overlay' $true
+    Press $ui 'Start Recording'
+    Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    Start-Sleep -Milliseconds 2500
+    Choose-Last $ui 'Scene'  # Camera only
+    Start-Sleep -Milliseconds 2500
+    [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1011, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Screen only"
+    Start-Sleep -Milliseconds 2500
+    Press $ui 'Stop Recording'
+    Wait-Status $ui 'Ready to record' | Out-Null
+    $movie = Newest-Movie
+    Copy-Item $movie (Join-Path $Artifacts 'app-camera.mp4')
+    $corner = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-camera-corner.probe') @('--sample', '1450,800,380,200')
+    $center = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-camera-center.probe') @('--sample', '800,400,300,200')
+    $logo = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-camera-image.probe') @('--sample', '40,40,300,150')
+    Expect-Color $corner 'sample_1' 'green'
+    Expect-Color $center 'sample_1' 'white'
+    Expect-Color $center 'sample_3' 'green'
+    Expect-Color $center 'sample_4' 'green'
+    Expect-Color $corner 'sample_6' 'white'
+    foreach ($second in 0..6) { Expect-Color $logo "sample_$second" 'red' }
+    Write-Host "6. camera and image: $($corner['frames']) frames, corner, full frame, hidden"
+    # 7. Closing when idle quits and saves settings, without the key.
     [AppWindow]::PostMessage($handle, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null
     if (-not $ui.Process.WaitForExit(15000)) { throw 'the app did not quit' }
     $settings = Get-Content -Raw (Join-Path $appHome 'settings.conf')
@@ -238,10 +278,14 @@ try {
     Expect-Text $settings 'destination=custom'
     Expect-Text $settings 'stream_kbps=3000'
     Expect-Text $settings 'last_recording='
-    Expect-Text $settings 'replay=1'
+    Expect-Text $settings 'replay=0'
+    Expect-Text $settings 'camera=1'
+    Expect-Text $settings 'camera_device=test'
+    Expect-Text $settings 'scene=screen'
+    Expect-Text $settings 'image=1'
     if ($settings.Contains('appkey')) { throw 'the stream key was written to the settings file' }
 
-    # 7. Quit from the notification-area menu while recording: the app saves the movie, then exits.
+    # 8. Quit from the notification-area menu while recording: the app saves the movie, then exits.
     $before = @(Get-ChildItem $folder -Filter '*.mp4').Count
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
@@ -254,9 +298,9 @@ try {
     $quit = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-quit.probe')
     Expect-Within $quit 'duration' 1.5 3.5
     Expect-Within $quit 'av_offset_max_ms' 0 20
-    Write-Host "7. quit while recording: $($quit['frames']) frames"
+    Write-Host "8. quit while recording: $($quit['frames']) frames"
 
-    # 8. Log off while recording: the movie is complete when WM_ENDSESSION returns, after which
+    # 9. Log off while recording: the movie is complete when WM_ENDSESSION returns, after which
     # Windows may end the process at any moment.
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
@@ -272,7 +316,7 @@ try {
     $ended = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-logoff.probe')
     Expect-Within $ended 'duration' 1.5 3.5
     Expect-Within $ended 'av_offset_max_ms' 0 20
-    Write-Host "8. log off while recording: $($ended['frames']) frames"
+    Write-Host "9. log off while recording: $($ended['frames']) frames"
     Write-Host 'app e2e passed'
 } finally {
     if ($ui -and -not $ui.Process.HasExited) { $ui.Process.Kill() }

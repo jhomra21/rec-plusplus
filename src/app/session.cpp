@@ -35,6 +35,11 @@ std::string one_line(std::string text) {
     return text;
 }
 
+template <std::size_t N>
+bool known(const std::array<Choice, N>& choices, const std::string& value) {
+    return std::any_of(choices.begin(), choices.end(), [&](const Choice& c) { return value == c.value; });
+}
+
 std::filesystem::path utf8_path(const std::string& text) {
     return std::filesystem::path(std::u8string(text.begin(), text.end()));
 }
@@ -74,7 +79,14 @@ Settings load_settings(const std::string& path) {
         else if (key == "replay_seconds") {
             const auto seconds = number(value, 30);
             if (std::find(kReplayLengths.begin(), kReplayLengths.end(), seconds) != kReplayLengths.end()) s.replay_seconds = seconds;
-        } else if (key == "last_recording") s.last_recording = value;
+        } else if (key == "camera") s.camera = yes;
+        else if (key == "camera_device" && !value.empty()) s.camera_device = value;
+        else if (key == "camera_corner" && known(kCorners, value)) s.camera_corner = value;
+        else if (key == "camera_size" && known(kCameraSizes, value)) s.camera_size = value;
+        else if (key == "scene" && known(kScenes, value)) s.scene = value;
+        else if (key == "image") s.image = yes;
+        else if (key == "image_path") s.image_path = value;
+        else if (key == "last_recording") s.last_recording = value;
     }
     return s;
 }
@@ -96,6 +108,9 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nmicrophone=" << s.microphone << "\nmicrophone_device=" << s.microphone_device
             << "\nstream=" << s.stream << "\ndestination=" << s.destination << "\nserver=" << s.server
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
+            << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
+            << "\ncamera_corner=" << s.camera_corner << "\ncamera_size=" << s.camera_size << "\nscene=" << s.scene
+            << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path)
             << "\nlast_recording=" << s.last_recording << '\n';
         if (!out) return false;
     }
@@ -170,6 +185,17 @@ std::string next_output(const std::string& folder, const std::string& format, co
     return path;
 }
 
+Area camera_area(const Settings& s, const std::string& scene) {
+    if (scene == "camera") return {};
+    const double size = s.camera_size == "small" ? 0.2 : s.camera_size == "large" ? 0.33 : 0.25;
+    // The same margin in pixels on both sides of a 16:9 frame.
+    const double mx = 0.02, my = 0.035;
+    const bool left = s.camera_corner.ends_with("left"), top = s.camera_corner.starts_with("top");
+    return {left ? mx : 1 - mx - size, top ? my : 1 - my - size, size, size};
+}
+
+bool camera_visible(const std::string& scene) { return scene != "screen"; }
+
 Session::Session(std::function<void()> changed) : changed_(std::move(changed)) {}
 
 Session::~Session() {
@@ -221,6 +247,23 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
     }
     o.stream_kbps = s.stream_kbps;
     if (s.replay) o.replay_seconds = s.replay_seconds;
+    std::optional<std::size_t> camera;
+    if (s.camera) {
+        camera = o.overlays.size();
+        Overlay c;
+        c.kind = Overlay::Kind::camera;
+        c.source = s.camera_device.empty() ? "default" : s.camera_device;
+        c.area = camera_area(s, s.scene);
+        c.visible = camera_visible(s.scene);
+        o.overlays.push_back(c);
+    }
+    if (s.image) {
+        if (s.image_path.empty()) return {"choose an image to show"};
+        Overlay i;
+        i.kind = Overlay::Kind::image;
+        i.source = s.image_path;
+        o.overlays.push_back(i);
+    }
     {
         std::lock_guard lock(mutex_);
         options_ = o;
@@ -228,6 +271,9 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
         stop_requested_ = false;
         streaming_ = s.stream;
         replay_ = s.replay;
+        camera_ = camera;
+        camera_settings_ = s;
+        scene_ = s.scene;
         error_.clear();
         stream_error_.clear();
         saved_.clear();
@@ -308,6 +354,16 @@ Result Session::save_replay(const std::string& folder, std::string& path, double
     return saved;
 }
 
+Result Session::set_scene(const std::string& scene) {
+    if (!known(kScenes, scene)) return {"unknown scene: " + scene};
+    std::lock_guard lock(mutex_);
+    if ((state_ != State::recording && state_ != State::paused) || stop_requested_) return {"not recording"};
+    if (!camera_) return {"turn on the camera before recording"};
+    auto set = recorder_->set_overlay(*camera_, camera_visible(scene), camera_area(camera_settings_, scene));
+    if (set) scene_ = scene;
+    return set;
+}
+
 Status Session::status() {
     bool ended = false;
     Status s;
@@ -337,6 +393,9 @@ Status Session::status() {
         s.reconnects = st.stream_reconnects;
         s.stream_dropped = st.stream_dropped;
         s.replay_seconds = active ? st.replay_seconds : 0;
+        s.camera = camera_.has_value();
+        s.scene = scene_;
+        s.camera_frames = st.camera_frames;
     }
     if (ended) stop();
     return s;

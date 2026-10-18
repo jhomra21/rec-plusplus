@@ -48,13 +48,18 @@ enum Control : int {
     kQualityHeader, kResolutionLabel, kResolution, kFpsLabel, kFps, kCodecLabel, kCodec, kFormatLabel, kFormat,
     kStreamHeader, kStream, kServiceLabel, kService, kServerLabel, kServer, kKeyLabel, kKey, kBitrateLabel, kBitrate,
     kReplayHeader, kReplay, kReplayLength,
+    kCameraHeader, kCamera, kCameraDevice, kPositionLabel, kCorner, kSizeLabel, kCameraSize, kSceneLabel, kScene,
+    kImage, kImageFile, kBrowseImage,
     kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast,
 };
 
-enum Command : UINT { kMenuRecord = 1000, kMenuPause, kMenuShow, kMenuFolder, kMenuQuit, kMenuReplay };
+enum Command : UINT { kMenuRecord = 1000, kMenuPause, kMenuShow, kMenuFolder, kMenuQuit, kMenuReplay, kMenuScene = 1010 };
 
 using rec::app::choice_index;
+using rec::app::kCameraSizes;
 using rec::app::kCodecs;
+using rec::app::kCorners;
+using rec::app::kScenes;
 using rec::app::kFormats;
 using rec::app::kFrameRates;
 using rec::app::kResolutions;
@@ -326,7 +331,12 @@ public:
             std::string error;
             displays_ = rec::list_displays(error);
             microphones_ = rec::list_microphones(error);
+            cameras_ = {{"default", "Default camera"}};
+            for (auto& camera : rec::list_cameras(error)) cameras_.push_back(std::move(camera));
         }).join();
+        if (test_pattern_) cameras_.push_back({"test", "Test camera"});
+        if (std::none_of(cameras_.begin(), cameras_.end(), [this](const rec::Camera& c) { return c.id == settings_.camera_device; }))
+            cameras_.push_back({settings_.camera_device, settings_.camera_device + " (not connected)"});
 
         WNDCLASSEXW wc{sizeof wc};
         wc.lpfnWndProc = &App::procedure;
@@ -443,7 +453,8 @@ private:
         title.lfHeight = -MulDiv(18, static_cast<int>(dpi_), 72);
         title_ = CreateFontIndirectW(&title);
         for (auto& [id, hwnd] : controls_) {
-            const bool header = id == kCaptureHeader || id == kQualityHeader || id == kStreamHeader || id == kFolderHeader;
+            const bool header = id == kCaptureHeader || id == kQualityHeader || id == kStreamHeader || id == kReplayHeader ||
+                                id == kCameraHeader || id == kFolderHeader;
             const HFONT font = id == kStatus ? title_ : header || id == kLive ? bold_ : font_;
             SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
@@ -458,7 +469,7 @@ private:
     HWND get(int id) const { return GetDlgItem(window_, id); }
     // Status texts can contain "&"; field labels use it for their access key.
     HWND label(int id, const wchar_t* text) {
-        const bool plain = id == kStatus || id == kDetail || id == kLive || id == kFolder;
+        const bool plain = id == kStatus || id == kDetail || id == kLive || id == kFolder || id == kImageFile;
         return add(id, WC_STATICW, text, SS_LEFT | (plain ? SS_NOPREFIX : 0));
     }
     HWND combo(int id) { return add(id, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP); }
@@ -499,6 +510,12 @@ private:
         label(kFormatLabel, L"F&ormat");
         HWND format = combo(kFormat);
 
+        label(kFolderHeader, L"Recordings");
+        label(kFolder, L"");
+        button(kChangeFolder, L"C&hange Folder...");
+        button(kOpenFolder, L"Open Fo&lder");
+        button(kShowLast, L"Show Last Recordin&g");
+
         label(kStreamHeader, L"Live stream");
         check(kStream, L"&Go live while recording");
         label(kServiceLabel, L"Ser&vice");
@@ -514,11 +531,19 @@ private:
         check(kReplay, L"Keep the las&t");
         HWND replay = combo(kReplayLength);
 
-        label(kFolderHeader, L"Recordings");
-        label(kFolder, L"");
-        button(kChangeFolder, L"C&hange Folder...");
-        button(kOpenFolder, L"Open Fo&lder");
-        button(kShowLast, L"Show Last Recordin&g");
+        label(kCameraHeader, L"Camera and image");
+        check(kCamera, L"Cam&era");
+        HWND camera = combo(kCameraDevice);
+        label(kPositionLabel, L"Pos&ition");
+        HWND corner = combo(kCorner);
+        label(kSizeLabel, L"Si&ze");
+        HWND size = combo(kCameraSize);
+        label(kSceneLabel, L"Sce&ne");
+        HWND scene = combo(kScene);
+        check(kImage, L"Image overla&y");
+        label(kImageFile, L"");
+        button(kBrowseImage, L"Bro&wse...");
+
 
 
         SendMessageW(mic, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(L"Default microphone"));
@@ -532,6 +557,10 @@ private:
         fill(codec, kCodecs);
         fill(format, kFormats);
         fill(service, kServices);
+        fill(corner, kCorners);
+        fill(size, kCameraSizes);
+        fill(scene, kScenes);
+        for (const auto& c : cameras_) SendMessageW(camera, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(c.name).c_str()));
         for (auto seconds : rec::app::kReplayLengths)
             SendMessageW(replay, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(duration_label(seconds).c_str()));
         for (auto rate : kFrameRates) SendMessageW(fps, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>((std::to_wstring(rate) + L" fps").c_str()));
@@ -552,40 +581,49 @@ private:
         refresh();
     }
 
-    // One column: full-width rows, and label/control rows for the settings.
+    // A full-width status area over two columns of settings: what and how to record on the
+    // left, where it goes on the right. Two columns keep the window shorter than a 1080p
+    // screen at 150% scaling.
     void layout() {
-        const int margin = px(20), width = px(440), label_width = px(130), row = px(26), gap = px(8);
-        int y = margin;
-        const auto place = [&](int id, int x, int top, int w, int h) { MoveWindow(get(id), x, top, w, h, FALSE); };
-        const auto line = [&](int id, int h) { place(id, margin, y, width, h); y += h + gap; };
+        const int margin = px(20), column = px(440), label_width = px(130), row = px(26), gap = px(8);
+        const int full = 2 * column + px(30);
+        int x = margin, y = margin, width = full;
+        const auto place = [&](int id, int left, int top, int w, int h) { MoveWindow(get(id), left, top, w, h, FALSE); };
+        const auto line = [&](int id, int h) { place(id, x, y, width, h); y += h + gap; };
         const auto pair = [&](int label_id, int control_id, int h) {
-            place(label_id, margin, y + px(4), label_width - gap, px(20));
+            place(label_id, x, y + px(4), label_width - gap, px(20));
             // A drop-down list's height includes its open list.
             const bool list = control_id == kSource || control_id == kMicDevice || control_id == kResolution ||
                               control_id == kFps || control_id == kCodec || control_id == kFormat || control_id == kService ||
-                              control_id == kReplayLength;
-            place(control_id, margin + label_width, y, width - label_width, list ? px(240) : h);
+                              control_id == kReplayLength || control_id == kScene;
+            place(control_id, x + label_width, y, width - label_width, list ? px(240) : h);
             y += h + gap;
         };
         const auto header = [&](int id) { y += px(10); line(id, px(20)); };
+        // A checkbox with its device list or setting beside it.
+        const auto beside = [&](int check_id, int control_id) {
+            place(check_id, x, y, label_width - gap, px(22));
+            place(control_id, x + label_width, y, width - label_width, px(240));
+            y += row + gap;
+        };
 
         line(kStatus, px(34));
-        place(kDetail, margin, y, width - px(80), px(20));
-        place(kLive, margin + width - px(70), y, px(70), px(20));
+        place(kDetail, x, y, width - px(80), px(20));
+        place(kLive, x + width - px(70), y, px(70), px(20));
         y += px(20) + gap;
         pair(kSystemLabel, kSystemMeter, px(14));
         pair(kMicLabel, kMicMeter, px(14));
-        place(kRecord, margin, y, width - 2 * (px(120) + gap), px(40));
-        place(kPause, margin + width - 2 * px(120) - gap, y, px(120), px(40));
-        place(kSaveReplay, margin + width - px(120), y, px(120), px(40));
+        place(kRecord, x, y, width - 2 * (px(140) + gap), px(40));
+        place(kPause, x + width - 2 * px(140) - gap, y, px(140), px(40));
+        place(kSaveReplay, x + width - px(140), y, px(140), px(40));
         y += px(40) + gap;
+        const int columns_top = y;
 
+        width = column;
         header(kCaptureHeader);
         pair(kSourceLabel, kSource, row);
         line(kSystemAudio, px(22));
-        place(kMicrophone, margin, y, label_width - gap, px(22));
-        place(kMicDevice, margin + label_width, y, width - label_width, px(240));
-        y += row + gap;
+        beside(kMicrophone, kMicDevice);
         line(kCursor, px(22));
 
         header(kQualityHeader);
@@ -594,6 +632,17 @@ private:
         pair(kCodecLabel, kCodec, row);
         pair(kFormatLabel, kFormat, row);
 
+        header(kFolderHeader);
+        line(kFolder, px(20));
+        const int third = (width - 2 * gap) / 3;
+        place(kChangeFolder, x, y, third, px(30));
+        place(kOpenFolder, x + third + gap, y, third, px(30));
+        place(kShowLast, x + 2 * (third + gap), y, third, px(30));
+        y += px(30);
+        const int left_bottom = y;
+
+        x = margin + column + px(30);
+        y = columns_top;
         header(kStreamHeader);
         line(kStream, px(22));
         pair(kServiceLabel, kService, row);
@@ -602,24 +651,29 @@ private:
         pair(kBitrateLabel, kBitrate, row);
 
         header(kReplayHeader);
-        place(kReplay, margin, y, label_width - gap, px(22));
-        place(kReplayLength, margin + label_width, y, width - label_width, px(240));
-        y += row + gap;
+        beside(kReplay, kReplayLength);
 
-        header(kFolderHeader);
-        line(kFolder, px(20));
-        const int third = (width - 2 * gap) / 3;
-        place(kChangeFolder, margin, y, third, px(30));
-        place(kOpenFolder, margin + third + gap, y, third, px(30));
-        place(kShowLast, margin + 2 * (third + gap), y, third, px(30));
-        y += px(30) + margin;
-        content_height_ = y;
+        header(kCameraHeader);
+        beside(kCamera, kCameraDevice);
+        const int half = (width - label_width - px(50)) / 2;
+        place(kPositionLabel, x, y + px(4), label_width - gap, px(20));
+        place(kCorner, x + label_width, y, half, px(240));
+        place(kSizeLabel, x + label_width + half + gap, y + px(4), px(50) - gap, px(20));
+        place(kCameraSize, x + width - half, y, half, px(240));
+        y += row + gap;
+        pair(kSceneLabel, kScene, row);
+        place(kImage, x, y, label_width - gap, px(22));
+        place(kImageFile, x + label_width, y + px(4), width - label_width - px(110) - gap, px(20));
+        place(kBrowseImage, x + width - px(110), y, px(110), row);
+        y += row;
+
+        content_width_ = full + 2 * margin;
+        content_height_ = std::max(left_bottom, y) + margin;
         InvalidateRect(window_, nullptr, TRUE);
     }
 
     void fit() {
-        RECT frame{0, 0, px(480), content_height_};
-        AdjustWindowRectExForDpi(&frame, static_cast<DWORD>(GetWindowLongW(window_, GWL_STYLE)), FALSE,
+        RECT frame{0, 0, content_width_, content_height_};        AdjustWindowRectExForDpi(&frame, static_cast<DWORD>(GetWindowLongW(window_, GWL_STYLE)), FALSE,
                                  static_cast<DWORD>(GetWindowLongW(window_, GWL_EXSTYLE)), dpi_);
         SetWindowPos(window_, nullptr, 0, 0, frame.right - frame.left, frame.bottom - frame.top,
                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -632,7 +686,7 @@ private:
             if (state_ == State::paused) return RGB(190, 120, 0);
         }
         if (id == kDetail && attention_) return RGB(190, 60, 0);
-        if (id == kDetail || id == kFolder) return GetSysColor(COLOR_GRAYTEXT);
+        if (id == kDetail || id == kFolder || id == kImageFile) return GetSysColor(COLOR_GRAYTEXT);
         return GetSysColor(COLOR_WINDOWTEXT);
     }
 
@@ -661,8 +715,23 @@ private:
         set_check(kReplay, s.replay);
         select(kReplayLength, static_cast<int>(std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds) -
                                                rec::app::kReplayLengths.begin()) % static_cast<int>(rec::app::kReplayLengths.size()));
+        set_check(kCamera, s.camera);
+        int camera = 0;
+        for (std::size_t i = 0; i < cameras_.size(); ++i)
+            if (cameras_[i].id == s.camera_device) camera = static_cast<int>(i);
+        select(kCameraDevice, camera);
+        select(kCorner, choice_index(kCorners, s.camera_corner));
+        select(kCameraSize, choice_index(kCameraSizes, s.camera_size));
+        select(kScene, choice_index(kScenes, s.scene));
+        set_check(kImage, s.image);
+        show_image();
         show_server();
         SetWindowTextW(get(kFolder), wide(s.folder).c_str());
+    }
+
+    void show_image() {
+        const auto& path = settings_.image_path;
+        SetWindowTextW(get(kImageFile), path.empty() ? L"No image chosen" : wide(path.substr(path.find_last_of("/\\") + 1)).c_str());
     }
 
     void fill_sources() {
@@ -781,6 +850,12 @@ private:
         s.stream = checked(kStream);
         s.replay = checked(kReplay);
         s.replay_seconds = rec::app::kReplayLengths[at(kReplayLength)];
+        s.camera = checked(kCamera);
+        s.camera_device = cameras_[std::min(at(kCameraDevice), cameras_.size() - 1)].id;
+        s.camera_corner = kCorners[at(kCorner)].value;
+        s.camera_size = kCameraSizes[at(kCameraSize)].value;
+        s.scene = kScenes[at(kScene)].value;
+        s.image = checked(kImage);
         s.destination = kServices[at(kService)].value;
         if (s.destination == "custom") s.server = narrow(text_of(get(kServer)));
         const auto kbps = std::wcstoul(text_of(get(kBitrate)).c_str(), nullptr, 10);
@@ -801,6 +876,10 @@ private:
         case kOpenFolder: case kMenuFolder: open_folder(); return;
         case kMenuQuit: quit(); return;
         case kChangeFolder: choose_folder(); return;
+        case kBrowseImage: choose_image(); return;
+        case kScene:
+            if (code == CBN_SELCHANGE) change_scene(kScenes[static_cast<std::size_t>(std::max(0, selected(kScene)))].value);
+            return;
         case kShowLast: show_last(); return;
         case kService:
             if (code == CBN_SELCHANGE) {
@@ -830,10 +909,11 @@ private:
                 SetWindowTextW(get(kKey), wide(load_key(rec::app::server_url(settings_))).c_str());
             }
             return;
-        case kStream: case kSystemAudio: case kMicrophone:
+        case kStream: case kSystemAudio: case kMicrophone: case kCamera: case kImage:
             if (code == BN_CLICKED) refresh();
             return;
         default:
+            if (id >= kMenuScene && id < kMenuScene + static_cast<int>(kScenes.size())) change_scene(kScenes[id - kMenuScene].value);
             return;
         }
     }
@@ -890,6 +970,46 @@ private:
             rec::app::save_settings(settings_path_, settings_);
         }
         note_until_ = GetTickCount64() + 5000;
+        refresh();
+    }
+
+    // While recording this moves the camera at once; otherwise it is the scene to start with.
+    void change_scene(const std::string& scene) {
+        if (session_.status().camera) {
+            if (auto changed = session_.set_scene(scene); !changed) {
+                note_ = L"Scene not changed: " + wide(changed.error);
+                note_attention_ = true;
+                note_until_ = GetTickCount64() + 5000;
+            }
+        }
+        settings_.scene = scene;
+        select(kScene, choice_index(kScenes, scene));
+        rec::app::save_settings(settings_path_, settings_);
+        refresh();
+    }
+
+    void choose_image() {
+        IFileOpenDialog* dialog = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog)))) return;
+        DWORD options = 0;
+        dialog->GetOptions(&options);
+        dialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_FORCEFILESYSTEM);
+        dialog->SetTitle(L"Choose an image to show over the recording");
+        const COMDLG_FILTERSPEC types[]{{L"Images", L"*.png;*.jpg;*.jpeg;*.bmp;*.gif;*.tif;*.tiff"}, {L"All files", L"*.*"}};
+        dialog->SetFileTypes(2, types);
+        if (SUCCEEDED(dialog->Show(window_))) {
+            IShellItem* item = nullptr;
+            PWSTR path = nullptr;
+            if (SUCCEEDED(dialog->GetResult(&item)) && SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path))) {
+                settings_.image_path = narrow(path);
+                set_check(kImage, true);
+                show_image();
+                remember();
+            }
+            CoTaskMemFree(path);
+            if (item) item->Release();
+        }
+        dialog->Release();
         refresh();
     }
 
@@ -975,6 +1095,12 @@ private:
         AppendMenuW(menu, MF_STRING | (active ? 0 : MF_GRAYED), kMenuPause, state == State::paused ? L"Resume" : L"Pause");
         AppendMenuW(menu, MF_STRING | (active && session_.status().replay ? 0 : MF_GRAYED), kMenuReplay,
                     L"Save Replay\tCtrl+Alt+Shift+R");
+        if (const auto status = session_.status(); active && status.camera) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            for (std::size_t i = 0; i < kScenes.size(); ++i)
+                AppendMenuW(menu, MF_STRING | (status.scene == kScenes[i].value ? MF_CHECKED : 0), kMenuScene + i,
+                            wide(kScenes[i].label).c_str());
+        }
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING, kMenuShow, L"Show Rec");
         AppendMenuW(menu, MF_STRING, kMenuFolder, L"Open Recordings Folder");
@@ -1062,6 +1188,10 @@ private:
                        kService, kKey, kBitrate, kReplay, kReplayLength, kChangeFolder})
             EnableWindow(get(id), editable);
         EnableWindow(get(kMicDevice), editable && checked(kMicrophone));
+        for (int id : {kCamera, kImage, kBrowseImage}) EnableWindow(get(id), editable);
+        for (int id : {kCameraDevice, kCorner, kCameraSize}) EnableWindow(get(id), editable && checked(kCamera));
+        // The scene is the one setting that changes during a recording, when it draws a camera.
+        EnableWindow(get(kScene), editable ? checked(kCamera) : active && s.camera);
         EnableWindow(get(kServer), editable);
         EnableWindow(get(kShowLast), !settings_.last_recording.empty());
 
@@ -1087,7 +1217,7 @@ private:
     HICON idle_icon_ = nullptr, recording_icon_ = nullptr;
     NOTIFYICONDATAW tray_{};
     std::vector<std::pair<int, HWND>> controls_;
-    int content_height_ = 0;
+    int content_width_ = 0, content_height_ = 0;
     std::wstring home_;
     bool test_pattern_ = false;
     bool hotkey_ = false, replay_hotkey_ = false;
@@ -1103,6 +1233,7 @@ private:
     Settings settings_;
     std::vector<rec::Display> displays_;
     std::vector<rec::AudioDevice> microphones_;
+    std::vector<rec::Camera> cameras_;  // "default" first.
     // The Source list: displays, the saved region, "Select a region...", then open windows.
     struct Source {
         enum class Kind { display, region, pick, window } kind = Kind::display;

@@ -9,7 +9,8 @@
 #   4. Go Live to a local MediaMTX server: the server's copy decodes, the key is in the keychain;
 #   5. closing the window keeps recording, and the menu bar item's menu stops it;
 #   6. with the replay buffer on, Save Replay writes the last seconds while recording goes on;
-#   7. quitting during a recording saves the movie; settings persist without the stream key.
+#   7. a camera and an image are drawn, and the scene moves the camera while recording;
+#   8. quitting during a recording saves the movie; settings persist without the stream key.
 # Usage: app-e2e.sh REC REC_APP ARTIFACTS
 set -euo pipefail
 
@@ -28,6 +29,17 @@ value() { awk -F= -v key="$1" '$1 == key { print $2 }' "$2"; }
 within() {
   awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v != "" && v + 0 >= lo && v + 0 <= hi) }' \
     || { echo "$1 is outside [$2, $3]" >&2; exit 1; }
+}
+# color KEY FILE green|red|white: a sample_N=R,G,B probe field, with room for encoding error.
+color() {
+  awk -F= -v key="$1" -v want="$3" '$1 == key {
+      split($2, c, ",")
+      found = 1
+      if (want == "green") ok = c[2] > 120 && c[2] > c[1] + 60 && c[2] > c[3] + 60
+      if (want == "red") ok = c[1] > 170 && c[1] > c[2] + 100 && c[1] > c[3] + 100
+      if (want == "white") ok = c[1] > 190 && c[2] > 190 && c[3] > 190
+    }
+    END { exit !(found && ok) }' "$2" || { echo "$1 in $2 is not $3" >&2; exit 1; }
 }
 # step NAME: the movie the self-test saved for that step.
 step() { awk -v key="$1" 'index($0, key "=") == 1 { print substr($0, length(key) + 2) }' "$report"; }
@@ -87,6 +99,20 @@ within "$(value av_offset_max_ms "$artifacts/app-stream-received.probe")" 0 55
 probe "$(step hidden)" app-hidden
 within "$(value duration "$artifacts/app-hidden.probe")" 1.5 3.5
 
+# The camera step: the test camera in the corner, then full frame, then hidden; the image's
+# red block in every second. The pattern flashes white at each second.
+camera="$(step camera)"
+[[ -f "$camera" ]] || { echo "missing movie: $camera" >&2; exit 1; }
+"$rec" probe "$camera" --sample 1450,800,380,200 | tee "$artifacts/app-camera-corner.probe"
+"$rec" probe "$camera" --sample 800,400,300,200 | tee "$artifacts/app-camera-center.probe"
+"$rec" probe "$camera" --sample 40,40,300,150 | tee "$artifacts/app-camera-image.probe"
+color sample_1 "$artifacts/app-camera-corner.probe" green
+color sample_1 "$artifacts/app-camera-center.probe" white
+color sample_3 "$artifacts/app-camera-center.probe" green
+color sample_4 "$artifacts/app-camera-center.probe" green
+color sample_6 "$artifacts/app-camera-corner.probe" white
+for second in 0 1 2 3 4 5 6; do color "sample_$second" "$artifacts/app-camera-image.probe" red; done
+
 probe "$(step replay)" app-replay
 grep -qx 'codec=h264' "$artifacts/app-replay.probe"
 within "$(value duration "$artifacts/app-replay.probe")" 3 6
@@ -105,6 +131,10 @@ grep -qx 'server=rtmp://127.0.0.1:1935/live' "$settings"
 grep -qx 'destination=custom' "$settings"
 grep -qx 'stream_kbps=3000' "$settings"
 grep -qx 'fps=30' "$settings"
-grep -qx 'replay=1' "$settings"
+grep -qx 'replay=0' "$settings"
+grep -qx 'camera=1' "$settings"
+grep -qx 'camera_device=test' "$settings"
+grep -qx 'scene=screen' "$settings"
+grep -qx 'image=1' "$settings"
 if grep -q appkey "$settings"; then echo 'the stream key was written to the settings file' >&2; exit 1; fi
 echo 'app e2e passed'
