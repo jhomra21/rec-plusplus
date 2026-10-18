@@ -44,7 +44,7 @@ macOS may prompt for Screen Recording permission on the first attempt. Allow acc
 ./build/rec record --display 1 --region 0,0,1280,720 -t 10 -o region.mov
 ```
 
-A window keeps its aspect ratio: when it is resized during a recording, the frame is scaled to fit and the rest is black. A region must fit inside its display. In the apps, the Source menu lists the displays, open windows, the last region and Select a Region…, which dims the screens so you can drag a rectangle (Esc cancels). A window is remembered by its app and title, because window IDs change when it reopens.
+A window keeps its aspect ratio: when it is resized during a recording, the frame is scaled to fit and the rest is black. A region must fit inside its display. In the apps, the Source menu lists the displays, open windows, the last region and Select a Region…, which dims the screens so you can drag a rectangle (Esc cancels). A window is remembered by its app and title, because window IDs change when it reopens. When the recorded window closes, the recording stops and is saved as if it had reached its length; `rec` prints "The window closed, so the recording stopped." and the apps say so beside the saved file.
 
 You can stop an unlimited recording with Ctrl-C:
 

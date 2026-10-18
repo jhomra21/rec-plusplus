@@ -705,6 +705,7 @@ int main(int argc, char** argv) {
                   << (stats.stream_reconnects ? ", reconnected " + std::to_string(stats.stream_reconnects) : std::string()) << '\n';
     if (!stopped) { std::cerr << stopped.error << '\n'; return 1; }
     if (!recorder.failure().empty()) { std::cerr << recorder.failure() << '\n'; return 1; }
+    if (stats.window_closed) std::cout << "The window closed, so the recording stopped.\n";
     std::cout << "Saved " << options.output << '\n';
     if (const auto lost = recorder.stream_failure(); !lost.empty()) {
         std::cerr << "Stream stopped early: " << lost << '\n';

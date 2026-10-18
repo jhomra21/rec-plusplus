@@ -127,6 +127,7 @@ struct Status {
     bool camera = false;             // This recording draws a camera, so scenes can switch.
     std::string scene;               // The current scene while a camera is drawn.
     std::uint64_t camera_frames = 0;
+    bool window_closed = false;      // The recorded window closed, which ended the recording.
     std::string error;               // Why the last recording failed or ended early.
     std::string saved;               // Movie the last recording saved; empty while one runs.
 };

@@ -681,6 +681,7 @@ public:
     Result start() {
         ComScope com;
         if (active_) return {"already recording"};
+        window_closed_.store(false);
         if (options_.fps == 0 || options_.fps > 120) return {"invalid frame rate"};
         if ((options_.test_tone || options_.test_mic) && !options_.test_pattern)
             return {"synthetic audio needs the test pattern"};
@@ -854,6 +855,7 @@ public:
         stats.system_audio_offset_ms = audio_[kSystem].enabled ? system_offset_ms_ : 0;
         stats.paused = timeline_.paused();
         stats.paused_seconds = static_cast<double>(timeline_.paused_total(now_ticks())) / kTicks;
+        stats.window_closed = window_closed_.load();
         if (live_) {
             const auto live = live_->counters();
             stats.streaming = live.live;
@@ -1527,6 +1529,12 @@ private:
                 std::this_thread::sleep_until(std::min(tick, now + milliseconds(10)));
             }
             if (stop_requested_.load() || finished_) break;
+            // The recorded window closed: end like a reached duration, so the movie is saved.
+            // GraphicsCaptureItem.Closed did not arrive for a closed window here.
+            if (options_.window && !IsWindow(reinterpret_cast<HWND>(static_cast<std::uintptr_t>(options_.window)))) {
+                window_closed_.store(true);
+                break;
+            }
             const int frame = select_frame(slot, due);
             // Retry the same timestamp for up to 500 ms on transient backpressure.
             bool appended = false;
@@ -1616,6 +1624,7 @@ private:
     std::atomic_bool active_{false};
     std::atomic_bool recording_{false};
     std::atomic_bool finished_{false};
+    std::atomic_bool window_closed_{false};
     std::atomic<std::uint64_t> captured_{0}, written_{0}, dropped_{0}, mix_written_{0};
 };
 

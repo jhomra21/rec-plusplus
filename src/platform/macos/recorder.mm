@@ -146,6 +146,13 @@ Size output_size(const Options& options, SCDisplay* display) {
     return output_size(options, native.width, native.height);
 }
 
+bool window_gone(CGWindowID window) {
+    CFArrayRef found = CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, window);
+    const bool gone = !found || CFArrayGetCount(found) == 0;
+    if (found) CFRelease(found);
+    return gone;
+}
+
 Result wait_capture(SCStream* stream, bool start) {
     __block NSError* reported = nil;
     dispatch_semaphore_t done = dispatch_semaphore_create(0);
@@ -584,6 +591,7 @@ public:
     Result start() {
         @autoreleasepool {
             if (active_) return {"already recording"};
+            window_closed_.store(false);
             if ((!options_.stream_url.empty() || options_.replay_seconds) && (options_.stream_kbps < 500 || options_.stream_kbps > 50000))
                 return {"stream bitrate must be between 500 and 50000 kb/s"};
             if (options_.replay_seconds && (options_.replay_seconds < 5 || options_.replay_seconds > 300))
@@ -679,7 +687,8 @@ public:
             if (pacer_.joinable()) { stop_requested_.store(true); pacer_.join(); }
             Result result;
             if (stream_) {
-                if (active_) result = wait_capture(stream_, false);
+                // ScreenCaptureKit refuses to stop a stream that it already stopped itself.
+                if (active_ && !stream_stopped_.load()) result = wait_capture(stream_, false);
                 // Drain callbacks before clearing their unowned C++ pointer.
                 if (queue_) dispatch_sync(queue_, ^{});
                 if (audio_queue_) dispatch_sync(audio_queue_, ^{});
@@ -763,6 +772,17 @@ public:
     }
 
     void on_failure(NSError* error) {
+        stream_stopped_.store(true);
+        // The recorded window closed: end the recording like a reached duration, so it is saved.
+        if (options_.window && window_gone(static_cast<CGWindowID>(options_.window))) {
+            {
+                std::lock_guard lock(mutex_);
+                window_closed_.store(true);
+            }
+            finished_.store(true);
+            frames_ready_.notify_one();
+            return;
+        }
         fail(message(error, "screen capture stopped unexpectedly"));
         frames_ready_.notify_one();
     }
@@ -784,6 +804,7 @@ public:
         stats.system_audio_offset_ms = audio_[kSystem].enabled ? system_offset_ms_ : 0;
         stats.paused = timeline_.paused();
         stats.paused_seconds = static_cast<double>(timeline_.paused_total(now_nanos())) / kNanos;
+        stats.window_closed = window_closed_.load();
         if (live_) {
             const auto live = live_->counters();
             stats.streaming = live.live;
@@ -942,6 +963,7 @@ private:
                 }
             }
         }
+        stream_stopped_.store(false);
         auto started = wait_capture(stream_, true);
         if (!started) { cleanup_capture(); return started; }
         active_ = true;
@@ -1377,6 +1399,8 @@ private:
     std::atomic_bool active_{false};
     std::atomic_bool recording_{false};
     std::atomic_bool finished_{false};
+    std::atomic_bool stream_stopped_{false};  // ScreenCaptureKit ended the stream itself.
+    std::atomic_bool window_closed_{false};
     std::atomic<std::uint64_t> captured_{0}, written_{0}, dropped_{0}, mix_written_{0};
     std::unique_ptr<mac::LiveStream> live_;  // Kept after stop() for its counters.
     std::unique_ptr<mac::Overlays> overlays_;

@@ -128,6 +128,7 @@ struct Stats {
     double system_audio_offset_ms = 0;
     bool paused = false;
     double paused_seconds = 0; // Total time paused, excluded from the movie.
+    bool window_closed = false; // The recorded window closed; that ended the recording, which was saved.
     bool streaming = false; // Connected and sending.
     bool stream_reconnecting = false; // Lost the server and trying to reconnect.
     std::uint32_t stream_reconnects = 0; // Times the stream reconnected after a loss.

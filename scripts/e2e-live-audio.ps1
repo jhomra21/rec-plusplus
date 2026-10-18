@@ -8,7 +8,8 @@
 # in sync too.
 # REC_E2E_PREPLAY=1 starts the stimulus 2 s before the recording, so its audio is already
 # playing when capture starts.
-# REC_E2E_SOURCE=window records only the stimulus window (found by its title), and
+# REC_E2E_SOURCE=window records only the stimulus window (found by its title) until it
+# closes: the recording must end then and be saved, with audio as long as the video.
 # REC_E2E_SOURCE=region records a 1280x720 region of the display.
 # REC_E2E_REPLAY=1 keeps a 5 s replay buffer and saves it when the stimulus ends; the clip
 # must be in sync too.
@@ -33,7 +34,9 @@ $target = switch ($source) {
     'region' { @('--display', '1', '--region', '100,100,1280,720') }
     default { @('--display', '1') }
 }
-$arguments = @('record') + $target + @('--system-audio', '-r', '1080p', '-f', '60', '-t', '12', '--codec', 'h264', '-o', $movie)
+# A window recording ends when the window closes; 30 s only bounds a missed close.
+$length = if ($source -eq 'window') { '30' } else { '12' }
+$arguments = @('record') + $target + @('--system-audio', '-r', '1080p', '-f', '60', '-t', $length, '--codec', 'h264', '-o', $movie)
 if ($env:REC_E2E_MIC -eq '1') { $arguments += @('--mic', 'default') }
 $replay = $env:REC_E2E_REPLAY -eq '1'
 if ($replay) { $arguments += @('--replay', '5') }
@@ -95,8 +98,15 @@ if ($result.Code -ne 0) { throw "Recorder failed; see $artifacts\record.log" }
 $probe = Get-Probe $rec $movie (Join-Path $artifacts 'recording.probe')
 Expect-Field $probe 'codec' 'h264'
 Expect-Field $probe 'audio_codec' 'aac'
-Expect-Field $probe 'frames' '720'
-Expect-Within $probe 'audio_duration' 11.95 12.05
+if ($source -eq 'window') {
+    Expect-Text $result.Text 'The window closed'
+    $duration = [double]::Parse($probe['duration'], [Globalization.CultureInfo]::InvariantCulture)
+    if ($duration -lt 5 -or $duration -gt 11.5) { throw "the window recording lasts $duration s" }
+    Expect-Within $probe 'audio_duration' ($duration - 0.15) ($duration + 0.15)
+} else {
+    Expect-Field $probe 'frames' '720'
+    Expect-Within $probe 'audio_duration' 11.95 12.05
+}
 if ($env:REC_E2E_MIC -eq '1') { Expect-Field $probe 'audio_tracks' '3' }
 if ($source -eq 'region') { Expect-Field $probe 'width' '1280'; Expect-Field $probe 'height' '720' }
 if ($pause) { Expect-Text $result.Text 'not in the movie' }

@@ -446,6 +446,7 @@ Status Session::status() {
         s.camera = camera_.has_value();
         s.scene = scene_;
         s.camera_frames = st.camera_frames;
+        s.window_closed = st.window_closed;
     }
     if (ended) stop();
     return s;

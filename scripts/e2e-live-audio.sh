@@ -9,7 +9,8 @@
 # in sync too.
 # REC_E2E_PREPLAY=1 starts the stimulus 2 s before the recording, so its audio is already
 # playing when capture starts.
-# REC_E2E_SOURCE=window records only the stimulus window (found by its title), and
+# REC_E2E_SOURCE=window records only the stimulus window (found by its title) until it
+# closes: the recording must end then and be saved, with audio as long as the video.
 # REC_E2E_SOURCE=region records a 1280x720 region of the display.
 # REC_E2E_REPLAY=1 keeps a 5 s replay buffer and saves it when the stimulus ends; the clip
 # must be in sync too.
@@ -44,7 +45,10 @@ case "$source" in
   "") target=(--display 1); title="" ;;
   *) echo "REC_E2E_SOURCE must be window or region" >&2; exit 1 ;;
 esac
-args=(record "${target[@]}" --system-audio -r 1080p -f 60 -t 12 --codec h264 -o "$artifacts/recording.mov")
+# A window recording ends when the window closes; 30 s only bounds a missed close.
+length=12
+if [[ "$source" == window ]]; then length=30; fi
+args=(record "${target[@]}" --system-audio -r 1080p -f 60 -t "$length" --codec h264 -o "$artifacts/recording.mov")
 if [[ "${REC_E2E_MIC:-0}" == 1 ]]; then args+=(--mic default); fi
 replay="${REC_E2E_REPLAY:-0}"
 if [[ "$replay" == 1 ]]; then args+=(--replay 5); fi
@@ -107,8 +111,15 @@ cat "$artifacts/record.log"
 value() { awk -F= -v key="$1" '$1 == key { print $2 }' "$artifacts/recording.probe"; }
 grep -qx 'codec=h264' "$artifacts/recording.probe"
 grep -qx 'audio_codec=aac' "$artifacts/recording.probe"
-grep -qx 'frames=720' "$artifacts/recording.probe"
-awk -v d="$(value audio_duration)" 'BEGIN { exit !(d >= 11.9 && d <= 12.1) }' || { echo "audio lasts $(value audio_duration) s, not 12 s" >&2; exit 1; }
+if [[ "$source" == window ]]; then
+  grep -q 'The window closed' "$artifacts/record.log" || { echo 'the recording did not end when the window closed' >&2; exit 1; }
+  duration="$(value duration)"
+  awk -v d="$duration" 'BEGIN { exit !(d >= 5 && d <= 11.5) }' || { echo "the window recording lasts $duration s" >&2; exit 1; }
+  awk -v d="$duration" -v a="$(value audio_duration)" 'BEGIN { exit !(a >= d - 0.15 && a <= d + 0.15) }' || { echo "audio lasts $(value audio_duration) s, video $duration s" >&2; exit 1; }
+else
+  grep -qx 'frames=720' "$artifacts/recording.probe"
+  awk -v d="$(value audio_duration)" 'BEGIN { exit !(d >= 11.9 && d <= 12.1) }' || { echo "audio lasts $(value audio_duration) s, not 12 s" >&2; exit 1; }
+fi
 if [[ "${REC_E2E_MIC:-0}" == 1 ]]; then grep -qx 'audio_tracks=3' "$artifacts/recording.probe"; fi
 if [[ "$source" == region ]]; then
   grep -qx 'width=1280' "$artifacts/recording.probe"

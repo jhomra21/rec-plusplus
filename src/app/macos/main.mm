@@ -1222,7 +1222,8 @@ NSString* window_label(const std::string& app, const std::string& title) {
         status = @"Ready to record";
         if (!s.error.empty()) { detail = [@"Recording failed: " stringByAppendingString:ns(s.error)]; _attention = true; }
         else if (!s.stream_error.empty()) { detail = [@"Stream stopped early: " stringByAppendingString:ns(s.stream_error)]; _attention = true; }
-        else if (!s.saved.empty()) detail = [@"Saved " stringByAppendingString:ns(s.saved).lastPathComponent];
+        else if (!s.saved.empty())
+            detail = [(s.window_closed ? @"The window closed. Saved " : @"Saved ") stringByAppendingString:ns(s.saved).lastPathComponent];
         else detail = _hotkey ? @"⇧⌘R starts and stops recording from anywhere." : @"⇧⌘R is used by another app.";
         break;
     case State::starting: status = @"Starting…"; break;
@@ -1550,38 +1551,50 @@ NSString* window_label(const std::string& app, const std::string& title) {
             [self->_scene sendAction:self->_scene.action to:self->_scene.target];
         });
     };
-    // The preview's mean color over part of it (fractions of its size), saved as a PNG too.
-    NSString* artifacts = [reportPath stringByDeletingLastPathComponent];
-    const auto preview_color = [&](NSString* name, NSString* want, double x, double y, double w, double h) {
-        __block long r = -1, g = -1, b = -1;
-        ui(^{
-            const rec::PreviewFrame& f = self->_frame;
-            if (!f.number) return;
-            r = g = b = 0;
-            for (int i = 0; i < 10; ++i)
-                for (int j = 0; j < 10; ++j) {
-                    const auto px = static_cast<std::size_t>((x + w * (i + 0.5) / 10) * f.width);
-                    const auto py = static_cast<std::size_t>((y + h * (j + 0.5) / 10) * f.height);
-                    const std::uint8_t* p = f.pixels.data() + (py * f.width + px) * 4;
-                    b += p[0]; g += p[1]; r += p[2];
-                }
-            r /= 100; g /= 100; b /= 100;
-            NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr pixelsWide:f.width
-                pixelsHigh:f.height bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
-                colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:f.width * 4 bitsPerPixel:32];
-            for (std::size_t k = 0; k < f.pixels.size(); k += 4) {
-                rep.bitmapData[k] = f.pixels[k + 2];
-                rep.bitmapData[k + 1] = f.pixels[k + 1];
-                rep.bitmapData[k + 2] = f.pixels[k];
-                rep.bitmapData[k + 3] = 255;
+    // The preview as the window shows it; only the copy happens on the main thread, so the
+    // checks do not delay the steps.
+    const auto preview = [&] {
+        __block rec::PreviewFrame shot;
+        ui(^{ shot = self->_frame; });
+        if (!shot.number) fail(@"the preview shows nothing while recording");
+        return shot;
+    };
+    // The frame's mean color over part of it (fractions of its size).
+    const auto preview_color = [&](const rec::PreviewFrame& f, NSString* name, NSString* want, double x, double y, double w, double h) {
+        long r = 0, g = 0, b = 0;
+        for (int i = 0; i < 10; ++i)
+            for (int j = 0; j < 10; ++j) {
+                const auto px = static_cast<std::size_t>((x + w * (i + 0.5) / 10) * f.width);
+                const auto py = static_cast<std::size_t>((y + h * (j + 0.5) / 10) * f.height);
+                const std::uint8_t* p = f.pixels.data() + (py * f.width + px) * 4;
+                b += p[0]; g += p[1]; r += p[2];
             }
-            [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
-                writeToFile:[artifacts stringByAppendingPathComponent:[name stringByAppendingString:@".png"]] atomically:YES];
-        });
-        if (r < 0) fail(@"the preview shows nothing while recording");
+        r /= 100; g /= 100; b /= 100;
         const bool ok = [want isEqualToString:@"green"] ? g > 120 && g > r + 60 && g > b + 60
                                                         : r > 170 && r > g + 100 && r > b + 100;
         if (!ok) fail([NSString stringWithFormat:@"%@: the preview is %ld,%ld,%ld, not %@", name, r, g, b, want]);
+    };
+    NSString* artifacts = [reportPath stringByDeletingLastPathComponent];
+    const auto save_png = [&](const rec::PreviewFrame& f, NSString* name) {
+        NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr pixelsWide:f.width
+            pixelsHigh:f.height bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+            colorSpaceName:NSDeviceRGBColorSpace bytesPerRow:f.width * 4 bitsPerPixel:32];
+        for (std::size_t k = 0; k < f.pixels.size(); k += 4) {
+            rep.bitmapData[k] = f.pixels[k + 2];
+            rep.bitmapData[k + 1] = f.pixels[k + 1];
+            rep.bitmapData[k + 2] = f.pixels[k];
+            rep.bitmapData[k + 3] = 255;
+        }
+        [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+            writeToFile:[artifacts stringByAppendingPathComponent:[name stringByAppendingString:@".png"]] atomically:YES];
+    };
+    // Steps land at movie times the script checks, however slow the machine is.
+    const auto recorded = [&](double seconds) {
+        for (int i = 0; i < 1000; ++i) {
+            if (self->_session->status().seconds >= seconds) return;
+            usleep(10000);
+        }
+        fail([NSString stringWithFormat:@"the recording did not reach %.1f s", seconds]);
     };
     scene(0);
     press(_record);
@@ -1589,16 +1602,19 @@ NSString* window_label(const std::string& app, const std::string& title) {
     __block BOOL switchable = NO;
     ui(^{ switchable = self->_scene.enabled; });
     if (!switchable) fail(@"the Scene list is disabled while recording with a camera");
-    usleep(2000000);
-    // The preview: the camera in the bottom-right corner, the image's red block top left.
-    preview_color(@"app-preview-corner", @"green", 0.76, 0.75, 0.18, 0.18);
-    preview_color(@"app-preview-corner", @"red", 0.02, 0.03, 0.15, 0.15);
-    usleep(500000);
+    recorded(2.0);
+    const auto corner = preview();
+    recorded(2.5);
     scene(2);  // Camera only
-    usleep(1500000);
-    preview_color(@"app-preview-camera", @"green", 0.35, 0.4, 0.3, 0.2);
+    recorded(4.0);
+    const auto full = preview();
+    // The preview: the camera in the bottom-right corner and the image's red block top left,
+    // then the camera full frame.
+    preview_color(corner, @"app-preview-corner", @"green", 0.76, 0.75, 0.18, 0.18);
+    preview_color(corner, @"app-preview-corner", @"red", 0.02, 0.03, 0.15, 0.15);
+    preview_color(full, @"app-preview-camera", @"green", 0.35, 0.4, 0.3, 0.2);
     note(@"preview=ok");
-    usleep(1000000);
+    recorded(5.0);
     __block BOOL hidden = NO;
     ui(^{
         NSMenu* menu = self->_statusItem.menu;
@@ -1610,10 +1626,12 @@ NSString* window_label(const std::string& app, const std::string& title) {
         }
     });
     if (!hidden) fail(@"the menu bar item's menu has no Screen only scene");
-    usleep(2500000);
+    recorded(7.5);
     press(_record);
     wait_for(@"Ready to record", 30);
     saved(@"camera");
+    save_png(corner, @"app-preview-corner");
+    save_png(full, @"app-preview-camera");
 
     // 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
     // unmuted from the menu bar item's menu 4.5 s in. The mix loses the beeps at 3 and 4 s.

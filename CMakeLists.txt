@@ -34,6 +34,9 @@ target_link_libraries(rec-cli PRIVATE rec)
 set_target_properties(rec-cli PROPERTIES OUTPUT_NAME rec)
 if(MSVC)
     target_compile_options(rec-cli PRIVATE /utf-8)
+    # Its import library would otherwise be rec.lib, the engine library's own path, and
+    # MSBuild then skipped relinking rec.exe after engine-only changes.
+    set_target_properties(rec-cli PROPERTIES ARCHIVE_OUTPUT_NAME rec-cli)
 endif()
 if(APPLE)
     # Privacy prompts read usage descriptions from the executable's embedded Info.plist.

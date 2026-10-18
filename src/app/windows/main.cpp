@@ -1322,7 +1322,10 @@ private:
             status = L"Ready to record";
             if (!s.error.empty()) { detail = L"Recording failed: " + wide(s.error); attention_ = true; }
             else if (!s.stream_error.empty()) { detail = L"Stream stopped early: " + wide(s.stream_error); attention_ = true; }
-            else if (!s.saved.empty()) detail = L"Saved " + wide(s.saved.substr(s.saved.find_last_of("/\\") + 1));
+            else if (!s.saved.empty()) {
+                detail = (s.window_closed ? L"The window closed. Saved " : L"Saved ") +
+                         wide(s.saved.substr(s.saved.find_last_of("/\\") + 1));
+            }
             else detail = hotkey_ ? L"Ctrl+Alt+R starts and stops recording from anywhere." : L"Ctrl+Alt+R is used by another app.";
             break;
         case State::starting: status = L"Starting..."; break;
