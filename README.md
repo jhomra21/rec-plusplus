@@ -70,7 +70,8 @@ Recordings are written in fragments, so a crash, kill or power loss keeps everyt
 ./build/rec record --camera default --image logo.png@0.02,0.02,0.15,0.1 -t 0 -o talk.mov
 ```
 
-While recording, keys `1` to `4`, or `show N` and `hide N` on stdin, show and hide each overlay. `rec probe FILE --sample X,Y,WIDTH,HEIGHT` prints the mean colour of a pixel rectangle at the start of each second (`sample_0=R,G,B`), which the smoke scripts use to check where overlays landed.
+While recording, keys `1` to `4`, or `show N` and `hide N` on stdin, show and hide each overlay. `rec probe FILE --sample X,Y,WIDTH,HEIGHT` prints the mean colour of a pixel rectangle at the start of each second (`sample_0=R,G,B`), which the smoke scripts use to check where overlays landed. On macOS the first use asks for camera access.
+
 ### Replay buffer
 
 `--replay SECONDS` (5 to 300) keeps the last seconds of the recording in memory, already encoded, so you can save a clip of something that just happened without stopping. Press `s` in the terminal, or send `save` on stdin, and rec writes `NAME-replay-1.mp4` (then `-2`, and so on) beside the recording:
@@ -123,7 +124,7 @@ The smoke scripts run an app end-to-end check on both platforms. `REC_APP_HOME` 
 
 The Windows app's manifest has no Windows 10 compatibility entry, on purpose. The Media Foundation MP4 sink stamps the Windows version the process sees into each file. Media Foundation's reader returned out-of-order video timestamps from the third keyframe on in fragmented files stamped 10.0.26200, and read the same files correctly once restamped 6.2 (the version a process without the entry sees). A host app that embeds `rec::Recorder` and declares Windows 10 compatibility would hit the same problem.
 
-The app has no live preview, camera, scenes or launch at login yet. On a Mac the app recorded the real display with system audio and a microphone, paused, saved, revealed the file, started from ⇧⌘R in another app, kept recording with its window closed, stopped from the menu bar and saved on ⌘Q ([evidence](docs/evidence/2026-10-17-app-mac/README.md)). That run found that sound already playing when recording started was recorded as silence on macOS. After the fix, a Mac run with the stimulus started first passed (9 pairs, mean +29.6 ms, worst 37.9 ms), and a voice clip playing before Start was in the movie from 0.0 s. On Windows a tone playing before Start was in the app's movie from the first 100 ms ([Windows evidence](docs/evidence/2026-10-17-windows-preplay/README.md)).
+The app has no live preview, camera or image settings, scenes or launch at login yet. On a Mac the app recorded the real display with system audio and a microphone, paused, saved, revealed the file, started from ⇧⌘R in another app, kept recording with its window closed, stopped from the menu bar and saved on ⌘Q ([evidence](docs/evidence/2026-10-17-app-mac/README.md)). That run found that sound already playing when recording started was recorded as silence on macOS. After the fix, a Mac run with the stimulus started first passed (9 pairs, mean +29.6 ms, worst 37.9 ms), and a voice clip playing before Start was in the movie from 0.0 s. On Windows a tone playing before Start was in the app's movie from the first 100 ms ([Windows evidence](docs/evidence/2026-10-17-windows-preplay/README.md)).
 ## Audio and sync
 
 ```sh
@@ -212,7 +213,8 @@ The live mean moved from about −12 ms on the first day to about −24 ms the n
 
 ## Current limits
 
-- Capture is display-only.
+- One display, window or region is captured at a time; cameras and images are the only other sources.
+- Camera overlays have been checked only with the synthetic camera, not a real one.
 - Pausing a live recording on macOS cuts audio per capture buffer (about 10–20 ms), so a sound that spans the pause can leave up to one buffer at the cut. Windows cuts at the exact sample. Neither has been tested with a sound playing at the pause instant.
 - Windows HEVC recordings are not crash-safe (see above).
 - Streaming to Twitch works over RTMPS and RTMP from Windows and over RTMPS from macOS, including the Mac app (bandwidth-test mode; evidence for [Windows](docs/evidence/2026-10-18-twitch/README.md) and [macOS](docs/evidence/2026-10-18-twitch-mac/README.md)). It has not been tested against YouTube, at a sustained 6 Mb/s, at 4K, or over a slow network. Reconnecting has been tested against a local server restart on both and a 5 s Wi-Fi drop on macOS, which cost about 8 s of stream. The app's Twitch and YouTube destinations use RTMPS (`rtmps://live.twitch.tv:443/app`, `rtmps://a.rtmps.youtube.com:443/live2`).
