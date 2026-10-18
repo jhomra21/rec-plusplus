@@ -1,7 +1,10 @@
 #include "app/session.hpp"
 
+#include "core/overlay.hpp"
+
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
@@ -95,6 +98,13 @@ Settings load_settings(const std::string& path) {
         else if (key == "camera_device" && !value.empty()) s.camera_device = value;
         else if (key == "camera_corner" && known(kCorners, value)) s.camera_corner = value;
         else if (key == "camera_size" && known(kCameraSizes, value)) s.camera_size = value;
+        else if (key == "camera_custom") {
+            Area a;
+            char tail = 0;
+            if (std::sscanf(value.c_str(), "%lf,%lf,%lf,%lf%c", &a.x, &a.y, &a.width, &a.height, &tail) == 4 &&
+                core::valid(a))
+                s.camera_custom = a;
+        }
         else if (key == "scene" && known(kScenes, value)) s.scene = value;
         else if (key == "image") s.image = yes;
         else if (key == "image_path") s.image_path = value;
@@ -124,7 +134,9 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nstream=" << s.stream << "\ndestination=" << s.destination << "\nserver=" << s.server
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
-            << "\ncamera_corner=" << s.camera_corner << "\ncamera_size=" << s.camera_size << "\nscene=" << s.scene
+            << "\ncamera_corner=" << s.camera_corner << "\ncamera_size=" << s.camera_size
+            << "\ncamera_custom=" << s.camera_custom.x << ',' << s.camera_custom.y << ',' << s.camera_custom.width << ','
+            << s.camera_custom.height << "\nscene=" << s.scene
             << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
             << "\nlast_recording=" << s.last_recording << '\n';
         if (!out) return false;
@@ -200,16 +212,72 @@ std::string next_output(const std::string& folder, const std::string& format, co
     return path;
 }
 
+namespace {
+// The camera's margin from the frame's edges: the same in pixels on both sides of a 16:9 frame.
+constexpr double kMarginX = 0.02, kMarginY = 0.035;
+// The smallest camera a drag makes, as a fraction of the frame.
+constexpr double kMinCamera = 0.08;
+} // namespace
+
 Area camera_area(const Settings& s, const std::string& scene) {
     if (scene == "camera") return {};
+    if (s.camera_corner == "custom") return s.camera_custom;
     const double size = s.camera_size == "small" ? 0.2 : s.camera_size == "large" ? 0.33 : 0.25;
-    // The same margin in pixels on both sides of a 16:9 frame.
-    const double mx = 0.02, my = 0.035;
     const bool left = s.camera_corner.ends_with("left"), top = s.camera_corner.starts_with("top");
-    return {left ? mx : 1 - mx - size, top ? my : 1 - my - size, size, size};
+    return {left ? kMarginX : 1 - kMarginX - size, top ? kMarginY : 1 - kMarginY - size, size, size};
 }
 
 bool camera_visible(const std::string& scene) { return scene != "screen"; }
+
+CameraDrag grab_camera(const Area& a, double x, double y, double handle_x, double handle_y) {
+    CameraDrag drag;
+    if (x < a.x - handle_x / 2 || x > a.x + a.width + handle_x / 2 || y < a.y - handle_y / 2 ||
+        y > a.y + a.height + handle_y / 2)
+        return drag;
+    drag.from = a;
+    drag.x = x;
+    drag.y = y;
+    const bool near_left = x < a.x + handle_x, near_right = x > a.x + a.width - handle_x;
+    const bool near_top = y < a.y + handle_y, near_bottom = y > a.y + a.height - handle_y;
+    if ((near_left || near_right) && (near_top || near_bottom)) {
+        drag.grab = CameraDrag::Grab::resize;
+        drag.left = near_left && !near_right ? true : near_right && !near_left ? false : x < a.x + a.width / 2;
+        drag.top = near_top && !near_bottom ? true : near_bottom && !near_top ? false : y < a.y + a.height / 2;
+    } else {
+        drag.grab = CameraDrag::Grab::move;
+    }
+    return drag;
+}
+
+Area drag_camera(const CameraDrag& drag, double x, double y) {
+    const Area& from = drag.from;
+    // Within this of a corner margin an edge lands on it, so the presets are easy to match.
+    constexpr double snap_x = 0.012, snap_y = 0.02;
+    const auto snap = [](double value, double target, double within) { return std::abs(value - target) < within ? target : value; };
+    if (drag.grab == CameraDrag::Grab::move) {
+        Area a = from;
+        a.x = std::clamp(from.x + x - drag.x, 0.0, 1 - a.width);
+        a.y = std::clamp(from.y + y - drag.y, 0.0, 1 - a.height);
+        a.x = snap(snap(a.x, kMarginX, snap_x), 1 - kMarginX - a.width, snap_x);
+        a.y = snap(snap(a.y, kMarginY, snap_y), 1 - kMarginY - a.height, snap_y);
+        return a;
+    }
+    if (drag.grab != CameraDrag::Grab::resize) return from;
+    // The corner opposite the one held stays put; the camera keeps its shape.
+    const double anchor_x = drag.left ? from.x + from.width : from.x;
+    const double anchor_y = drag.top ? from.y + from.height : from.y;
+    const double aspect = from.height / from.width;
+    const double reach_x = drag.left ? anchor_x - x : x - anchor_x;
+    const double reach_y = (drag.top ? anchor_y - y : y - anchor_y) / aspect;
+    const double room = std::min(drag.left ? anchor_x : 1 - anchor_x, (drag.top ? anchor_y : 1 - anchor_y) / aspect);
+    double width = std::clamp(std::max(reach_x, reach_y), std::min(kMinCamera, room), room);
+    // Snap the moving edge to the margin on its side.
+    const double margin_room = std::min(drag.left ? anchor_x - kMarginX : 1 - kMarginX - anchor_x,
+                                        ((drag.top ? anchor_y - kMarginY : 1 - kMarginY - anchor_y)) / aspect);
+    if (margin_room > 0 && std::abs(width - margin_room) < snap_x) width = margin_room;
+    const double height = width * aspect;
+    return {drag.left ? anchor_x - width : anchor_x, drag.top ? anchor_y - height : anchor_y, width, height};
+}
 
 namespace {
 // What a recording and the idle preview share: the picture, its overlays and the audio
@@ -265,6 +333,12 @@ Result capture_options(const Settings& s, bool test_pattern, Options& o, std::op
 }
 
 // Settings that need a new capture for the idle preview; the camera's placement does not.
+void copy_placement(Settings& to, const Settings& from) {
+    to.camera_corner = from.camera_corner;
+    to.camera_size = from.camera_size;
+    to.camera_custom = from.camera_custom;
+}
+
 std::string preview_key(const Settings& s, bool test_pattern) {
     std::string key = s.source + '\n' + std::to_string(s.display) + '\n' + s.window_app + '\n' + s.window_title +
                       '\n' + s.region + '\n' + s.resolution + '\n' + (s.cursor ? "1" : "0") + (test_pattern ? "1" : "0");
@@ -422,6 +496,21 @@ Result Session::set_scene(const std::string& scene) {
     return set;
 }
 
+Result Session::place_camera(const Settings& settings) {
+    std::lock_guard lock(mutex_);
+    if (state_ == State::recording || state_ == State::paused) {
+        if (stop_requested_) return {"not recording"};
+        if (!camera_) return {"turn on the camera before recording"};
+        copy_placement(camera_settings_, settings);
+        return recorder_->set_overlay(*camera_, camera_visible(scene_), camera_area(camera_settings_, scene_));
+    }
+    if (idle_settings_) {
+        copy_placement(*idle_settings_, settings);
+        place_idle_camera();
+    }
+    return {};
+}
+
 Result Session::set_volume(AudioInput input, int volume, bool muted) {
     std::lock_guard lock(mutex_);
     if ((state_ != State::recording && state_ != State::paused) || stop_requested_) return {"not recording"};
@@ -446,8 +535,7 @@ void Session::idle_preview(const Settings* settings, bool test_pattern) {
         const std::string key = settings ? preview_key(*settings, test_pattern) : std::string();
         if (key == idle_key_) {
             if (settings && idle_settings_) {
-                idle_settings_->camera_corner = settings->camera_corner;
-                idle_settings_->camera_size = settings->camera_size;
+                copy_placement(*idle_settings_, *settings);
                 idle_settings_->scene = settings->scene;
                 place_idle_camera();
             }

@@ -11,6 +11,7 @@
 #   5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
 #   6. A camera and an image are drawn; the scene moves the camera while recording. The
 #      preview shows the same picture, before Start too, and stops when Show preview is off.
+#      Dragging the camera in the preview moves and resizes it, before Start and while recording.
 #   7. Volume and mute change the mix while recording, from the window and the menu.
 #   8. Settings persist without the stream key, which Credential Manager holds.
 #   9. Quit Rec from the notification-area menu while recording saves the movie, then exits.
@@ -162,6 +163,24 @@ function Wait-PreviewColor($ui, [string]$path, [double[]]$area, [string]$color, 
         Start-Sleep -Milliseconds 200
     }
 }
+# Drags in the preview from one point to another, given as fractions of the 16:9 frame,
+# with the button messages and moves the mouse sends.
+function Drag-Preview($ui, [double[]]$from, [double[]]$to) {
+    $handle = (Find $ui 'Preview' $Client).Handle
+    $rect = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($handle, [ref]$rect) | Out-Null
+    $w = $rect.Right; $h = [int][math]::Floor($w * 9 / 16)
+    if ($h -gt $rect.Bottom) { $h = $rect.Bottom; $w = [int][math]::Floor($h * 16 / 9) }
+    $x0 = [int][math]::Floor(($rect.Right - $w) / 2); $y0 = [int][math]::Floor(($rect.Bottom - $h) / 2)
+    $at = { param([double]$x, [double]$y) [IntPtr](([int]($y0 + $y * $h) -shl 16) -bor [int]($x0 + $x * $w)) }
+    [AppWindow]::SendMessage($handle, 0x0201, [IntPtr]1, (& $at $from[0] $from[1])) | Out-Null  # WM_LBUTTONDOWN
+    foreach ($i in 1..10) {
+        $x = $from[0] + ($to[0] - $from[0]) * $i / 10; $y = $from[1] + ($to[1] - $from[1]) * $i / 10
+        [AppWindow]::SendMessage($handle, 0x0200, [IntPtr]1, (& $at $x $y)) | Out-Null  # WM_MOUSEMOVE, MK_LBUTTON
+        Start-Sleep -Milliseconds 20
+    }
+    [AppWindow]::SendMessage($handle, 0x0202, [IntPtr]::Zero, (& $at $to[0] $to[1])) | Out-Null  # WM_LBUTTONUP
+}
 function Newest-Movie {
     $file = Get-ChildItem $folder -Filter '*.mp4' | Sort-Object LastWriteTime | Select-Object -Last 1
     if (-not $file) { throw "no recording in $folder" }
@@ -180,7 +199,9 @@ $graphics.FillRectangle((New-Object System.Drawing.SolidBrush ([System.Drawing.C
 $graphics.Dispose()
 $bitmap.Save($overlayImage, [System.Drawing.Imaging.ImageFormat]::Png)
 $bitmap.Dispose()
-[IO.File]::WriteAllText((Join-Path $appHome 'settings.conf'), "camera_device=test`nimage_path=$overlayImage`n")
+# 30 fps keeps the check light on CI runners, which encode in software and draw with WARP;
+# at 60 fps a slow runner fell over 500 ms behind in the camera step and dropped frames.
+[IO.File]::WriteAllText((Join-Path $appHome 'settings.conf'), "fps=30`ncamera_device=test`nimage_path=$overlayImage`n")
 $mediamtx = Start-MediaMTX (Get-MediaMTX (Join-Path (Split-Path -Parent $PSScriptRoot) 'build\tools')) $received (Join-Path $Artifacts 'app-mediamtx')
 $ui = $null
 try {
@@ -354,6 +375,38 @@ try {
     foreach ($second in 0..6) { Expect-Color $logo "sample_$second" 'red' }
     Write-Host "6. camera and image: $($corner['frames']) frames, corner, full frame, hidden; the preview matched, before Start too"
 
+    # 6b. Camera layout: before Start, drag the camera from its corner to the middle and its
+    # top-left corner outwards; while recording, drag it to the top right. The preview and
+    # the movie follow each drag.
+    $combo = (Find $ui 'Scene' $ComboBox).Handle
+    [AppWindow]::SendMessage($combo, 0x014E, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # CB_SETCURSEL: Screen and camera
+    [AppWindow]::SendMessage($ui.Window, 0x0111, [IntPtr]((1 -shl 16) -bor [AppWindow]::GetDlgCtrlID($combo)), $combo) | Out-Null
+    $layout = Join-Path $Artifacts 'app-preview-layout.png'
+    Wait-PreviewColor $ui $layout @(0.76, 0.75, 0.18, 0.18) 'green'
+    Drag-Preview $ui @(0.855, 0.84) @(0.5, 0.5)  # The camera's middle: it moves to 0.375,0.375
+    Wait-PreviewColor $ui $layout @(0.42, 0.42, 0.16, 0.16) 'green'
+    Wait-PreviewColor $ui $layout @(0.8, 0.75, 0.15, 0.15) 'green' -Not
+    Drag-Preview $ui @(0.376, 0.376) @(0.3, 0.3)  # Its top-left corner: 0.3,0.3 to 0.625,0.625
+    Wait-PreviewColor $ui $layout @(0.31, 0.31, 0.07, 0.07) 'green'
+    if (((Find $ui 'Size' $ComboBox).Item.accState(0) -band 0x1) -eq 0) { throw 'Size stayed enabled for a dragged camera' }
+    Press $ui 'Start Recording'
+    Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    Start-Sleep -Milliseconds 2000
+    Drag-Preview $ui @(0.46, 0.46) @(0.96, 0.21)  # To the right edge; the top snaps to the margin
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-layout-moved.png') @(0.72, 0.08, 0.22, 0.22) 'green'
+    Start-Sleep -Milliseconds 2500
+    Press $ui 'Stop Recording'
+    Wait-Status $ui 'Ready to record' | Out-Null
+    $movie = Newest-Movie
+    Copy-Item $movie (Join-Path $Artifacts 'app-layout.mp4')
+    $middle = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-layout-middle.probe') @('--sample', '770,430,290,160')
+    $moved = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-layout-moved.probe') @('--sample', '1380,90,440,250')
+    Expect-Color $middle 'sample_1' 'green'
+    Expect-Color $moved 'sample_1' 'white'
+    Expect-Color $middle 'sample_4' 'white'
+    Expect-Color $moved 'sample_4' 'green'
+    Write-Host "6b. camera layout: $($middle['frames']) frames; dragged and resized before Start, moved while recording"
+
     # 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
     # unmuted from the notification-area menu 4.5 s in. The mix loses the beeps at 3 and 4 s.
     Set-Check $ui 'Microphone' $true
@@ -385,11 +438,13 @@ try {
     Expect-Text $settings "server=$server"
     Expect-Text $settings 'destination=custom'
     Expect-Text $settings 'stream_kbps=3000'
+    Expect-Text $settings 'fps=30'
     Expect-Text $settings 'last_recording='
     Expect-Text $settings 'replay=0'
     Expect-Text $settings 'camera=1'
     Expect-Text $settings 'camera_device=test'
-    Expect-Text $settings 'scene=screen'
+    Expect-Text $settings 'scene=screen-camera'
+    Expect-Text $settings 'camera_corner=custom'
     Expect-Text $settings 'image=1'
     Expect-Text $settings 'preview=1'
     Expect-Text $settings 'system_volume=-6'

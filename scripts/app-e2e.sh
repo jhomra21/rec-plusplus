@@ -11,6 +11,7 @@
 #   6. with the replay buffer on, Save Replay writes the last seconds while recording goes on;
 #   7. a camera and an image are drawn, and the scene moves the camera while recording; the
 #      preview shows the same picture, before Start too, and Show preview turns it off;
+#      dragging the camera in the preview moves and resizes it, before Start and while recording;
 #   8. volume and mute change the mix while recording, from the window and the menu bar item;
 #   9. quitting during a recording saves the movie; settings persist without the stream key.
 # Usage: app-e2e.sh REC REC_APP ARTIFACTS
@@ -80,6 +81,7 @@ grep -qx 'keychain=ok' "$report"
 grep -qx 'quit=started' "$report"
 grep -qx 'idle-preview=ok' "$report"
 grep -qx 'preview=ok' "$report"
+grep -qx 'camera-layout=ok' "$report"
 grep -q '^live=● LIVE' "$report"
 
 probe "$(step pause)" app-pause
@@ -118,6 +120,16 @@ color sample_4 "$artifacts/app-camera-center.probe" green
 color sample_6 "$artifacts/app-camera-corner.probe" white
 for second in 0 1 2 3 4 5 6; do color "sample_$second" "$artifacts/app-camera-image.probe" red; done
 
+# The layout step: the camera dragged to the middle before Start, then to the top right at 2 s.
+layout="$(step layout)"
+[[ -f "$layout" ]] || { echo "missing movie: $layout" >&2; exit 1; }
+"$rec" probe "$layout" --sample 770,430,290,160 | tee "$artifacts/app-layout-middle.probe"
+"$rec" probe "$layout" --sample 1380,90,440,250 | tee "$artifacts/app-layout-moved.probe"
+color sample_1 "$artifacts/app-layout-middle.probe" green
+color sample_1 "$artifacts/app-layout-moved.probe" white
+color sample_4 "$artifacts/app-layout-middle.probe" white
+color sample_4 "$artifacts/app-layout-moved.probe" green
+
 # System audio at -6 dB, muted 2.5 s in, unmuted 4.5 s in: the mix has no beeps at 3 and 4 s.
 probe "$(step mute)" app-mute
 value beeps "$artifacts/app-mute.probe" | tr , '\n' | awk '
@@ -146,7 +158,8 @@ grep -qx 'fps=30' "$settings"
 grep -qx 'replay=0' "$settings"
 grep -qx 'camera=1' "$settings"
 grep -qx 'camera_device=test' "$settings"
-grep -qx 'scene=screen' "$settings"
+grep -qx 'scene=screen-camera' "$settings"
+grep -qx 'camera_corner=custom' "$settings"
 grep -qx 'image=1' "$settings"
 grep -qx 'preview=1' "$settings"
 grep -qx 'system_volume=-6' "$settings"

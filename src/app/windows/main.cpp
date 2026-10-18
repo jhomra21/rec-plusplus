@@ -400,9 +400,121 @@ private:
         case WM_PRINTCLIENT:
             if (app) app->paint_preview(window, reinterpret_cast<HDC>(w));
             return 0;
+        case WM_LBUTTONDOWN:
+        case WM_MOUSEMOVE:
+        case WM_LBUTTONUP:
+        case WM_MOUSELEAVE:
+        case WM_CAPTURECHANGED:
+            if (app) app->preview_mouse(window, message, l);
+            return 0;
+        case WM_SETCURSOR:
+            if (app && LOWORD(l) == HTCLIENT && app->preview_cursor(window)) return TRUE;
+            return DefWindowProcW(window, message, w, l);
         default:
             return DefWindowProcW(window, message, w, l);
         }
+    }
+
+    // Where the frame is drawn in the preview: the output's shape, centered.
+    RECT frame_rect(HWND window) const {
+        RECT area;
+        GetClientRect(window, &area);
+        if (!frame_.number) return {};
+        const int width = area.right, height = area.bottom;
+        int w = width, h = static_cast<int>(static_cast<long long>(width) * frame_.height / frame_.width);
+        if (h > height) {
+            h = height;
+            w = static_cast<int>(static_cast<long long>(height) * frame_.width / frame_.height);
+        }
+        const int x = (width - w) / 2, y = (height - h) / 2;
+        return {x, y, x + w, y + h};
+    }
+
+    // The camera's area while it can be dragged in the preview: it is in the frame where the
+    // settings put it, before Start or in this recording.
+    std::optional<rec::Area> draggable_camera() const {
+        if (!frame_.number || settings_.scene != "screen-camera") return std::nullopt;
+        if (state_ == State::idle ? !checked(kCamera) : !camera_live_) return std::nullopt;
+        return rec::app::camera_area(settings_, settings_.scene);
+    }
+
+    // The pointer at l in frame fractions, and the corner handle's size in them.
+    struct FramePoint { double x, y, handle_x, handle_y; };
+    std::optional<FramePoint> frame_point(HWND window, LPARAM l) const {
+        const RECT r = frame_rect(window);
+        const double w = r.right - r.left, h = r.bottom - r.top;
+        if (w <= 0 || h <= 0) return std::nullopt;
+        return FramePoint{(GET_X_LPARAM(l) - r.left) / w, (GET_Y_LPARAM(l) - r.top) / h, px(12) / w, px(12) / h};
+    }
+
+    rec::app::CameraDrag hit_camera(HWND window, LPARAM l) const {
+        const auto area = draggable_camera();
+        const auto p = frame_point(window, l);
+        if (!area || !p) return {};
+        return rec::app::grab_camera(*area, p->x, p->y, p->handle_x, p->handle_y);
+    }
+
+    // Dragging the camera in the preview moves it, dragging a corner resizes it; the
+    // recording or the preview before Start follows at once.
+    void preview_mouse(HWND window, UINT message, LPARAM l) {
+        using Grab = rec::app::CameraDrag::Grab;
+        switch (message) {
+        case WM_LBUTTONDOWN:
+            drag_ = hit_camera(window, l);
+            if (drag_.grab == Grab::none) return;
+            SetCapture(window);
+            outline_ = drag_.from;
+            InvalidateRect(window, nullptr, FALSE);
+            return;
+        case WM_MOUSEMOVE:
+            if (drag_.grab != Grab::none) {
+                const auto p = frame_point(window, l);
+                if (!p) return;
+                outline_ = rec::app::drag_camera(drag_, p->x, p->y);
+                if (settings_.camera_corner != "custom") select(kCorner, choice_index(kCorners, "custom"));
+                settings_.camera_corner = "custom";
+                settings_.camera_custom = outline_;
+                session_.place_camera(settings_);
+                InvalidateRect(window, nullptr, FALSE);
+                return;
+            }
+            if (const bool over = hit_camera(window, l).grab != Grab::none; over != hover_) {
+                hover_ = over;
+                if (over) {
+                    TRACKMOUSEEVENT track{sizeof track, TME_LEAVE, window, 0};
+                    TrackMouseEvent(&track);
+                }
+                InvalidateRect(window, nullptr, FALSE);
+            }
+            return;
+        case WM_MOUSELEAVE:
+            hover_ = false;
+            InvalidateRect(window, nullptr, FALSE);
+            return;
+        case WM_LBUTTONUP:
+        case WM_CAPTURECHANGED:
+            if (drag_.grab == Grab::none) return;
+            drag_ = {};
+            if (message == WM_LBUTTONUP) ReleaseCapture();
+            rec::app::save_settings(settings_path_, settings_);
+            InvalidateRect(window, nullptr, FALSE);
+            refresh();
+            return;
+        default:
+            return;
+        }
+    }
+
+    bool preview_cursor(HWND window) {
+        using Grab = rec::app::CameraDrag::Grab;
+        POINT at;
+        GetCursorPos(&at);
+        ScreenToClient(window, &at);
+        const auto grab = drag_.grab != Grab::none ? drag_ : hit_camera(window, MAKELPARAM(at.x, at.y));
+        if (grab.grab == Grab::none) return false;
+        const LPCWSTR shape = grab.grab == Grab::move ? IDC_SIZEALL : grab.left == grab.top ? IDC_SIZENWSE : IDC_SIZENESW;
+        SetCursor(LoadCursorW(nullptr, shape));
+        return true;
     }
 
     // The newest frame in the output's shape, centered on dark gray.
@@ -411,13 +523,8 @@ private:
         GetClientRect(window, &area);
         const int saved = SaveDC(dc);
         if (frame_.number) {
-            const int width = area.right, height = area.bottom;
-            int w = width, h = static_cast<int>(static_cast<long long>(width) * frame_.height / frame_.width);
-            if (h > height) {
-                h = height;
-                w = static_cast<int>(static_cast<long long>(height) * frame_.width / frame_.height);
-            }
-            const int x = (width - w) / 2, y = (height - h) / 2;
+            const RECT frame = frame_rect(window);
+            const int x = frame.left, y = frame.top, w = frame.right - frame.left, h = frame.bottom - frame.top;
             BITMAPINFO info{};
             info.bmiHeader.biSize = sizeof info.bmiHeader;
             info.bmiHeader.biWidth = static_cast<LONG>(frame_.width);
@@ -429,6 +536,19 @@ private:
             SetBrushOrgEx(dc, 0, 0, nullptr);
             StretchDIBits(dc, x, y, w, h, 0, 0, static_cast<int>(frame_.width), static_cast<int>(frame_.height),
                           frame_.pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
+            // The camera's outline while it is held or the pointer is over it.
+            const auto camera = drag_.grab != rec::app::CameraDrag::Grab::none ? std::optional<rec::Area>(outline_)
+                              : hover_ ? draggable_camera() : std::nullopt;
+            if (camera) {
+                RECT box{x + static_cast<int>(std::lround(camera->x * w)), y + static_cast<int>(std::lround(camera->y * h)),
+                         x + static_cast<int>(std::lround((camera->x + camera->width) * w)),
+                         y + static_cast<int>(std::lround((camera->y + camera->height) * h))};
+                FrameRect(dc, &box, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+                InflateRect(&box, -1, -1);
+                FrameRect(dc, &box, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+                InflateRect(&box, -1, -1);
+                FrameRect(dc, &box, static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+            }
             ExcludeClipRect(dc, x, y, x + w, y + h);
         }
         FillRect(dc, &area, preview_brush_);
@@ -1405,7 +1525,10 @@ private:
         for (int id : {kSystemVolume, kSystemMute}) EnableWindow(get(id), editable ? checked(kSystemAudio) : active && s.system_audio);
         for (int id : {kMicVolume, kMicMute}) EnableWindow(get(id), editable ? checked(kMicrophone) : active && s.microphone);
         for (int id : {kCamera, kImage, kBrowseImage}) EnableWindow(get(id), editable);
-        for (int id : {kCameraDevice, kCorner, kCameraSize}) EnableWindow(get(id), editable && checked(kCamera));
+        for (int id : {kCameraDevice, kCorner}) EnableWindow(get(id), editable && checked(kCamera));
+        // A dragged camera is sized by its corners.
+        EnableWindow(get(kCameraSize), editable && checked(kCamera) && selected(kCorner) != choice_index(kCorners, "custom"));
+        camera_live_ = active && s.camera;
         // The scene is the one setting that changes during a recording, when it draws a camera.
         EnableWindow(get(kScene), editable ? checked(kCamera) : active && s.camera);
         EnableWindow(get(kServer), editable);
@@ -1473,6 +1596,10 @@ private:
     bool note_attention_ = false;
     bool polling_ = false;
     bool previewing_ = false;
+    bool camera_live_ = false;  // This recording draws a camera.
+    rec::app::CameraDrag drag_;
+    rec::Area outline_{};       // Where the held camera is going.
+    bool hover_ = false;        // The pointer is over the camera in the preview.
     rec::PreviewFrame frame_;
     std::wstring preview_hint_;  // Shown while the preview has no frame.
     HBRUSH preview_brush_ = nullptr;

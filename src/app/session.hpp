@@ -49,8 +49,9 @@ struct Settings {
     std::uint32_t replay_seconds = 30;
     bool camera = false;              // Draw a camera over the recording.
     std::string camera_device = "default";  // default, test, or a camera ID.
-    std::string camera_corner = "bottom-right";
+    std::string camera_corner = "bottom-right";  // One of kCorners; "custom" uses camera_custom.
     std::string camera_size = "medium";
+    Area camera_custom{0.73, 0.715, 0.25, 0.25};  // Where the camera was dragged, as fractions of the frame.
     std::string scene = "screen-camera";  // What the camera does; switchable while recording.
     bool image = false;               // Draw an image (PNG, JPEG) over everything, fitted.
     std::string image_path;
@@ -76,8 +77,11 @@ inline constexpr std::array<Choice, 3> kServices{
     {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
 inline constexpr std::array<Choice, 3> kScenes{
     {{"screen-camera", "Screen and camera"}, {"screen", "Screen only"}, {"camera", "Camera only"}}};
-inline constexpr std::array<Choice, 4> kCorners{
-    {{"bottom-right", "Bottom right"}, {"bottom-left", "Bottom left"}, {"top-right", "Top right"}, {"top-left", "Top left"}}};
+inline constexpr std::array<Choice, 5> kCorners{{{"bottom-right", "Bottom right"},
+                                                {"bottom-left", "Bottom left"},
+                                                {"top-right", "Top right"},
+                                                {"top-left", "Top left"},
+                                                {"custom", "Custom"}}};
 inline constexpr std::array<Choice, 3> kCameraSizes{{{"small", "Small"}, {"medium", "Medium"}, {"large", "Large"}}};
 
 // The position of value in choices, or 0.
@@ -102,6 +106,22 @@ std::optional<Window> find_window(const Settings& settings);
 // Where the camera goes in a scene, as fractions of the frame, and whether it shows.
 Area camera_area(const Settings& settings, const std::string& scene);
 bool camera_visible(const std::string& scene);
+
+// Moving and resizing the camera with the pointer in the preview. Points are fractions of
+// the frame, x from the left and y from the top.
+struct CameraDrag {
+    enum class Grab { none, move, resize };
+    Grab grab = Grab::none;
+    Area from;               // The camera's area when the drag began.
+    double x = 0, y = 0;     // Where it began.
+    bool left = false, top = false;  // The corner held while resizing.
+};
+// What a press at x,y takes hold of: a corner of area (within handle_x, handle_y of it)
+// resizes the camera, anywhere else inside moves it.
+CameraDrag grab_camera(const Area& area, double x, double y, double handle_x, double handle_y);
+// The camera's area with the pointer now at x,y: it stays inside the frame and keeps its
+// shape; a resize keeps the opposite corner in place, and edges snap to the corner margins.
+Area drag_camera(const CameraDrag& drag, double x, double y);
 
 // rtmp:// or rtmps://host/app for the destination; the stream key is appended as the last
 // segment. The Twitch and YouTube presets use RTMPS.
@@ -159,6 +179,9 @@ public:
     Result save_replay(const std::string& folder, std::string& path, double& seconds);
     // Moves, hides or shows the camera at once (one of kScenes).
     Result set_scene(const std::string& scene);
+    // Moves the camera to settings' corner, size or custom area at once: in the recording,
+    // or in the preview before Start.
+    Result place_camera(const Settings& settings);
     // Changes a source's volume and mute at once; the source must be in this recording.
     Result set_volume(AudioInput input, int volume, bool muted);
     // Copies the recording's newest preview frame when it is newer than frame.number.

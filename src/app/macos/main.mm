@@ -18,6 +18,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unistd.h>
 #include <vector>
@@ -193,7 +194,36 @@ NSString* window_label(const std::string& app, const std::string& title) {
 }
 @end
 
-@interface RecController : NSObject <NSApplicationDelegate, NSMenuDelegate, NSTextFieldDelegate>
+// The preview passes the pointer to its delegate, which moves and resizes the camera in it.
+enum class Pointer { down, dragged, up, moved, exited };
+@protocol PreviewDelegate
+- (void)preview:(NSView*)view pointer:(Pointer)pointer event:(NSEvent*)event;
+@end
+
+@interface PreviewView : NSView
+@property(nonatomic, weak) id<PreviewDelegate> delegate;
+@end
+
+@implementation PreviewView
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    for (NSTrackingArea* area in self.trackingAreas) [self removeTrackingArea:area];
+    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                       options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                                                               NSTrackingActiveInActiveApp | NSTrackingInVisibleRect
+                                                         owner:self
+                                                      userInfo:nil]];
+}
+- (BOOL)acceptsFirstMouse:(NSEvent*)event { return YES; }
+- (BOOL)mouseDownCanMoveWindow { return NO; }
+- (void)mouseDown:(NSEvent*)event { [self.delegate preview:self pointer:Pointer::down event:event]; }
+- (void)mouseDragged:(NSEvent*)event { [self.delegate preview:self pointer:Pointer::dragged event:event]; }
+- (void)mouseUp:(NSEvent*)event { [self.delegate preview:self pointer:Pointer::up event:event]; }
+- (void)mouseMoved:(NSEvent*)event { [self.delegate preview:self pointer:Pointer::moved event:event]; }
+- (void)mouseExited:(NSEvent*)event { [self.delegate preview:self pointer:Pointer::exited event:event]; }
+@end
+
+@interface RecController : NSObject <NSApplicationDelegate, NSMenuDelegate, NSTextFieldDelegate, PreviewDelegate>
 - (void)toggleRecord:(id)sender;
 - (void)saveReplay:(id)sender;
 - (void)refresh;
@@ -235,8 +265,14 @@ NSString* window_label(const std::string& app, const std::string& title) {
     NSSecureTextField* _key;
     NSStatusItem* _statusItem;
     NSTimer* _timer;
-    NSView* _preview;
+    PreviewView* _preview;
     NSTextField* _previewHint;
+    CALayer* _outline;               // Around the camera while the pointer holds or is over it.
+    rec::app::CameraDrag _drag;
+    rec::Area _outlineArea;          // Where the held camera is going.
+    bool _hover;
+    bool _cameraLive;                // This recording draws a camera.
+    State _shownState;
     rec::PreviewFrame _frame;
     NSTimer* _previewTimer;
     bool _previewing;
@@ -698,10 +734,16 @@ NSString* window_label(const std::string& app, const std::string& title) {
                                       @[label(@"Microphone"), _micMeter], @[volumeRow(_micVolume, _micVolumeText, _micMute)]]];
 
     // The newest frame as encoded, in the output's shape on dark gray.
-    _preview = [[NSView alloc] init];
+    _preview = [[PreviewView alloc] init];
+    _preview.delegate = self;
     _preview.wantsLayer = YES;
     _preview.layer.backgroundColor = [NSColor colorWithWhite:0.11 alpha:1].CGColor;
     _preview.layer.contentsGravity = kCAGravityResizeAspect;
+    _outline = [CALayer layer];
+    _outline.borderColor = NSColor.whiteColor.CGColor;
+    _outline.borderWidth = 2;
+    _outline.hidden = YES;
+    [_preview.layer addSublayer:_outline];
     _preview.accessibilityElement = YES;
     _preview.accessibilityRole = NSAccessibilityImageRole;
     _preview.accessibilityLabel = @"Preview";
@@ -1208,6 +1250,98 @@ NSString* window_label(const std::string& app, const std::string& title) {
     CGDataProviderRelease(provider);
 }
 
+// Where the frame is drawn in the preview: the output's shape, centered (view coordinates,
+// origin bottom left).
+- (NSRect)previewFrameRect {
+    const NSRect b = _preview.bounds;
+    if (!_frame.number || !_frame.width || !_frame.height) return NSZeroRect;
+    const double aspect = static_cast<double>(_frame.width) / _frame.height;
+    double w = b.size.width, h = w / aspect;
+    if (h > b.size.height) {
+        h = b.size.height;
+        w = h * aspect;
+    }
+    return NSMakeRect(b.origin.x + (b.size.width - w) / 2, b.origin.y + (b.size.height - h) / 2, w, h);
+}
+
+// The camera's area while it can be dragged in the preview: it is in the frame where the
+// settings put it, before Start or in this recording.
+- (std::optional<rec::Area>)draggableCamera {
+    if (!_frame.number || _settings.scene != "screen-camera") return std::nullopt;
+    if (_shownState == State::idle ? _camera.state != NSControlStateValueOn : !_cameraLive) return std::nullopt;
+    return rec::app::camera_area(_settings, _settings.scene);
+}
+
+- (rec::app::CameraDrag)grabAt:(NSPoint)point {
+    const auto area = [self draggableCamera];
+    const NSRect r = [self previewFrameRect];
+    if (!area || r.size.width <= 0) return {};
+    const double x = (point.x - r.origin.x) / r.size.width, y = 1 - (point.y - r.origin.y) / r.size.height;
+    return rec::app::grab_camera(*area, x, y, 12 / r.size.width, 12 / r.size.height);
+}
+
+- (void)showOutline {
+    const auto area = _drag.grab != rec::app::CameraDrag::Grab::none ? std::optional<rec::Area>(_outlineArea)
+                    : _hover ? [self draggableCamera] : std::nullopt;
+    const NSRect r = [self previewFrameRect];
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    _outline.hidden = !area || r.size.width <= 0;
+    if (!_outline.hidden)
+        _outline.frame = CGRectMake(r.origin.x + area->x * r.size.width, r.origin.y + (1 - area->y - area->height) * r.size.height,
+                                    area->width * r.size.width, area->height * r.size.height);
+    [CATransaction commit];
+}
+
+// Dragging the camera in the preview moves it, dragging a corner resizes it; the recording
+// or the preview before Start follows at once.
+- (void)preview:(NSView*)view pointer:(Pointer)pointer event:(NSEvent*)event {
+    using Grab = rec::app::CameraDrag::Grab;
+    const NSPoint point = [view convertPoint:event.locationInWindow fromView:nil];
+    const auto cursor = [](const rec::app::CameraDrag& grab, bool held) {
+        [(grab.grab == Grab::none     ? NSCursor.arrowCursor
+          : grab.grab == Grab::resize ? NSCursor.crosshairCursor
+          : held                      ? NSCursor.closedHandCursor
+                                      : NSCursor.openHandCursor) set];
+    };
+    switch (pointer) {
+    case Pointer::down:
+        _drag = [self grabAt:point];
+        if (_drag.grab == Grab::none) return;
+        _outlineArea = _drag.from;
+        cursor(_drag, true);
+        break;
+    case Pointer::dragged: {
+        const NSRect r = [self previewFrameRect];
+        if (_drag.grab == Grab::none || r.size.width <= 0) return;
+        _outlineArea = rec::app::drag_camera(_drag, (point.x - r.origin.x) / r.size.width, 1 - (point.y - r.origin.y) / r.size.height);
+        if (_settings.camera_corner != "custom") [_corner selectItemAtIndex:choice_index(kCorners, "custom")];
+        _settings.camera_corner = "custom";
+        _settings.camera_custom = _outlineArea;
+        _session->place_camera(_settings);
+        break;
+    }
+    case Pointer::up:
+        if (_drag.grab == Grab::none) return;
+        _drag = {};
+        rec::app::save_settings(_settingsPath, _settings);
+        [self refresh];
+        cursor([self grabAt:point], false);
+        break;
+    case Pointer::moved: {
+        const auto grab = [self grabAt:point];
+        _hover = grab.grab != Grab::none;
+        cursor(grab, false);
+        break;
+    }
+    case Pointer::exited:
+        _hover = false;
+        if (_drag.grab == Grab::none) [NSCursor.arrowCursor set];
+        break;
+    }
+    [self showOutline];
+}
+
 - (void)meter:(NSLevelIndicator*)meter peak:(float)peak shown:(float&)shown {
     // dB scale over the last 60 dB, falling back at about 20 dB a second.
     const float level = peak > 0 ? std::clamp((20.0f * std::log10(peak) + 60.0f) / 60.0f, 0.0f, 1.0f) : 0.0f;
@@ -1292,7 +1426,12 @@ NSString* window_label(const std::string& app, const std::string& title) {
     for (NSControl* control in @[_micVolume, _micMute])
         control.enabled = editable ? _microphone.state == NSControlStateValueOn : active && s.microphone;
     for (NSControl* control in @[_camera, _image, _chooseImage]) control.enabled = editable;
-    for (NSControl* control in @[_cameraDevice, _corner, _cameraSize]) control.enabled = editable && _camera.state == NSControlStateValueOn;
+    for (NSControl* control in @[_cameraDevice, _corner]) control.enabled = editable && _camera.state == NSControlStateValueOn;
+    // A dragged camera is sized by its corners.
+    _cameraSize.enabled = editable && _camera.state == NSControlStateValueOn &&
+                          _corner.indexOfSelectedItem != choice_index(kCorners, "custom");
+    _shownState = s.state;
+    _cameraLive = active && s.camera;
     // The scene is the one setting that changes during a recording, when it draws a camera.
     _scene.enabled = editable ? _camera.state == NSControlStateValueOn : active && s.camera;
     _showLast.enabled = !_settings.last_recording.empty();
@@ -1333,6 +1472,8 @@ NSString* window_label(const std::string& app, const std::string& title) {
                    : !s.preview_error.empty() ? [@"No preview: " stringByAppendingString:ns(s.preview_error)]
                    : @"Starting the preview…";
     if (![_previewHint.stringValue isEqualToString:hint]) _previewHint.stringValue = hint;
+
+    [self showOutline];
 
     const bool poll = s.state != State::idle;
     if (poll && !_timer) {
@@ -1692,6 +1833,53 @@ NSString* window_label(const std::string& app, const std::string& title) {
     save_png(idle, @"app-preview-idle");
     save_png(corner, @"app-preview-corner");
     save_png(full, @"app-preview-camera");
+
+    // 6b. Camera layout: before Start, drag the camera from its corner to the middle and its
+    // top-left corner outwards; while recording, drag it to the top right. The events go to
+    // the preview as the mouse would send them; points are fractions of the frame.
+    const auto pointer = [&](NSEventType type, double x, double y) {
+        ui(^{
+            const NSRect r = [self previewFrameRect];
+            const NSPoint at = [self->_preview convertPoint:NSMakePoint(r.origin.x + x * r.size.width,
+                                                                        r.origin.y + (1 - y) * r.size.height)
+                                                     toView:nil];
+            NSEvent* event = [NSEvent mouseEventWithType:type location:at modifierFlags:0 timestamp:0
+                                            windowNumber:self->_window.windowNumber context:nil eventNumber:0
+                                              clickCount:1 pressure:1];
+            if (type == NSEventTypeLeftMouseDown) [self->_preview mouseDown:event];
+            else if (type == NSEventTypeLeftMouseDragged) [self->_preview mouseDragged:event];
+            else [self->_preview mouseUp:event];
+        });
+    };
+    const auto drag = [&](double x0, double y0, double x1, double y1) {
+        pointer(NSEventTypeLeftMouseDown, x0, y0);
+        for (int i = 1; i <= 10; ++i) {
+            pointer(NSEventTypeLeftMouseDragged, x0 + (x1 - x0) * i / 10, y0 + (y1 - y0) * i / 10);
+            usleep(20000);
+        }
+        pointer(NSEventTypeLeftMouseUp, x1, y1);
+    };
+    scene(0);
+    wait_preview(@"app-layout", @"green", 0.76, 0.75, 0.18, 0.18);
+    drag(0.855, 0.84, 0.5, 0.5);  // The camera's middle: it moves to 0.375,0.375
+    wait_preview(@"app-layout", @"green", 0.42, 0.42, 0.16, 0.16);
+    drag(0.376, 0.376, 0.3, 0.3);  // Its top-left corner: 0.3,0.3 to 0.625,0.625
+    const auto resized = wait_preview(@"app-layout", @"green", 0.31, 0.31, 0.07, 0.07);
+    __block BOOL sizable = YES;
+    ui(^{ sizable = self->_cameraSize.enabled; });
+    if (sizable) fail(@"Size stayed enabled for a dragged camera");
+    press(_record);
+    wait_for(recording, 20);
+    recorded(2.0);
+    drag(0.46, 0.46, 0.96, 0.21);  // To the right edge; the top snaps to the margin
+    const auto moved = wait_preview(@"app-layout-moved", @"green", 0.72, 0.08, 0.22, 0.22);
+    recorded(4.5);
+    press(_record);
+    wait_for(@"Ready to record", 30);
+    saved(@"layout");
+    save_png(resized, @"app-preview-layout");
+    save_png(moved, @"app-preview-layout-moved");
+    note(@"camera-layout=ok");
 
     // 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
     // unmuted from the menu bar item's menu 4.5 s in. The mix loses the beeps at 3 and 4 s.
