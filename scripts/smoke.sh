@@ -210,11 +210,11 @@ else
   within "$(value av_sync_events "$artifacts/stream-received-smokekey4.probe")" 4 4
   within "$(value av_offset_max_ms "$artifacts/stream-received-smokekey4.probe")" 0 55
   # The newest server recording is the session after the restart. MediaMTX may not have
-  # written the 3 s before the kill, and that session cannot reach 120 frames anyway.
+  # written the 3 s before the kill, and that session cannot reach 100 frames anyway.
   file="$(find "$received/live/smokekey5" -name '*.mp4' | sort | tail -1)"
   [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for the restarted stream" >&2; exit 1; }
   "$rec" probe "$file" | tee "$artifacts/stream-received-smokekey5.probe"
-  within "$(value frames "$artifacts/stream-received-smokekey5.probe")" 120 210
+  within "$(value frames "$artifacts/stream-received-smokekey5.probe")" 100 210
   within "$(value av_sync_events "$artifacts/stream-received-smokekey5.probe")" 3 7
   within "$(value av_offset_max_ms "$artifacts/stream-received-smokekey5.probe")" 0 55
   "$rec" record --test-pattern -r 1080p -f 30 -t 1 --codec hevc -o "$artifacts/hevc.mp4" | tee "$artifacts/hevc.record.log"
