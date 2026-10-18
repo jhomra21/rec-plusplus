@@ -12,6 +12,7 @@
 #include "app/session.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -227,7 +228,7 @@ NSString* window_label(const std::string& app, const std::string& title) {
     NSTextField *_systemVolumeText, *_micVolumeText;
     NSButton *_systemMute, *_micMute;
     NSButton *_record, *_pause, *_saveReplay, *_replay, *_systemAudio, *_microphone, *_cursor, *_stream, *_changeFolder, *_openFolder, *_showLast;
-    NSButton *_camera, *_image, *_chooseImage;
+    NSButton *_camera, *_image, *_chooseImage, *_showPreview;
     NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service, *_replayLength;
     NSPopUpButton *_cameraDevice, *_corner, *_cameraSize, *_scene;
     NSTextField *_server, *_bitrate, *_imageFile;
@@ -259,6 +260,10 @@ NSString* window_label(const std::string& app, const std::string& title) {
 
     [self buildMenus];
     [self buildWindow];
+    // The preview runs only while the window is on screen.
+    for (NSNotificationName name in @[NSWindowDidChangeOcclusionStateNotification, NSWindowDidMiniaturizeNotification,
+                                      NSWindowDidDeminiaturizeNotification])
+        [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(windowChanged:) name:name object:_window];
     [self buildStatusItem];
     [self showSettings];
     [self registerHotkey];
@@ -700,7 +705,7 @@ NSString* window_label(const std::string& app, const std::string& title) {
     _preview.accessibilityElement = YES;
     _preview.accessibilityRole = NSAccessibilityImageRole;
     _preview.accessibilityLabel = @"Preview";
-    _previewHint = label(@"The preview shows here while recording");
+    _previewHint = label(@"Starting the preview…");
     _previewHint.textColor = [NSColor colorWithWhite:0.65 alpha:1];
     _previewHint.translatesAutoresizingMaskIntoConstraints = NO;
     [_preview addSubview:_previewHint];
@@ -805,7 +810,8 @@ NSString* window_label(const std::string& app, const std::string& title) {
         return stack;
     };
     NSStackView* statusColumn = column(status);
-    NSStackView* top = [NSStackView stackViewWithViews:@[statusColumn, column(@[_preview])]];
+    _showPreview = [self check:@"Show preview"];
+    NSStackView* top = [NSStackView stackViewWithViews:@[statusColumn, column(@[_preview, _showPreview])]];
     top.alignment = NSLayoutAttributeTop;
     top.spacing = 30;
     NSStackView* leftColumn = column(left);
@@ -856,6 +862,7 @@ NSString* window_label(const std::string& app, const std::string& title) {
     [self showVolume:rec::AudioInput::system];
     [self showVolume:rec::AudioInput::microphone];
     _image.state = s.image ? NSControlStateValueOn : NSControlStateValueOff;
+    _showPreview.state = s.preview ? NSControlStateValueOn : NSControlStateValueOff;
     [self showImage];
     [self showCameras:_connected];
     _folder.stringValue = ns(s.folder);
@@ -960,6 +967,7 @@ NSString* window_label(const std::string& app, const std::string& title) {
     s.camera_size = kCameraSizes[at(_cameraSize)].value;
     s.scene = kScenes[at(_scene)].value;
     s.image = _image.state == NSControlStateValueOn;
+    s.preview = _showPreview.state == NSControlStateValueOn;
     const int kbps = _bitrate.intValue;
     s.stream_kbps = static_cast<std::uint32_t>(std::clamp(kbps > 0 ? kbps : 6000, 500, 50000));
 }
@@ -993,8 +1001,11 @@ NSString* window_label(const std::string& app, const std::string& title) {
         [self setScene:kScenes[static_cast<std::size_t>(std::max<NSInteger>(0, _scene.indexOfSelectedItem))].value];
         return;
     }
+    if (sender == _showPreview) [self remember];
     [self refresh];
 }
+
+- (void)windowChanged:(NSNotification*)notification { [self refresh]; }
 
 - (void)chooseScene:(NSMenuItem*)item {
     if (item.tag >= 0 && item.tag < static_cast<NSInteger>(kScenes.size())) [self setScene:kScenes[static_cast<std::size_t>(item.tag)].value];
@@ -1002,7 +1013,8 @@ NSString* window_label(const std::string& app, const std::string& title) {
 
 // While recording this moves the camera at once; otherwise it is the scene to start with.
 - (void)setScene:(const std::string&)scene {
-    if (_session->status().camera) {
+    const Status s = _session->status();
+    if ((s.state == State::recording || s.state == State::paused) && s.camera) {
         if (auto changed = _session->set_scene(scene); !changed) {
             _note = [@"Scene not changed: " stringByAppendingString:ns(changed.error)];
             _noteAttention = true;
@@ -1285,9 +1297,20 @@ NSString* window_label(const std::string& app, const std::string& title) {
     _scene.enabled = editable ? _camera.state == NSControlStateValueOn : active && s.camera;
     _showLast.enabled = !_settings.last_recording.empty();
 
-    // Preview frames are made only while recording with the window on screen.
-    const bool previewing = active && _window.visible && !_window.miniaturized &&
-                            (_window.occlusionState & NSWindowOcclusionStateVisible);
+    // Preview frames are made only while the window is on screen: the recording's, or before
+    // recording the idle preview's when Show preview is on. Capturing the screen before
+    // Screen Recording is allowed would ask for it, so the preview waits for the permission.
+    const bool shown = _window.visible && !_window.miniaturized && (_window.occlusionState & NSWindowOcclusionStateVisible);
+    const bool wanted = _showPreview.state == NSControlStateValueOn;
+    const bool allowed = s.state != State::idle || _testPattern || CGPreflightScreenCaptureAccess();
+    const bool before = s.state == State::idle && shown && wanted && allowed;
+    if (before) {
+        [self readSettings];
+        _session->idle_preview(&_settings, _testPattern);
+    } else {
+        _session->idle_preview(nullptr);
+    }
+    const bool previewing = shown && (active || (before && s.previewing));
     if (previewing != _previewing) {
         _session->show_preview(previewing);
         if (previewing) {
@@ -1299,11 +1322,17 @@ NSString* window_label(const std::string& app, const std::string& title) {
         }
         _previewing = previewing;
     }
-    if (!active && _frame.number) {
+    if (!previewing && _frame.number) {
         _frame = {};
         _preview.layer.contents = nil;
         _previewHint.hidden = NO;
     }
+    NSString* hint = s.state != State::idle ? @"Starting the preview…"
+                   : !wanted ? @"The preview is off"
+                   : !allowed ? @"Allow Screen Recording to see the preview"
+                   : !s.preview_error.empty() ? [@"No preview: " stringByAppendingString:ns(s.preview_error)]
+                   : @"Starting the preview…";
+    if (![_previewHint.stringValue isEqualToString:hint]) _previewHint.stringValue = hint;
 
     const bool poll = s.state != State::idle;
     if (poll && !_timer) {
@@ -1559,8 +1588,8 @@ NSString* window_label(const std::string& app, const std::string& title) {
         if (!shot.number) fail(@"the preview shows nothing while recording");
         return shot;
     };
-    // The frame's mean color over part of it (fractions of its size).
-    const auto preview_color = [&](const rec::PreviewFrame& f, NSString* name, NSString* want, double x, double y, double w, double h) {
+    // The frame's mean color over part of it (fractions of its size), as R,G,B.
+    const auto mean_color = [](const rec::PreviewFrame& f, double x, double y, double w, double h) {
         long r = 0, g = 0, b = 0;
         for (int i = 0; i < 10; ++i)
             for (int j = 0; j < 10; ++j) {
@@ -1569,10 +1598,27 @@ NSString* window_label(const std::string& app, const std::string& title) {
                 const std::uint8_t* p = f.pixels.data() + (py * f.width + px) * 4;
                 b += p[0]; g += p[1]; r += p[2];
             }
-        r /= 100; g /= 100; b /= 100;
-        const bool ok = [want isEqualToString:@"green"] ? g > 120 && g > r + 60 && g > b + 60
-                                                        : r > 170 && r > g + 100 && r > b + 100;
-        if (!ok) fail([NSString stringWithFormat:@"%@: the preview is %ld,%ld,%ld, not %@", name, r, g, b, want]);
+        return std::array<long, 3>{r / 100, g / 100, b / 100};
+    };
+    const auto is_color = [](const std::array<long, 3>& c, NSString* want) {
+        const auto [r, g, b] = c;
+        return [want isEqualToString:@"green"] ? g > 120 && g > r + 60 && g > b + 60
+                                               : r > 170 && r > g + 100 && r > b + 100;
+    };
+    const auto preview_color = [&](const rec::PreviewFrame& f, NSString* name, NSString* want, double x, double y, double w, double h) {
+        const auto c = mean_color(f, x, y, w, h);
+        if (!is_color(c, want)) fail([NSString stringWithFormat:@"%@: the preview is %ld,%ld,%ld, not %@", name, c[0], c[1], c[2], want]);
+    };
+    // Waits up to 15 s for the window's preview to show want there; returns that frame.
+    const auto wait_preview = [&](NSString* name, NSString* want, double x, double y, double w, double h) {
+        for (int i = 0; i < 150; ++i) {
+            __block rec::PreviewFrame shot;
+            ui(^{ shot = self->_frame; });
+            if (shot.number && is_color(mean_color(shot, x, y, w, h), want)) return shot;
+            usleep(100000);
+        }
+        fail([NSString stringWithFormat:@"%@: the preview never showed %@", name, want]);
+        return rec::PreviewFrame{};
     };
     NSString* artifacts = [reportPath stringByDeletingLastPathComponent];
     const auto save_png = [&](const rec::PreviewFrame& f, NSString* name) {
@@ -1597,6 +1643,19 @@ NSString* window_label(const std::string& app, const std::string& title) {
         fail([NSString stringWithFormat:@"the recording did not reach %.1f s", seconds]);
     };
     scene(0);
+    // Before Start the preview already shows the scene; with Show preview off it stops.
+    const auto idle = wait_preview(@"app-preview-idle", @"green", 0.76, 0.75, 0.18, 0.18);
+    preview_color(idle, @"app-preview-idle", @"red", 0.02, 0.03, 0.15, 0.15);
+    set_check(_showPreview, false);
+    __block BOOL off = NO;
+    for (int i = 0; i < 50 && !off; ++i) {
+        ui(^{ off = !self->_frame.number && [self->_previewHint.stringValue isEqualToString:@"The preview is off"]; });
+        if (!off) usleep(100000);
+    }
+    if (!off) fail(@"Show preview off left the preview on");
+    set_check(_showPreview, true);
+    wait_preview(@"app-preview-idle", @"green", 0.76, 0.75, 0.18, 0.18);
+    note(@"idle-preview=ok");
     press(_record);
     wait_for(recording, 20);
     __block BOOL switchable = NO;
@@ -1630,6 +1689,7 @@ NSString* window_label(const std::string& app, const std::string& title) {
     press(_record);
     wait_for(@"Ready to record", 30);
     saved(@"camera");
+    save_png(idle, @"app-preview-idle");
     save_png(corner, @"app-preview-corner");
     save_png(full, @"app-preview-camera");
 

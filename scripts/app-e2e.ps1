@@ -10,7 +10,7 @@
 #   4. Closing the window while recording keeps recording; the next stop saves the movie.
 #   5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
 #   6. A camera and an image are drawn; the scene moves the camera while recording. The
-#      preview shows the same picture.
+#      preview shows the same picture, before Start too, and stops when Show preview is off.
 #   7. Volume and mute change the mix while recording, from the window and the menu.
 #   8. Settings persist without the stream key, which Credential Manager holds.
 #   9. Quit Rec from the notification-area menu while recording saves the movie, then exits.
@@ -147,6 +147,20 @@ function Picture-Color($bitmap, [double]$x, [double]$y, [double]$w, [double]$h) 
         }
     }
     return @{ color = "$([int]($r / 100)),$([int]($g / 100)),$([int]($b / 100))" }
+}
+# Waits until the preview's color over part of it is (or with -Not, is not) the given one.
+function Wait-PreviewColor($ui, [string]$path, [double[]]$area, [string]$color, [switch]$Not, [int]$seconds = 15) {
+    $deadline = (Get-Date).AddSeconds($seconds)
+    for (;;) {
+        $picture = Snapshot-Preview $ui $path
+        $seen = Picture-Color $picture $area[0] $area[1] $area[2] $area[3]
+        $picture.Dispose()
+        $same = $true
+        try { Expect-Color $seen 'color' $color } catch { $same = $false }
+        if ($same -ne [bool]$Not) { return }
+        if ((Get-Date) -gt $deadline) { throw "the preview at $($area -join ',') is $($seen['color']); expected $(if ($Not) { 'not ' })$color" }
+        Start-Sleep -Milliseconds 200
+    }
 }
 function Newest-Movie {
     $file = Get-ChildItem $folder -Filter '*.mp4' | Sort-Object LastWriteTime | Select-Object -Last 1
@@ -300,6 +314,14 @@ try {
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1002, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Show Rec"
     Set-Check $ui 'Camera' $true
     Set-Check $ui 'Image overlay' $true
+    # Before Start the preview already shows the scene; with Show preview off it stops.
+    $idle = Join-Path $Artifacts 'app-preview-idle.png'
+    Wait-PreviewColor $ui $idle @(0.76, 0.75, 0.18, 0.18) 'green'
+    Wait-PreviewColor $ui $idle @(0.02, 0.03, 0.15, 0.15) 'red'
+    Set-Check $ui 'Show preview' $false
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-off.png') @(0.76, 0.75, 0.18, 0.18) 'green' -Not
+    Set-Check $ui 'Show preview' $true
+    Wait-PreviewColor $ui $idle @(0.76, 0.75, 0.18, 0.18) 'green'
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
     Start-Sleep -Milliseconds 2000
@@ -330,7 +352,7 @@ try {
     Expect-Color $center 'sample_4' 'green'
     Expect-Color $corner 'sample_6' 'white'
     foreach ($second in 0..6) { Expect-Color $logo "sample_$second" 'red' }
-    Write-Host "6. camera and image: $($corner['frames']) frames, corner, full frame, hidden; the preview matched"
+    Write-Host "6. camera and image: $($corner['frames']) frames, corner, full frame, hidden; the preview matched, before Start too"
 
     # 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
     # unmuted from the notification-area menu 4.5 s in. The mix loses the beeps at 3 and 4 s.
@@ -369,6 +391,7 @@ try {
     Expect-Text $settings 'camera_device=test'
     Expect-Text $settings 'scene=screen'
     Expect-Text $settings 'image=1'
+    Expect-Text $settings 'preview=1'
     Expect-Text $settings 'system_volume=-6'
     Expect-Text $settings 'system_muted=0'
     if ($settings.Contains('appkey')) { throw 'the stream key was written to the settings file' }

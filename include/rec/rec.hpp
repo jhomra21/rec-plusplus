@@ -86,6 +86,9 @@ struct Options {
     std::vector<Overlay> overlays; // At most 4. Without any, frames are not composited.
     // Make preview() frames up to this many pixels wide, in the output's shape; 0 = no preview.
     std::uint32_t preview_width = 0;
+    // Capture and draw the overlays for preview() only: no file, audio, stream or replay, and
+    // no duration. Needs preview_width; output and the audio options are ignored.
+    bool preview_only = false;
 };
 
 struct Display {

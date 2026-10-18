@@ -54,6 +54,7 @@ struct Settings {
     std::string scene = "screen-camera";  // What the camera does; switchable while recording.
     bool image = false;               // Draw an image (PNG, JPEG) over everything, fitted.
     std::string image_path;
+    bool preview = true;              // Show the scene before recording while the window shows.
     std::string last_recording;
 };
 
@@ -128,6 +129,8 @@ struct Status {
     std::string scene;               // The current scene while a camera is drawn.
     std::uint64_t camera_frames = 0;
     bool window_closed = false;      // The recorded window closed, which ended the recording.
+    bool previewing = false;         // The scene shows before recording (idle_preview()).
+    std::string preview_error;       // Why it cannot.
     std::string error;               // Why the last recording failed or ended early.
     std::string saved;               // Movie the last recording saved; empty while one runs.
 };
@@ -162,11 +165,18 @@ public:
     bool preview(PreviewFrame& frame);
     // Whether the interface shows the preview; frames are made only while it does.
     void show_preview(bool on);
+    // Shows the scene before recording: while idle, a capture of settings for preview() only
+    // (no file or audio) runs on its own thread; nullptr stops it. Call it whenever the
+    // settings may have changed: a new source or overlay restarts capture, a new camera
+    // placement only moves the camera. A recording stops it first and takes over preview().
+    void idle_preview(const Settings* settings, bool test_pattern = false);
     Status status();
     void wait();  // Blocks until a stop in progress has saved the movie.
 
 private:
     void run(std::unique_ptr<Recorder> recorder);
+    void run_idle();
+    void place_idle_camera();  // With mutex_ held.
 
     std::function<void()> changed_;
     std::mutex mutex_;
@@ -187,6 +197,19 @@ private:
     std::uint64_t rate_bytes_ = 0;
     std::chrono::steady_clock::time_point rate_time_{};
     double stream_kbps_ = 0;
+    // The idle preview: what the interface wants (idle_settings_, changed when idle_key_
+    // changes, which bumps idle_generation_) and the capture run_idle() keeps for it.
+    std::condition_variable idle_wake_;
+    std::thread idle_thread_;
+    std::optional<Settings> idle_settings_;
+    bool idle_test_pattern_ = false;
+    std::string idle_key_, idle_error_;
+    std::uint64_t idle_generation_ = 0;
+    Recorder* idle_ = nullptr;          // Set while its capture runs.
+    bool idle_alive_ = false;           // A capture exists, starting, running or stopping.
+    bool closing_ = false;
+    std::optional<std::size_t> idle_camera_;
+    const Recorder* preview_source_ = nullptr;  // Whose frames preview() copied last.
 };
 
 // <prefix>-YYYY-MM-DD-HHMMSS.<format> in folder, with -2, -3 ... if that file exists.

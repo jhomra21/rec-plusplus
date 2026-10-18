@@ -10,7 +10,7 @@
 #   5. closing the window keeps recording, and the menu bar item's menu stops it;
 #   6. with the replay buffer on, Save Replay writes the last seconds while recording goes on;
 #   7. a camera and an image are drawn, and the scene moves the camera while recording; the
-#      preview shows the same picture;
+#      preview shows the same picture, before Start too, and Show preview turns it off;
 #   8. volume and mute change the mix while recording, from the window and the menu bar item;
 #   9. quitting during a recording saves the movie; settings persist without the stream key.
 # Usage: app-e2e.sh REC REC_APP ARTIFACTS
@@ -78,6 +78,7 @@ fi
 grep -qx 'accessibility=ok' "$report"
 grep -qx 'keychain=ok' "$report"
 grep -qx 'quit=started' "$report"
+grep -qx 'idle-preview=ok' "$report"
 grep -qx 'preview=ok' "$report"
 grep -q '^live=● LIVE' "$report"
 
@@ -147,6 +148,7 @@ grep -qx 'camera=1' "$settings"
 grep -qx 'camera_device=test' "$settings"
 grep -qx 'scene=screen' "$settings"
 grep -qx 'image=1' "$settings"
+grep -qx 'preview=1' "$settings"
 grep -qx 'system_volume=-6' "$settings"
 grep -qx 'system_muted=0' "$settings"
 if grep -q appkey "$settings"; then echo 'the stream key was written to the settings file' >&2; exit 1; fi

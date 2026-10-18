@@ -712,6 +712,9 @@ public:
         context->PSSetShaderResources(0, 2, none);
         context->OMSetRenderTargets(0, nullptr, nullptr);
         context->CopyResource(staging_[next_].Get(), target_.Get());
+        // Without an encoder submitting work (preview-only), the copy would wait in the
+        // command buffer and the read below would never find it done.
+        context->Flush();
         filled_[next_] = true;
         next_ ^= 1;
         if (filled_[next_]) {

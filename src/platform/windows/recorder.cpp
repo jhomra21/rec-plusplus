@@ -682,6 +682,13 @@ public:
         ComScope com;
         if (active_) return {"already recording"};
         window_closed_.store(false);
+        if (options_.preview_only) {
+            if (!options_.preview_width) return {"a preview needs a preview width"};
+            options_.system_audio = options_.microphone = options_.test_tone = options_.test_mic = false;
+            options_.stream_url.clear();
+            options_.replay_seconds = 0;
+            options_.duration_seconds = 0;
+        }
         if (options_.fps == 0 || options_.fps > 120) return {"invalid frame rate"};
         if ((options_.test_tone || options_.test_mic) && !options_.test_pattern)
             return {"synthetic audio needs the test pattern"};
@@ -690,11 +697,13 @@ public:
         if ((options_.window || options_.region) && options_.test_pattern)
             return {"window and region capture need a real screen capture"};
         if (options_.window && options_.region) return {"capture a window or a region, not both"};
-        if (options_.output.empty()) return {"output path is empty"};
-        const auto path = wide(options_.output);
-        if (path.empty()) return {"invalid output path"};
-        if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
-            return {"output file already exists: " + options_.output};
+        if (!options_.preview_only) {
+            if (options_.output.empty()) return {"output path is empty"};
+            const auto path = wide(options_.output);
+            if (path.empty()) return {"invalid output path"};
+            if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+                return {"output file already exists: " + options_.output};
+        }
         const HRESULT mf = MFStartup(MF_VERSION, MFSTARTUP_LITE);
         if (FAILED(mf)) return {failed("Media Foundation is unavailable", mf)};
         mf_started_ = true;
@@ -735,6 +744,23 @@ public:
             if (previewer_->start(device_.Get(), size_.width, size_.height, size)) preview_.reset(size);
             else previewer_.reset();
         }
+        if (options_.preview_only) {
+            if (!previewer_) { stop(); return {"this graphics driver cannot draw the preview"}; }
+            // Frames are drawn here instead of into the encoder's pool.
+            D3D11_TEXTURE2D_DESC desc{};
+            desc.Width = size_.width;
+            desc.Height = size_.height;
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            desc.Format = DXGI_FORMAT_NV12;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+            if (const HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &composed_); FAILED(hr)) {
+                stop();
+                return {failed("could not allocate the preview frame", hr)};
+            }
+        }
         if (!options_.stream_url.empty() || options_.replay_seconds) {
             if (options_.stream_kbps < 500 || options_.stream_kbps > 50000) {
                 stop();
@@ -760,7 +786,8 @@ public:
             }
         }
         active_.store(true);
-        if (auto ready = create_writer(); !ready) { stop(); return ready; }
+        if (!options_.preview_only)
+            if (auto ready = create_writer(); !ready) { stop(); return ready; }
         finished_.store(false);
         stop_requested_.store(false);
         origin_ = now_ticks();
@@ -815,6 +842,7 @@ public:
             overlays_.reset();
         }
         previewer_.reset();
+        composed_.Reset();
         for (auto& slot : slots_) slot = {};
         pending_count_ = 0;
         current_ = -1;
@@ -1312,6 +1340,15 @@ private:
         return {};
     }
 
+    void draw_preview(int frame) {
+        context_->CopySubresourceRegion(composed_.Get(), 0, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
+        if (overlays_ && !overlays_->draw(context_.Get(), composed_.Get(), 0)) {
+            fail("could not draw the overlays");
+            return;
+        }
+        previewer_->render(context_.Get(), composed_.Get(), 0, preview_);
+    }
+
     enum class Write { done, busy, failed };
 
     Write write_video(std::uint64_t slot, int frame) {
@@ -1536,6 +1573,10 @@ private:
                 break;
             }
             const int frame = select_frame(slot, due);
+            if (options_.preview_only) {
+                if (frame >= 0 && preview_.due(slot, options_.fps)) draw_preview(frame);
+                continue;
+            }
             // Retry the same timestamp for up to 500 ms on transient backpressure.
             bool appended = false;
             const auto deadline = tick + milliseconds(500);
@@ -1598,6 +1639,7 @@ private:
     std::unique_ptr<win::Overlays> overlays_;
     std::uint64_t camera_frames_ = 0;  // The count when the overlays were released.
     std::unique_ptr<win::FramePreview> previewer_;
+    ComPtr<ID3D11Texture2D> composed_;  // The frame as drawn, in preview-only mode.
     core::PreviewBuffer preview_;
     ComPtr<IMFVideoSampleAllocatorEx> allocator_;
 

@@ -592,6 +592,13 @@ public:
         @autoreleasepool {
             if (active_) return {"already recording"};
             window_closed_.store(false);
+            if (options_.preview_only) {
+                if (!options_.preview_width) return {"a preview needs a preview width"};
+                options_.system_audio = options_.microphone = options_.test_tone = options_.test_mic = false;
+                options_.stream_url.clear();
+                options_.replay_seconds = 0;
+                options_.duration_seconds = 0;
+            }
             if ((!options_.stream_url.empty() || options_.replay_seconds) && (options_.stream_kbps < 500 || options_.stream_kbps > 50000))
                 return {"stream bitrate must be between 500 and 50000 kb/s"};
             if (options_.replay_seconds && (options_.replay_seconds < 5 || options_.replay_seconds > 300))
@@ -604,11 +611,13 @@ public:
             if ((options_.window || options_.region) && options_.test_pattern)
                 return {"window and region capture need a real screen capture"};
             if (options_.window && options_.region) return {"capture a window or a region, not both"};
-            if (options_.output.empty()) return {"output path is empty"};
-            NSString* path = [NSString stringWithUTF8String:options_.output.c_str()];
-            if (!path) return {"invalid output path"};
-            if ([[NSFileManager defaultManager] fileExistsAtPath:path])
-                return {"output file already exists: " + options_.output};
+            if (!options_.preview_only) {
+                if (options_.output.empty()) return {"output path is empty"};
+                NSString* path = [NSString stringWithUTF8String:options_.output.c_str()];
+                if (!path) return {"invalid output path"};
+                if ([[NSFileManager defaultManager] fileExistsAtPath:path])
+                    return {"output file already exists: " + options_.output};
+            }
 
             audio_[kSystem].enabled = options_.system_audio || options_.test_tone;
             audio_[kMic].enabled = options_.microphone || options_.test_mic;
@@ -646,6 +655,10 @@ public:
                     CVPixelBufferCreate(kCFAllocatorDefault, size.width, size.height, kCVPixelFormatType_32BGRA,
                                         nullptr, &preview_pixels_) == kCVReturnSuccess)
                     preview_.reset(size);
+                else if (options_.preview_only) {
+                    stop();
+                    return {"could not make the preview"};
+                }
             }
             if (!options_.stream_url.empty() || options_.replay_seconds) {
                 mac::LiveSettings live;
@@ -661,11 +674,13 @@ public:
                     return {(options_.stream_url.empty() ? "replay: " : "stream: ") + started.error};
                 }
             }
-            auto ready = create_writer();
-            if (!ready) { stop(); return ready; }
-            activity_ = [[NSProcessInfo processInfo]
-                beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep
-                reason:@"Screen recording"];
+            if (!options_.preview_only) {
+                auto ready = create_writer();
+                if (!ready) { stop(); return ready; }
+                activity_ = [[NSProcessInfo processInfo]
+                    beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep
+                    reason:@"Screen recording"];
+            }
             finished_.store(false);
             stop_requested_.store(false);
             host_origin_ = CMClockGetTime(CMClockGetHostTimeClock());
@@ -1299,6 +1314,15 @@ private:
             if (stop_requested_.load() || finished_) break;
             @autoreleasepool {
                 CVPixelBufferRef frame = select_frame(slot, due);
+                if (options_.preview_only) {
+                    if (frame && preview_.due(slot, options_.fps)) {
+                        CVPixelBufferRef drawn = overlays_ ? overlays_->compose(frame) : nullptr;
+                        if (overlays_ && !drawn) fail("could not draw the overlays");
+                        else render_preview(drawn ? drawn : frame);
+                        if (drawn) CVPixelBufferRelease(drawn);
+                    }
+                    continue;
+                }
                 CVPixelBufferRef composed = nullptr;
                 if (frame && overlays_) {
                     composed = overlays_->compose(frame);

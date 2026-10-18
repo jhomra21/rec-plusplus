@@ -54,7 +54,7 @@ enum Control : int {
     kReplayHeader, kReplay, kReplayLength,
     kCameraHeader, kCamera, kCameraDevice, kPositionLabel, kCorner, kSizeLabel, kCameraSize, kSceneLabel, kScene,
     kImage, kImageFile, kBrowseImage,
-    kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast, kPreview,
+    kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast, kPreview, kShowPreview,
 };
 
 enum Command : UINT {
@@ -436,7 +436,8 @@ private:
             SetBkMode(dc, TRANSPARENT);
             SetTextColor(dc, RGB(160, 160, 168));
             SelectObject(dc, font_);
-            DrawTextW(dc, L"The preview shows here while recording", -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            InflateRect(&area, -px(16), 0);
+            DrawTextW(dc, preview_hint_.c_str(), -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
         RestoreDC(dc, saved);
     }
@@ -480,6 +481,11 @@ private:
         case kSessionChanged:
             refresh();
             return 0;
+        case WM_SHOWWINDOW:
+        case WM_SIZE:
+            // Visibility settles after these; the preview follows it.
+            PostMessageW(window_, kSessionChanged, 0, 0);
+            return DefWindowProcW(window_, message, w, l);
         case WM_HOTKEY:
             if (w == kHotkey) toggle_record();
             else if (w == kReplayHotkey) save_replay();
@@ -588,6 +594,7 @@ private:
         button(kSaveReplay, L"Save Rep&lay");
         add(kPreview, L"RecPreview", L"Preview", 0);
         preview_brush_ = CreateSolidBrush(RGB(28, 28, 32));
+        check(kShowPreview, L"Show pre&view");
 
         label(kCaptureHeader, L"Capture");
         label(kSourceLabel, L"&Source");
@@ -741,7 +748,8 @@ private:
         y += px(40);
         const int preview_height = column * 9 / 16;
         place(kPreview, margin + column + px(30), margin, column, preview_height);
-        y = std::max(y, margin + preview_height) + gap;
+        place(kShowPreview, margin + column + px(30), margin + preview_height + gap, column, px(22));
+        y = std::max(y, margin + preview_height + gap + px(22)) + gap;
         const int columns_top = y;
 
         width = column;
@@ -851,6 +859,7 @@ private:
         select(kCameraSize, choice_index(kCameraSizes, s.camera_size));
         select(kScene, choice_index(kScenes, s.scene));
         set_check(kImage, s.image);
+        set_check(kShowPreview, s.preview);
         show_image();
         show_server();
         SetWindowTextW(get(kFolder), wide(s.folder).c_str());
@@ -1019,6 +1028,7 @@ private:
         s.camera_size = kCameraSizes[at(kCameraSize)].value;
         s.scene = kScenes[at(kScene)].value;
         s.image = checked(kImage);
+        s.preview = checked(kShowPreview);
         s.destination = kServices[at(kService)].value;
         if (s.destination == "custom") s.server = narrow(text_of(get(kServer)));
         const auto kbps = std::wcstoul(text_of(get(kBitrate)).c_str(), nullptr, 10);
@@ -1031,6 +1041,12 @@ private:
     }
 
     void command(int id, int code) {
+        handle_command(id, code);
+        // A changed setting can change what the idle preview shows.
+        if (state_ == State::idle && !quitting_ && (code == BN_CLICKED || code == CBN_SELCHANGE)) refresh();
+    }
+
+    void handle_command(int id, int code) {
         switch (id) {
         case kRecord: case kMenuRecord: toggle_record(); return;
         case kPause: case kMenuPause: toggle_pause(); return;
@@ -1073,7 +1089,9 @@ private:
             }
             return;
         case kStream: case kSystemAudio: case kMicrophone: case kCamera: case kImage:
-            if (code == BN_CLICKED) refresh();
+            return;
+        case kShowPreview:
+            if (code == BN_CLICKED) remember();
             return;
         case kSystemMute: case kMicMute:
             if (code == BN_CLICKED) change_volume(id == kSystemMute ? rec::AudioInput::system : rec::AudioInput::microphone, true);
@@ -1145,7 +1163,8 @@ private:
 
     // While recording this moves the camera at once; otherwise it is the scene to start with.
     void change_scene(const std::string& scene) {
-        if (session_.status().camera) {
+        const Status s = session_.status();
+        if ((s.state == State::recording || s.state == State::paused) && s.camera) {
             if (auto changed = session_.set_scene(scene); !changed) {
                 note_ = L"Scene not changed: " + wide(changed.error);
                 note_attention_ = true;
@@ -1392,16 +1411,33 @@ private:
         EnableWindow(get(kServer), editable);
         EnableWindow(get(kShowLast), !settings_.last_recording.empty());
 
-        // Preview frames are made only while recording with the window on screen.
-        const bool previewing = active && IsWindowVisible(window_) && !IsIconic(window_);
+        // Preview frames are made only while the window is on screen: the recording's, or
+        // before recording the idle preview's when Show preview is on.
+        const bool shown = IsWindowVisible(window_) && !IsIconic(window_);
+        const bool before = s.state == State::idle && shown && checked(kShowPreview);
+        if (before) {
+            read_settings();
+            session_.idle_preview(&settings_, test_pattern_);
+        } else {
+            session_.idle_preview(nullptr);
+        }
+        const bool previewing = shown && (active || (before && s.previewing));
         if (previewing != previewing_) {
             session_.show_preview(previewing);
             if (previewing) SetTimer(window_, kPreviewTimer, 33, nullptr);
             else KillTimer(window_, kPreviewTimer);
             previewing_ = previewing;
         }
-        if (!active && frame_.number) {
+        if (!previewing && frame_.number) {
             frame_ = {};
+            InvalidateRect(get(kPreview), nullptr, FALSE);
+        }
+        const std::wstring hint = active || s.state != State::idle ? L"Starting the preview..."
+            : !checked(kShowPreview) ? L"The preview is off"
+            : !s.preview_error.empty() ? L"No preview: " + wide(s.preview_error)
+            : L"Starting the preview...";
+        if (hint != preview_hint_) {
+            preview_hint_ = hint;
             InvalidateRect(get(kPreview), nullptr, FALSE);
         }
 
@@ -1438,6 +1474,7 @@ private:
     bool polling_ = false;
     bool previewing_ = false;
     rec::PreviewFrame frame_;
+    std::wstring preview_hint_;  // Shown while the preview has no frame.
     HBRUSH preview_brush_ = nullptr;
     bool quitting_ = false;
     bool attention_ = false;

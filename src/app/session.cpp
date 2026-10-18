@@ -98,6 +98,7 @@ Settings load_settings(const std::string& path) {
         else if (key == "scene" && known(kScenes, value)) s.scene = value;
         else if (key == "image") s.image = yes;
         else if (key == "image_path") s.image_path = value;
+        else if (key == "preview") s.preview = yes;
         else if (key == "last_recording") s.last_recording = value;
     }
     return s;
@@ -124,7 +125,7 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
             << "\ncamera_corner=" << s.camera_corner << "\ncamera_size=" << s.camera_size << "\nscene=" << s.scene
-            << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path)
+            << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
             << "\nlast_recording=" << s.last_recording << '\n';
         if (!out) return false;
     }
@@ -210,20 +211,10 @@ Area camera_area(const Settings& s, const std::string& scene) {
 
 bool camera_visible(const std::string& scene) { return scene != "screen"; }
 
-Session::Session(std::function<void()> changed) : changed_(std::move(changed)) {}
-
-Session::~Session() {
-    stop();
-    wait();
-}
-
-Result Session::start(const Settings& s, const std::string& stream_key, bool test_pattern) {
-    {
-        std::lock_guard lock(mutex_);
-        if (state_ != State::idle) return {"a recording is already running"};
-    }
-    wait();
-    Options o;
+namespace {
+// What a recording and the idle preview share: the picture, its overlays and the audio
+// settings. camera receives the camera's overlay index.
+Result capture_options(const Settings& s, bool test_pattern, Options& o, std::optional<std::size_t>& camera) {
     o.duration_seconds = 0;
     o.display = s.display;
     if (!test_pattern && s.source == "window") {
@@ -252,21 +243,8 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
         o.microphone = s.microphone;
         o.microphone_device = s.microphone_device;
     }
-    if (s.folder.empty()) return {"choose a folder for recordings"};
-    std::error_code error;
-    std::filesystem::create_directories(utf8_path(s.folder), error);
-    if (error) return {"cannot use the recordings folder: " + error.message()};
-    o.output = next_output(s.folder, s.format);
-    if (s.stream) {
-        const auto server = server_url(s);
-        if (server.empty()) return {"enter the stream server URL"};
-        if (stream_key.empty()) return {"enter the stream key"};
-        o.stream_url = server + "/" + stream_key;
-    }
-    o.stream_kbps = s.stream_kbps;
-    if (s.replay) o.replay_seconds = s.replay_seconds;
     o.preview_width = kPreviewWidth;
-    std::optional<std::size_t> camera;
+    camera.reset();
     if (s.camera) {
         camera = o.overlays.size();
         Overlay c;
@@ -283,8 +261,61 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
         i.source = s.image_path;
         o.overlays.push_back(i);
     }
+    return {};
+}
+
+// Settings that need a new capture for the idle preview; the camera's placement does not.
+std::string preview_key(const Settings& s, bool test_pattern) {
+    std::string key = s.source + '\n' + std::to_string(s.display) + '\n' + s.window_app + '\n' + s.window_title +
+                      '\n' + s.region + '\n' + s.resolution + '\n' + (s.cursor ? "1" : "0") + (test_pattern ? "1" : "0");
+    if (s.camera) key += "\ncamera " + s.camera_device;
+    if (s.image) key += "\nimage " + s.image_path;
+    return key;
+}
+} // namespace
+
+Session::Session(std::function<void()> changed) : changed_(std::move(changed)) {}
+
+Session::~Session() {
+    stop();
+    wait();
     {
         std::lock_guard lock(mutex_);
+        closing_ = true;
+    }
+    idle_wake_.notify_all();
+    if (idle_thread_.joinable()) idle_thread_.join();
+}
+
+Result Session::start(const Settings& s, const std::string& stream_key, bool test_pattern) {
+    {
+        std::lock_guard lock(mutex_);
+        if (state_ != State::idle) return {"a recording is already running"};
+    }
+    wait();
+    Options o;
+    std::optional<std::size_t> camera;
+    if (auto built = capture_options(s, test_pattern, o, camera); !built) return built;
+    if (s.folder.empty()) return {"choose a folder for recordings"};
+    std::error_code error;
+    std::filesystem::create_directories(utf8_path(s.folder), error);
+    if (error) return {"cannot use the recordings folder: " + error.message()};
+    o.output = next_output(s.folder, s.format);
+    if (s.stream) {
+        const auto server = server_url(s);
+        if (server.empty()) return {"enter the stream server URL"};
+        if (stream_key.empty()) return {"enter the stream key"};
+        o.stream_url = server + "/" + stream_key;
+    }
+    o.stream_kbps = s.stream_kbps;
+    if (s.replay) o.replay_seconds = s.replay_seconds;
+    {
+        std::lock_guard lock(mutex_);
+        // The idle preview gives up the screen and camera before the recording opens them.
+        idle_settings_.reset();
+        idle_key_.clear();
+        ++idle_generation_;
+        idle_wake_.notify_all();
         options_ = o;
         state_ = State::starting;
         stop_requested_ = false;
@@ -306,6 +337,10 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
 }
 
 void Session::run(std::unique_ptr<Recorder> recorder) {
+    {
+        std::unique_lock lock(mutex_);
+        idle_wake_.wait(lock, [this] { return !idle_alive_; });
+    }
     const auto started = recorder->start();
     {
         std::lock_guard lock(mutex_);
@@ -395,7 +430,110 @@ Result Session::set_volume(AudioInput input, int volume, bool muted) {
 
 bool Session::preview(PreviewFrame& frame) {
     std::lock_guard lock(mutex_);
-    return recorder_ && recorder_->preview(frame);
+    const Recorder* source = recorder_ ? recorder_ : idle_;
+    // Each capture numbers its frames from 1.
+    if (source != preview_source_) {
+        preview_source_ = source;
+        frame.number = 0;
+    }
+    return source && source->preview(frame);
+}
+
+void Session::idle_preview(const Settings* settings, bool test_pattern) {
+    {
+        std::lock_guard lock(mutex_);
+        if (state_ != State::idle) settings = nullptr;
+        const std::string key = settings ? preview_key(*settings, test_pattern) : std::string();
+        if (key == idle_key_) {
+            if (settings && idle_settings_) {
+                idle_settings_->camera_corner = settings->camera_corner;
+                idle_settings_->camera_size = settings->camera_size;
+                idle_settings_->scene = settings->scene;
+                place_idle_camera();
+            }
+            return;
+        }
+        // A capture that failed keeps its key, so it is retried only once a setting changes.
+        idle_key_ = key;
+        idle_error_.clear();
+        if (settings) idle_settings_ = *settings;
+        else idle_settings_.reset();
+        idle_test_pattern_ = test_pattern;
+        ++idle_generation_;
+        if (!idle_thread_.joinable()) idle_thread_ = std::thread([this] { run_idle(); });
+    }
+    idle_wake_.notify_all();
+}
+
+void Session::place_idle_camera() {
+    if (!idle_ || !idle_camera_ || !idle_settings_) return;
+    idle_->set_overlay(*idle_camera_, camera_visible(idle_settings_->scene),
+                       camera_area(*idle_settings_, idle_settings_->scene));
+}
+
+void Session::run_idle() {
+    std::unique_ptr<Recorder> running;
+    std::uint64_t seen = 0;
+    std::unique_lock lock(mutex_);
+    const auto changed = [&] {
+        lock.unlock();
+        if (changed_) changed_();
+        lock.lock();
+    };
+    for (;;) {
+        idle_wake_.wait(lock, [&] { return closing_ || seen != idle_generation_; });
+        if (closing_) break;
+        seen = idle_generation_;
+        if (running) {
+            idle_ = nullptr;
+            lock.unlock();
+            running->stop();
+            running.reset();
+            lock.lock();
+        }
+        if (!idle_settings_) {
+            idle_alive_ = false;
+            idle_wake_.notify_all();
+            changed();
+            continue;
+        }
+        const Settings settings = *idle_settings_;
+        const bool test_pattern = idle_test_pattern_;
+        idle_alive_ = true;
+        lock.unlock();
+        // Finding a window and starting capture can take a while; never on the UI thread.
+        Options o;
+        std::optional<std::size_t> camera;
+        Result started = capture_options(settings, test_pattern, o, camera);
+        std::unique_ptr<Recorder> recorder;
+        if (started) {
+            o.preview_only = true;
+            o.fps = std::min<std::uint32_t>(o.fps, 30);
+            recorder = std::make_unique<Recorder>(o);
+            started = recorder->start();
+        }
+        lock.lock();
+        if (started) {
+            running = std::move(recorder);
+            idle_ = running.get();
+            idle_camera_ = camera;
+            idle_->show_preview(true);
+            place_idle_camera();
+        } else {
+            idle_error_ = started.error;
+            idle_alive_ = false;
+            idle_wake_.notify_all();
+        }
+        changed();
+    }
+    if (running) {
+        idle_ = nullptr;
+        lock.unlock();
+        running->stop();
+        lock.lock();
+    }
+    idle_alive_ = false;
+    idle_wake_.notify_all();
 }
 
 void Session::show_preview(bool on) {
@@ -447,6 +585,16 @@ Status Session::status() {
         s.scene = scene_;
         s.camera_frames = st.camera_frames;
         s.window_closed = st.window_closed;
+        // A preview capture that ended on its own (its window closed, a device lost) stops.
+        if (idle_ && idle_->finished() && idle_settings_) {
+            const auto failure = idle_->failure();
+            idle_error_ = !failure.empty() ? failure : "the window closed; choose another source";
+            idle_settings_.reset();
+            ++idle_generation_;
+            idle_wake_.notify_all();
+        }
+        s.previewing = idle_ != nullptr && !idle_->finished();
+        s.preview_error = idle_error_;
     }
     if (ended) stop();
     return s;
