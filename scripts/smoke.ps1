@@ -167,6 +167,8 @@ try {
         Write-Host $again.Text
         if ($again.Code -ne 0) { throw "the stream did not survive a server restart: $($again.Text)" }
         Expect-Text $again.Text 'reconnected 1'
+        Expect-Text $again.Text 'Stream lost at 00:0'
+        Expect-Text $again.Text 'Stream reconnected at 00:0'
         Expect-Text $again.Text 'written 300, dropped 0'
 
         # Losing the server ends the stream, not the recording.

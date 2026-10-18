@@ -347,6 +347,8 @@ int main(int argc, char** argv) {
     watch_input();
     const auto began = std::chrono::steady_clock::now();
     auto shown = began - std::chrono::seconds(1);
+    bool reconnecting = false;
+    std::uint32_t reconnects = 0;
     auto recorded = [&] {
         const std::chrono::duration<double> wall = std::chrono::steady_clock::now() - began;
         return std::max(0.0, wall.count() - recorder.stats().paused_seconds);
@@ -363,6 +365,22 @@ int main(int argc, char** argv) {
             else std::cerr << changed.error << '\n';
             std::cout << std::flush;
             shown -= std::chrono::seconds(1);
+        }
+        // Outages get their own lines, so a log shows when the stream dropped and came back.
+        if (streaming) {
+            const auto stats = recorder.stats();
+            const bool back = stats.stream_reconnects != reconnects;
+            if (back || stats.stream_reconnecting != reconnecting) {
+                if (live) std::cout << "\r\033[K";
+                if (back) std::cout << "Stream reconnected at " << clock_text(recorded()) << '\n';
+                else if (!stats.stream_reconnecting) std::cout << "Stream gave up reconnecting at " << clock_text(recorded()) << '\n';
+                if (stats.stream_reconnecting && (back || !reconnecting))
+                    std::cout << "Stream lost at " << clock_text(recorded()) << ", reconnecting\n";
+                std::cout << std::flush;
+                reconnecting = stats.stream_reconnecting;
+                reconnects = stats.stream_reconnects;
+                shown -= std::chrono::seconds(1);
+            }
         }
         const auto now = std::chrono::steady_clock::now();
         if (live && now - shown >= std::chrono::milliseconds(250)) {

@@ -163,6 +163,8 @@ else
   fi
   cat "$artifacts/stream-reconnect.record.log"
   grep -q 'reconnected 1' "$artifacts/stream-reconnect.record.log"
+  grep -q 'Stream lost at 00:0[0-9.]*, reconnecting' "$artifacts/stream-reconnect.record.log"
+  grep -q 'Stream reconnected at 00:0' "$artifacts/stream-reconnect.record.log"
   grep -q 'written 300, dropped 0' "$artifacts/stream-reconnect.record.log"
 
   # Losing the server ends the stream, not the recording.
@@ -216,7 +218,9 @@ else
   "$rec" probe "$file" | tee "$artifacts/stream-received-smokekey5.probe"
   within "$(value frames "$artifacts/stream-received-smokekey5.probe")" 100 210
   within "$(value av_sync_events "$artifacts/stream-received-smokekey5.probe")" 3 7
-  within "$(value av_offset_max_ms "$artifacts/stream-received-smokekey5.probe")" 0 55
+  # The resumed session adds the beep at the resume keyframe, which can decode faded in and
+  # read up to about 30 ms late (see smoke.ps1), to the 44 ms above. A Mac measured 53.2 ms.
+  within "$(value av_offset_max_ms "$artifacts/stream-received-smokekey5.probe")" 0 80
   "$rec" record --test-pattern -r 1080p -f 30 -t 1 --codec hevc -o "$artifacts/hevc.mp4" | tee "$artifacts/hevc.record.log"
   "$rec" probe "$artifacts/hevc.mp4" | tee "$artifacts/hevc.probe"
   grep -qx 'codec=hevc' "$artifacts/hevc.probe"
