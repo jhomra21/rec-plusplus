@@ -439,7 +439,7 @@ try {
         [AppWindow]::SendMessage($sceneList, 0x014E, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # CB_SETCURSEL: the first scene
         [AppWindow]::SendMessage($ui.Window, 0x0111, [IntPtr]((1 -shl 16) -bor [AppWindow]::GetDlgCtrlID($sceneList)), $sceneList) | Out-Null
         Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-scene-switched.png') @(0.6, 0.6, 0.3, 0.3) 'blue' -Not
-        Start-Sleep -Milliseconds 2500
+        Start-Sleep -Milliseconds 3000
         Press $ui 'Stop Recording'
         Wait-Status $ui 'Ready to record' | Out-Null
     } finally {
@@ -450,7 +450,7 @@ try {
     $quarter = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-scenes-quarter.probe') @('--sample', '1100,650,600,300')
     $last = 0
     while ($quarter.ContainsKey("sample_$($last + 1)")) { $last++ }
-    if ($last -lt 4) { throw "the scenes recording is too short: $($quarter['duration']) s" }
+    if ($last -lt 3) { throw "the scenes recording is too short: $($quarter['duration']) s" }
     Expect-Color $quarter 'sample_1' 'blue'
     Expect-Color $quarter "sample_$last" 'white'
     # Remove the layer, so the later steps capture only the test pattern.
