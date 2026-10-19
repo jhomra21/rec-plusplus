@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+# A failed check (often a quiet grep -q) names its line instead of ending the run silently.
+trap 'echo "smoke.sh: line $LINENO failed: $BASH_COMMAND" >&2' ERR
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 source "$root/scripts/mediamtx.sh"
@@ -449,7 +451,8 @@ else
   out="$(engine status)"; grep -qx 'state=recording' <<<"$out"
   sleep 1
   out="$(engine stop)"
-  grep -q 'Paused 1.0 s' <<<"$out"
+  # Paused for the 1 s sleep plus the time the commands take on a busy machine.
+  grep -Eq 'Paused (0\.9|1\.[0-5]) s' <<<"$out"
   grep -qx "Saved $artifacts/engine.mov" <<<"$out"
   out="$(engine status)"; grep -qx "last_saved=$artifacts/engine.mov" <<<"$out"
   out="$(engine start --test-pattern -f 30 -t 2 -o "$artifacts/engine-short.mov")"

@@ -24,7 +24,8 @@ struct ClickSource {
 // from a small pool: the main capture in its area, click marks, then the image, camera,
 // display and window overlays. Each canvas (the main one and, with options.canvas2, a
 // second one) has its own size, pool and layout of the same sources. The recording thread
-// calls compose(); set(), set_screen() and set_layout() may come from any thread. Each camera and each display or window stream
+// composes the main canvas and another thread may compose the second one at the same time;
+// set(), set_screen() and set_layout() may come from any thread. Each camera and each display or window stream
 // delivers on its own queue and only replaces its newest retained frame. With
 // options.clicks, compose() reads the system's mouse-down counters, so a press shorter than
 // a frame still shows and no input permission is needed.
@@ -41,8 +42,8 @@ public:
     // A retained frame of a canvas (kMainCanvas or kSecondCanvas) to encode: base in its
     // area with the visible overlays on top, or, for the main canvas, base itself (retained)
     // when it fills the frame and nothing else shows. Null when drawing failed or, for the
-    // second canvas, when all its frames are still with its encoder. Call the main canvas
-    // first for each frame; it reads the clicks.
+    // second canvas, when all its frames are still with its encoder. The main canvas reads the
+    // clicks; the second one uses what it found last.
     CVPixelBufferRef compose(std::size_t canvas, CVPixelBufferRef base);
     // The main canvas: shows, hides or moves an overlay or the main capture, keeping its crop.
     Result set(std::size_t index, bool visible, const std::optional<Area>& area);

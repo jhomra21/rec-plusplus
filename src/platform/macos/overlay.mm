@@ -555,11 +555,23 @@ public:
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
         Layout screen;
+        // The presses are stamped when this reads them, about one frame late, so marks are
+        // drawn for now rather than for the frame's slot, which is 40 ms behind.
+        const auto now = core::Clicks::Clock::now();
+        core::DesktopRect click_place;
+        if (clicks_ && index == kMainCanvas) {
+            read_clicks(now);
+            click_place = click_area();
+        }
         {
+            // The second canvas is drawn on its own thread, with the capture's place the main
+            // canvas found last.
             std::lock_guard lock(mutex_);
             for (std::size_t i = 0; i < layers_.size(); ++i)
                 if (canvas.layers[i].visible) jobs[count++] = {&layers_[i], canvas.layers[i]};
             screen = canvas.screen;
+            if (index == kMainCanvas) click_now_ = click_place;
+            else click_place = click_now_;
         }
         const auto full = [](const Area& a) { return a.x <= 0 && a.y <= 0 && a.width >= 1 && a.height >= 1; };
         const std::uint32_t width = canvas.width, height = canvas.height;
@@ -567,17 +579,8 @@ public:
         const auto base_height = static_cast<std::uint32_t>(CVPixelBufferGetHeight(base));
         std::array<core::ClickMark, core::Clicks::kMax> marks;
         std::size_t mark_count = 0;
-        if (clicks_) {
-            // The presses are stamped when this reads them, about one frame late, so marks are
-            // drawn for now rather than for the frame's slot, which is 40 ms behind.
-            const auto now = core::Clicks::Clock::now();
-            if (index == kMainCanvas) {
-                read_clicks(now);
-                click_now_ = click_area();
-            }
-            if (screen.visible)
-                mark_count = clicks_->marks(now, click_now_, base_width, base_height, width, height, screen.area, screen.crop, marks);
-        }
+        if (clicks_ && screen.visible)
+            mark_count = clicks_->marks(now, click_place, base_width, base_height, width, height, screen.area, screen.crop, marks);
         const bool whole = screen.visible && full(screen.area) && full(screen.crop);
         // A capture at its native size (Scaler::lanczos) is shrunk here, straight to the size
         // it takes in the main canvas.
@@ -793,7 +796,7 @@ private:
     std::vector<Layer> layers_;
     std::array<Canvas, 2> canvases_;
     std::size_t canvas_count_ = 1;
-    core::DesktopRect click_now_;  // The capture's place on the desktop for this frame's marks.
+    core::DesktopRect click_now_;  // The capture's place on the desktop for the marks; guarded by mutex_.
     std::unique_ptr<core::Clicks> clicks_;
     ClickSource click_source_;
     core::DesktopRect click_rect_;

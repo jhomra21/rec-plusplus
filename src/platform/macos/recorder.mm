@@ -31,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -729,6 +730,7 @@ public:
             // past it are kept. Otherwise the full ring evicts pre-roll until the first slot.
             pump_audio(false);
             recording_.store(true);
+            start_second_thread();
             pacer_ = std::thread([this] { run(); });
             return {};
         }
@@ -737,6 +739,7 @@ public:
     Result stop() {
         @autoreleasepool {
             if (pacer_.joinable()) { stop_requested_.store(true); pacer_.join(); }
+            stop_second_thread();
             Result result;
             if (stream_) {
                 // ScreenCaptureKit refuses to stop a stream that it already stopped itself.
@@ -775,7 +778,8 @@ public:
                 overlays_->stop();
                 overlays_.reset();
             }
-            if (transfer_) { VTPixelTransferSessionInvalidate(transfer_); CFRelease(transfer_); transfer_ = nullptr; }
+            for (auto* transfer : {&transfer_, &transfer2_})
+                if (*transfer) { VTPixelTransferSessionInvalidate(*transfer); CFRelease(*transfer); *transfer = nullptr; }
             if (preview_pixels_) { CVPixelBufferRelease(preview_pixels_); preview_pixels_ = nullptr; }
             if (preview2_pixels_) { CVPixelBufferRelease(preview2_pixels_); preview2_pixels_ = nullptr; }
             if (activity_) { [[NSProcessInfo processInfo] endActivity:activity_]; activity_ = nil; }
@@ -876,8 +880,11 @@ public:
                 stats.streams[stats.stream_count++] = live.servers[i];
             if (stream == live_.get()) stats.replay_seconds = live.replay_seconds;
         }
-        stats.canvas2_frames = canvas2_frames_.load();
-        stats.canvas2_dropped = canvas2_dropped_.load();
+        // Frames its encoder fell behind on were handed over but never encoded.
+        const std::uint64_t handed = canvas2_frames_.load();
+        const std::uint64_t lost = std::min(handed, live2_ ? live2_->counters().encoder_dropped : std::uint64_t(0));
+        stats.canvas2_frames = handed - lost;
+        stats.canvas2_dropped = canvas2_dropped_.load() + lost;
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
         return stats;
     }
@@ -958,17 +965,68 @@ private:
         return {};
     }
 
-    // Composes the second canvas from the captured frame and hands it to its encoder. It
-    // never holds back the main canvas: without a free frame it skips this one.
+    // The second canvas is drawn and encoded on its own thread, so it never holds back the
+    // main canvas. It holds one captured frame: a newer one replaces a frame it has not
+    // started on, and that slot is skipped.
+    void start_second_thread() {
+        if (!overlays_ || (!live2_ && !preview2_pixels_)) return;
+        if (preview2_pixels_ && VTPixelTransferSessionCreate(kCFAllocatorDefault, &transfer2_) != noErr) transfer2_ = nullptr;
+        second_stop_ = false;
+        second_ = std::thread([this] { run_second(); });
+    }
+
+    void hand_second(CVPixelBufferRef base, std::uint64_t slot) {
+        if (!second_.joinable()) return;
+        {
+            std::lock_guard lock(second_mutex_);
+            if (second_frame_) {
+                CVPixelBufferRelease(second_frame_);
+                if (live2_) canvas2_dropped_.fetch_add(1);
+            }
+            second_frame_ = CVPixelBufferRetain(base);
+            second_slot_ = slot;
+        }
+        second_wake_.notify_one();
+    }
+
+    void run_second() {
+        for (;;) {
+            CVPixelBufferRef base = nullptr;
+            std::uint64_t slot = 0;
+            {
+                std::unique_lock lock(second_mutex_);
+                second_wake_.wait(lock, [this] { return second_stop_ || second_frame_; });
+                if (second_stop_) return;
+                base = std::exchange(second_frame_, nullptr);
+                slot = second_slot_;
+            }
+            @autoreleasepool { write_second(base, slot); }
+            CVPixelBufferRelease(base);
+        }
+    }
+
+    void stop_second_thread() {
+        if (!second_.joinable()) return;
+        {
+            std::lock_guard lock(second_mutex_);
+            second_stop_ = true;
+        }
+        second_wake_.notify_all();
+        second_.join();
+        if (second_frame_) { CVPixelBufferRelease(second_frame_); second_frame_ = nullptr; }
+    }
+
+    // Composes the second canvas from the captured frame and hands it to its encoder; without
+    // a free frame it skips this one.
     void write_second(CVPixelBufferRef base, std::uint64_t slot) {
-        const bool preview = preview2_pixels_ && preview2_.due(slot, options_.fps);
-        if (!overlays_ || (!live2_ && !preview)) return;
+        const bool preview = transfer2_ && preview2_.due(slot, options_.fps);
+        if (!live2_ && !preview) return;
         CVPixelBufferRef drawn = overlays_->compose(kSecondCanvas, base);
         if (!drawn) {
             canvas2_dropped_.fetch_add(1);
             return;
         }
-        if (preview) render_preview(drawn, preview2_pixels_, preview2_);
+        if (preview) render_preview(transfer2_, drawn, preview2_pixels_, preview2_);
         if (live2_) {
             live2_->video(drawn, slot);
             if (!audio_[kSystem].enabled && !audio_[kMic].enabled)
@@ -1444,10 +1502,10 @@ private:
                     if (frame && preview_.due(slot, options_.fps)) {
                         CVPixelBufferRef drawn = overlays_ ? overlays_->compose(kMainCanvas, frame) : nullptr;
                         if (overlays_ && !drawn) fail("could not draw the overlays");
-                        else render_preview(drawn ? drawn : frame, preview_pixels_, preview_);
+                        else render_preview(transfer_, drawn ? drawn : frame, preview_pixels_, preview_);
                         if (drawn) CVPixelBufferRelease(drawn);
                     }
-                    if (frame) write_second(frame, slot);
+                    if (frame) hand_second(frame, slot);
                     continue;
                 }
                 CVPixelBufferRef composed = nullptr;
@@ -1457,7 +1515,7 @@ private:
                     if (!composed) fail("could not draw the overlays");
                     frame = composed;
                 }
-                if (frame && preview_.due(slot, options_.fps)) render_preview(frame, preview_pixels_, preview_);
+                if (frame && preview_.due(slot, options_.fps)) render_preview(transfer_, frame, preview_pixels_, preview_);
                 // Retry the same timestamp for up to 500 ms on transient backpressure.
                 // Never hold a stream callback or create an unbounded frame queue.
                 bool appended = false;
@@ -1482,7 +1540,7 @@ private:
                         if (!audio_[kSystem].enabled && !audio_[kMic].enabled)
                             live_->audio(0, nullptr, static_cast<std::size_t>((slot + 1) * kMixRate / options_.fps));
                     }
-                    write_second(captured, slot);
+                    hand_second(captured, slot);
                     if ((options_.test_tone || options_.test_mic) &&
                         !write_synthetic_audio(((slot + 1) * static_cast<std::uint64_t>(kMixRate)) / options_.fps) &&
                         !stop_requested_.load())
@@ -1500,8 +1558,9 @@ private:
     }
 
     // Scales and converts a canvas's frame as encoded into BGRA for its preview.
-    void render_preview(CVPixelBufferRef frame, CVPixelBufferRef pixels, core::PreviewBuffer& preview) {
-        if (VTPixelTransferSessionTransferImage(transfer_, frame, pixels) != noErr) return;
+    void render_preview(VTPixelTransferSessionRef transfer, CVPixelBufferRef frame, CVPixelBufferRef pixels,
+                        core::PreviewBuffer& preview) {
+        if (VTPixelTransferSessionTransferImage(transfer, frame, pixels) != noErr) return;
         if (CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
         preview.publish(static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(pixels)), CVPixelBufferGetBytesPerRow(pixels));
         CVPixelBufferUnlockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
@@ -1567,6 +1626,13 @@ private:
     CVPixelBufferRef preview2_pixels_ = nullptr;
     core::PreviewBuffer preview2_;
     std::atomic<std::uint64_t> canvas2_frames_{0}, canvas2_dropped_{0};
+    VTPixelTransferSessionRef transfer2_ = nullptr;  // Its preview scaling, on its thread.
+    std::thread second_;
+    std::mutex second_mutex_;
+    std::condition_variable second_wake_;
+    CVPixelBufferRef second_frame_ = nullptr;  // The next captured frame for it, retained.
+    std::uint64_t second_slot_ = 0;
+    bool second_stop_ = false;
 };
 
 namespace {

@@ -282,7 +282,8 @@ public:
             c.bytes += out.bytes;
             c.queued_ms = std::max(c.queued_ms, out.queued_ms);
         }
-        c.dropped = dropped_.load() + skipped;
+        c.encoder_dropped = dropped_.load();
+        c.dropped = c.encoder_dropped + skipped;
         c.replay_seconds = replay_ ? replay_->seconds() : 0;
         c.movie_frames = movie_ ? movie_->frames() : 0;
         return c;

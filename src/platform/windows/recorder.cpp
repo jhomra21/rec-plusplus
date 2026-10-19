@@ -917,8 +917,11 @@ public:
                 stats.streams[stats.stream_count++] = live.servers[i];
             if (stream == live_.get()) stats.replay_seconds = live.replay_seconds;
         }
-        stats.canvas2_frames = canvas2_frames_.load();
-        stats.canvas2_dropped = canvas2_dropped_.load();
+        // Frames its encoder fell behind on were handed over but never encoded.
+        const std::uint64_t handed = canvas2_frames_.load();
+        const std::uint64_t lost = std::min(handed, live2_ ? live2_->counters().encoder_dropped : std::uint64_t(0));
+        stats.canvas2_frames = handed - lost;
+        stats.canvas2_dropped = canvas2_dropped_.load() + lost;
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
         return stats;
     }

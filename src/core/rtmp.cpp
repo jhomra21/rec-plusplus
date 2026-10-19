@@ -493,6 +493,16 @@ std::string RtmpPublisher::open(const std::string& url, const StreamInfo& info) 
     secure_ = target.secure;
     info_ = info;
     if (auto error = connect(kConnectMs); !error.empty()) { drop_connection(); return error; }
+    // The audio format is known now, and some servers (MediaMTX among them) settle the
+    // stream's tracks within moments of publishing: an audio header that waits for the first
+    // encoded packet can arrive after that, and the server then drops the stream.
+    if (info.audio_rate && info.audio_channels) {
+        audio_header_ = flv::aac_sequence_header(info.audio_rate, info.audio_channels);
+        if (!write_message(kAudio, 8, stream_id_, 0, audio_header_)) {
+            drop_connection();
+            return "lost the connection to " + host_ + ":" + port_;
+        }
+    }
     max_bytes_ = std::max<std::size_t>(2u << 20, std::size_t(info.video_kbps + info.audio_kbps) * 1000 / 8 * 3);
     live_.store(true);
     sender_ = std::thread([this] { run(); });
@@ -665,6 +675,8 @@ bool RtmpPublisher::push(std::uint8_t type, std::uint32_t ms, bool header, bool 
         std::lock_guard lock(mutex_);
         if (closing_) return false;
         const bool video = type == 9;
+        // open() already sent this one.
+        if (header && !video && body == audio_header_) return true;
         if (header) (video ? video_header_ : audio_header_) = body;
         if (!live_.load()) {
             if (video && !header && reconnecting_.load()) dropped_.fetch_add(1);

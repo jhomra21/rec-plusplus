@@ -158,7 +158,8 @@ try {
         Expect-Text (Engine @('status')) 'state=recording'
         Start-Sleep -Milliseconds 1000
         $stopped = Engine @('stop')
-        Expect-Text $stopped 'Paused 1.0 s'
+        # Paused for the 1 s sleep plus the time the commands take on a busy machine.
+        if ("$stopped" -notmatch 'Paused (0\.9|1\.[0-5]) s') { throw "expected a pause of about 1 s in: $stopped" }
         Expect-Text $stopped "Saved $enginePath"
         Expect-Text (Engine @('status')) "last_saved=$enginePath"
         $shortPath = Join-Path $artifacts 'engine-short.mp4'
