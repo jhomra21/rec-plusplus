@@ -181,7 +181,7 @@ color sample_4 "$artifacts/app-layout-moved.probe" green
 # rectangle from 2 s. The self-test notes where to look.
 look="$(step look)"
 [[ -f "$look" ]] || { echo "missing movie: $look" >&2; exit 1; }
-for part in center corner border shadow; do
+for part in center corner top border shadow; do
   "$rec" probe "$look" --sample "$(value "look-$part" "$report")" | tee "$artifacts/app-look-$part.probe"
 done
 color sample_1 "$artifacts/app-look-center.probe" green
@@ -191,7 +191,7 @@ color sample_1 "$artifacts/app-look-border.probe" black
 awk -F= '$1 == "sample_1" { split($2, c, ","); found = 1; ok = c[1] <= 230 && c[2] <= 230 && c[3] <= 230 }
   END { exit !(found && ok) }' "$artifacts/app-look-shadow.probe" || { echo "no drop shadow below the circle" >&2; exit 1; }
 color sample_4 "$artifacts/app-look-center.probe" green
-color sample_4 "$artifacts/app-look-corner.probe" green
+color sample_4 "$artifacts/app-look-top.probe" green
 
 # The scenes step: the screen in the bottom-right quarter without the camera, then the first
 # scene (the whole screen, the camera top right) from 2 s.

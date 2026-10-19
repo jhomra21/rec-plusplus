@@ -209,6 +209,9 @@ try {
     # Camera shapes: over the red image filling the frame, the camera at 1152,324 576x324 is a
     # circle (the 324-pixel square against the right edge, from 1404) with a 12-pixel white
     # border and a shadow; mid-recording "style 2 rectangle,border=12,shadow" fills the box.
+    # The test camera's white bar, about 29 pixels wide here, crosses at its own phase, so the
+    # samples of the camera are wide enough that it cannot turn them white; "top" runs along
+    # the square's top, below the border, corners included.
     Expect-Failure 'follows the --camera' @('record', '--test-pattern', '--camera-style', 'circle')
     Expect-Failure "unknown shape 'hexagon'" @('record', '--test-pattern', '--camera', 'test', '--camera-style', 'hexagon')
     Expect-Failure 'the border must be' @('record', '--test-pattern', '--camera', 'test', '--camera-style', 'circle,border=99')
@@ -223,7 +226,7 @@ try {
     if ($shaped.Code -ne 0) { throw "the shaped camera recording failed: $($shaped.Text)" }
     Expect-Text $shaped.Text 'Styled camera 2 rectangle,border=12:ffffff,shadow'
     Expect-Text $shaped.Text 'written 120, dropped 0'
-    $shapeAt = @{ center = '1556,476,20,20'; box = '1200,476,20,20'; corner = '1408,340,8,8'; border = '1560,326,10,6'; shadow = '1560,652,10,6' }
+    $shapeAt = @{ center = '1446,476,240,20'; box = '1170,476,190,20'; corner = '1408,340,8,8'; top = '1408,340,308,8'; border = '1560,326,10,6'; shadow = '1560,652,10,6' }
     $shape = @{}
     foreach ($part in $shapeAt.Keys) { $shape[$part] = Get-Probe $rec $shapePath (Join-Path $artifacts "shape-$part.probe") @('--sample', $shapeAt[$part]) }
     Expect-Color $shape.center 'sample_1' 'green'
@@ -234,7 +237,7 @@ try {
     if ($r -gt 200 -or $r -lt 120) { throw "no drop shadow below the camera: $($shape.shadow['sample_1'])" }
     Expect-Color $shape.center 'sample_3' 'green'
     Expect-Color $shape.box 'sample_3' 'green'
-    Expect-Color $shape.corner 'sample_3' 'green'
+    Expect-Color $shape.top 'sample_3' 'green'
     # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
     # test pattern fills it and the camera sits near the bottom; mid-recording
     # "place canvas2 1 0 ..." hides the camera there while the main movie keeps showing it.

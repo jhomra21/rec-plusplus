@@ -2622,8 +2622,13 @@ struct PreviewHit {
     // Outside the circle, and below the rectangle's border once the shape changes.
     const double ox = sx + 6, oy = sy + 18;
     const auto rect = [](double x, double y, int w, int h) { return [NSString stringWithFormat:@"%d,%d,%d,%d", static_cast<int>(x), static_cast<int>(y), w, h]; };
-    note([@"look-center=" stringByAppendingString:rect(cx - 20, cy - 20, 40, 40)]);
+    // The test camera's white bar crosses at its own phase, so the movie's samples of the
+    // camera are wide strips it cannot turn white: one across the circle's middle, and one
+    // along the square's top (corners included) for the rectangle.
+    const int band = static_cast<int>(side * 0.6), top = static_cast<int>(side) - 18;
+    note([@"look-center=" stringByAppendingString:rect(cx - band / 2, cy - 10, band, 20)]);
     note([@"look-corner=" stringByAppendingString:rect(sx + 4, sy + 16, 10, 10)]);
+    note([@"look-top=" stringByAppendingString:rect(sx + 4, sy + 16, top, 10)]);
     note([@"look-border=" stringByAppendingString:rect(cx - 5, sy + 3, 10, 4)]);
     note([@"look-shadow=" stringByAppendingString:rect(cx - 10, sy + side + 2, 20, 6)]);
     const auto look = wait_preview(@"app-look", @"green", (cx - 20) / 1920, (cy - 20) / 1080, 40.0 / 1920, 40.0 / 1080);

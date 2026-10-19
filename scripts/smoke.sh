@@ -150,6 +150,9 @@ else
   # Camera shapes: over the red image filling the frame, the camera at 1152,324 576x324 is a
   # circle (the 324-pixel square against the right edge, from 1404) with a 12-pixel white
   # border and a shadow; mid-recording "style 2 rectangle,border=12,shadow" fills the box.
+  # The test camera's white bar, about 29 pixels wide here, crosses at its own phase, so the
+  # samples of the camera are wide enough that it cannot turn them white; "top" runs along
+  # the square's top, below the border, corners included.
   expect_failure 'follows the --camera' record --test-pattern --camera-style circle
   expect_failure "unknown shape 'hexagon'" record --test-pattern --camera test --camera-style hexagon
   expect_failure 'the border must be' record --test-pattern --camera test --camera-style circle,border=99
@@ -158,7 +161,7 @@ else
       --camera-style circle,border=12,shadow -o "$artifacts/shape.mov" | tee "$artifacts/shape.record.log"
   grep -q 'Styled camera 2 rectangle,border=12:ffffff,shadow' "$artifacts/shape.record.log"
   grep -q 'written 120, dropped 0' "$artifacts/shape.record.log"
-  for part in center:1556,476,20,20 box:1200,476,20,20 corner:1408,340,8,8 border:1560,326,10,6 shadow:1560,652,10,6; do
+  for part in center:1446,476,240,20 box:1170,476,190,20 corner:1408,340,8,8 top:1408,340,308,8 border:1560,326,10,6 shadow:1560,652,10,6; do
     "$rec" probe "$artifacts/shape.mov" --sample "${part#*:}" | tee "$artifacts/shape-${part%%:*}.probe"
   done
   color sample_1 "$artifacts/shape-center.probe" green
@@ -169,7 +172,7 @@ else
     END { exit !(found && ok) }' "$artifacts/shape-shadow.probe" || { echo 'no drop shadow below the camera' >&2; exit 1; }
   color sample_3 "$artifacts/shape-center.probe" green
   color sample_3 "$artifacts/shape-box.probe" green
-  color sample_3 "$artifacts/shape-corner.probe" green
+  color sample_3 "$artifacts/shape-top.probe" green
   # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
   # pattern fills it and the camera sits near the bottom; mid-recording "place canvas2 1 0 ..."
   # hides the camera there while the main movie keeps showing it.
