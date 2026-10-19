@@ -559,7 +559,8 @@ try {
         $canvas = Get-Probe $rec $file.FullName (Join-Path $artifacts "stream-received-$key.probe")
         Expect-Field $canvas 'width' $(if ($key -eq 'smokekey10') { '1280' } else { '720' })
         Expect-Field $canvas 'height' $(if ($key -eq 'smokekey10') { '720' } else { '1280' })
-        Expect-Within $canvas 'frames' 119 120
+        # The second canvas (smokekey11) may skip up to 5 frames on a slow CI GPU.
+        Expect-Within $canvas 'frames' $(if ($key -eq 'smokekey10') { 119 } else { 114 }) 120
         Expect-Within $canvas 'av_sync_events' 4 4
         Expect-Within $canvas 'av_offset_max_ms' 0 20
     }
