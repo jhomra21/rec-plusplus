@@ -378,6 +378,7 @@ try {
     Wait-Recorded $ui 5
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]2001, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Screen only"
     Wait-Recorded $ui 7
+    $counted = Text-Of $ui 101
     Press $ui 'Stop Recording'
     Wait-Status $ui 'Ready to record' | Out-Null
     $movie = Newest-Movie
@@ -393,10 +394,10 @@ try {
     # the last sampled second rather than a fixed one.
     $last = 0
     while ($corner.ContainsKey("sample_$($last + 1)")) { $last++ }
-    if ($last -lt 5) { throw "the camera recording is too short: $($corner['duration']) s" }
+    if ($last -lt 5) { throw "the camera recording is too short: $($corner['duration']) s; the app showed '$counted' at Stop" }
     Expect-Color $corner "sample_$last" 'white'
     foreach ($second in 0..$last) { Expect-Color $logo "sample_$second" 'red' }
-    Write-Host "6. camera and image: $($corner['frames']) frames, corner, full frame, hidden; the preview matched, before Start too"
+    Write-Host "6. camera and image: $($corner['frames']) frames ($counted at Stop), corner, full frame, hidden; the preview matched, before Start too"
 
     # 6b. Camera layout: before Start, drag the camera from its corner to the middle and its
     # top-left corner outwards; while recording, drag it to the top right. The preview and
@@ -457,6 +458,7 @@ try {
         [AppWindow]::SendMessage($ui.Window, 0x0111, [IntPtr]((1 -shl 16) -bor [AppWindow]::GetDlgCtrlID($sceneList)), $sceneList) | Out-Null
         Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-scene-switched.png') @(0.6, 0.6, 0.3, 0.3) 'blue' -Not
         Wait-Recorded $ui 5
+        $counted = Text-Of $ui 101
         Press $ui 'Stop Recording'
         Wait-Status $ui 'Ready to record' | Out-Null
     } finally {
@@ -467,7 +469,7 @@ try {
     $quarter = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-scenes-quarter.probe') @('--sample', '1100,650,600,300')
     $last = 0
     while ($quarter.ContainsKey("sample_$($last + 1)")) { $last++ }
-    if ($last -lt 4) { throw "the scenes recording is too short: $($quarter['duration']) s" }
+    if ($last -lt 4) { throw "the scenes recording is too short: $($quarter['duration']) s; the app showed '$counted' at Stop" }
     Expect-Color $quarter 'sample_1' 'blue'
     Expect-Color $quarter "sample_$last" 'white'
     # Remove the layer, so the later steps capture only the test pattern.
@@ -477,7 +479,7 @@ try {
     Press $ui 'Remove'
     Start-Sleep -Milliseconds 300
     if ([int][AppWindow]::SendMessage($sources, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero) -ne 2) { throw 'the display layer was not removed' }  # LB_GETCOUNT
-    Write-Host "6c. scenes: $($quarter['frames']) frames; a display layer placed by dragging in a new scene, switched away while recording"
+    Write-Host "6c. scenes: $($quarter['frames']) frames ($counted at Stop); a display layer placed by dragging in a new scene, switched away while recording"
     # 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
     # unmuted from the notification-area menu 4.5 s in. The mix loses the beeps at 3 and 4 s.
     Set-Check $ui 'Microphone' $true
