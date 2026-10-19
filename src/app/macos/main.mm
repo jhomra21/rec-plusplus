@@ -1634,6 +1634,10 @@ struct PreviewHit {
     if (!_saved) [self remember];
     if (_hotkeyRef) UnregisterEventHotKey(_hotkeyRef);
     if (_replayHotkeyRef) UnregisterEventHotKey(_replayHotkeyRef);
+    // Joins the idle preview before exit() can kill it mid-start: Metal's shader-cache database
+    // (archiveUsage.db), shared with the engine, keeps a lock held by a killed thread, and the
+    // next launch hangs in Starting… for as long as the engine has the database open.
+    _session.reset();
 }
 
 // MARK: - Status
@@ -1876,7 +1880,7 @@ struct PreviewHit {
     const bool shown = _window.visible && !_window.miniaturized && (_window.occlusionState & NSWindowOcclusionStateVisible);
     const bool wanted = _showPreview.state == NSControlStateValueOn;
     const bool allowed = s.state != State::idle || _testPattern || CGPreflightScreenCaptureAccess();
-    const bool before = s.state == State::idle && shown && wanted && allowed;
+    const bool before = s.state == State::idle && !_quitting && shown && wanted && allowed;
     if (before) {
         [self readSettings];
         _session->idle_preview(&_settings, _testPattern);
