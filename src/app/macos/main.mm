@@ -928,6 +928,10 @@ struct PreviewHit {
     stack.alignment = NSLayoutAttributeTop;
     stack.spacing = 30;
     stack.edgeInsets = NSEdgeInsetsMake(20, 20, 20, 20);
+    // A top-aligned stack keeps the top inset but not the bottom one: the tallest column ended
+    // at the window's bottom edge.
+    for (NSView* view in stack.arrangedSubviews)
+        [view.bottomAnchor constraintLessThanOrEqualToAnchor:stack.bottomAnchor constant:-20].active = YES;
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     NSView* content = _window.contentView;
     [content addSubview:stack];
@@ -1878,7 +1882,8 @@ struct PreviewHit {
         tight = left < 12 || right < 12 || bottom < 12;
     });
     note([@"margins=" stringByAppendingString:margins]);
-    if (tight) note(@"margins-tight=1");
+    // Push buttons' frames include about 6 pt of bezel around the visible button.
+    if (tight) fail([@"controls are too close to the window's edge: " stringByAppendingString:margins]);
     // 30 fps keeps the check light on virtual machines.
     ui(^{ [self->_fps selectItemAtIndex:std::find(kFrameRates.begin(), kFrameRates.end(), 30u) - kFrameRates.begin()]; });
 
