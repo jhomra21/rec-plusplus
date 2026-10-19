@@ -659,10 +659,16 @@ public:
             if (!options_.preview_width) return {"a preview needs a preview width"};
             options_.system_audio = options_.microphone = options_.test_tone = options_.test_mic = false;
             options_.stream_urls.clear();
+            options_.canvas2.stream_urls.clear();
+            options_.canvas2.output.clear();
             options_.replay_seconds = 0;
             options_.duration_seconds = 0;
         }
         if (options_.stream_urls.size() > kMaxStreams) return {"at most " + std::to_string(kMaxStreams) + " streams"};
+        if (auto error = core::check_canvas(options_); !error.empty()) return {error};
+        if (!options_.preview_only && !options_.canvas2.output.empty() &&
+            GetFileAttributesW(wide(options_.canvas2.output).c_str()) != INVALID_FILE_ATTRIBUTES)
+            return {"output file already exists: " + options_.canvas2.output};
         if (options_.fps == 0 || options_.fps > 120) return {"invalid frame rate"};
         if ((options_.test_tone || options_.test_mic) && !options_.test_pattern)
             return {"synthetic audio needs the test pattern"};
@@ -717,12 +723,19 @@ public:
                 if (layered()) { stop(); return started; }
             }
         }
+        if (options_.canvas2.width && !overlays_) { stop(); return {"this graphics driver cannot draw a second canvas"}; }
         if (options_.preview_width && device_) {
             const auto size = core::preview_size(size_.width, size_.height, options_.preview_width);
             previewer_ = std::make_unique<win::FramePreview>();
             // A driver that cannot draw the preview still records.
             if (previewer_->start(device_.Get(), size_.width, size_.height, size)) preview_.reset(size);
             else previewer_.reset();
+            if (const auto& c = options_.canvas2; c.width) {
+                const auto second = core::preview_size(c.width, c.height, options_.preview_width);
+                previewer2_ = std::make_unique<win::FramePreview>();
+                if (previewer2_->start(device_.Get(), c.width, c.height, second)) preview2_.reset(second);
+                else previewer2_.reset();
+            }
         }
         if (options_.preview_only) {
             if (!previewer_) { stop(); return {"this graphics driver cannot draw the preview"}; }
@@ -739,6 +752,14 @@ public:
             if (const HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &composed_); FAILED(hr)) {
                 stop();
                 return {failed("could not allocate the preview frame", hr)};
+            }
+            if (options_.canvas2.width) {
+                desc.Width = options_.canvas2.width;
+                desc.Height = options_.canvas2.height;
+                if (const HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &composed2_); FAILED(hr)) {
+                    stop();
+                    return {failed("could not allocate the second canvas's preview frame", hr)};
+                }
             }
         }
         if (!options_.stream_urls.empty() || options_.replay_seconds) {
@@ -764,6 +785,9 @@ public:
                 stop();
                 return {(options_.stream_urls.empty() ? "replay: " : "stream: ") + started.error};
             }
+        }
+        if (options_.canvas2.width && !options_.preview_only) {
+            if (auto started = start_second(); !started) { stop(); return started; }
         }
         active_.store(true);
         if (!options_.preview_only)
@@ -820,14 +844,19 @@ public:
             if (result && fragmented_) core::consolidate_fragments(options_.output);
         }
         if (live_) live_->stop();
+        if (live2_)
+            if (auto error = live2_->stop(); !error.empty() && result) result = {"second canvas: " + error};
         if (allocator_) { allocator_->UninitializeSampleAllocator(); allocator_.Reset(); }
+        if (allocator2_) { allocator2_->UninitializeSampleAllocator(); allocator2_.Reset(); }
         if (overlays_) {
             camera_frames_ = overlays_->camera_frames();
             overlays_->stop();
             overlays_.reset();
         }
         previewer_.reset();
+        previewer2_.reset();
         composed_.Reset();
+        composed2_.Reset();
         for (auto& slot : slots_) slot = {};
         pending_count_ = 0;
         current_ = -1;
@@ -872,25 +901,33 @@ public:
         stats.paused = timeline_.paused();
         stats.paused_seconds = static_cast<double>(timeline_.paused_total(now_ticks())) / kTicks;
         stats.window_closed = window_closed_.load();
-        if (live_) {
-            const auto live = live_->counters();
-            stats.streaming = live.live;
-            stats.stream_reconnecting = live.reconnecting;
-            stats.stream_reconnects = live.reconnects;
-            stats.stream_hardware = live.hardware;
-            stats.stream_frames = live.frames;
-            stats.stream_dropped = live.dropped;
-            stats.stream_bytes = live.bytes;
-            stats.stream_queued_ms = live.queued_ms;
-            stats.streams = live.servers;
-            stats.stream_count = live.server_count;
-            stats.replay_seconds = live.replay_seconds;
+        // The second canvas's servers follow the main canvas's.
+        for (const auto* stream : {live_.get(), live2_.get()}) {
+            if (!stream) continue;
+            const auto live = stream->counters();
+            stats.streaming = stats.streaming || live.live;
+            stats.stream_reconnecting = stats.stream_reconnecting || live.reconnecting;
+            stats.stream_reconnects += live.reconnects;
+            stats.stream_hardware = stats.stream_hardware || live.hardware;
+            stats.stream_frames = std::max(stats.stream_frames, live.frames);
+            stats.stream_dropped += live.dropped;
+            stats.stream_bytes += live.bytes;
+            stats.stream_queued_ms = std::max(stats.stream_queued_ms, live.queued_ms);
+            for (std::uint32_t i = 0; i < live.server_count && stats.stream_count < kMaxStreams; ++i)
+                stats.streams[stats.stream_count++] = live.servers[i];
+            if (stream == live_.get()) stats.replay_seconds = live.replay_seconds;
         }
+        stats.canvas2_frames = canvas2_frames_.load();
+        stats.canvas2_dropped = canvas2_dropped_.load();
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
         return stats;
     }
     std::string failure() const { std::lock_guard lock(mutex_); return failure_; }
-    std::string stream_failure() const { return live_ ? live_->failure() : std::string(); }
+    std::string stream_failure() const {
+        std::string main = live_ ? live_->failure() : std::string(), second = live2_ ? live2_->failure() : std::string();
+        if (!second.empty()) second = "second canvas: " + second;
+        return main.empty() ? second : second.empty() ? main : main + "; " + second;
+    }
     Result save_replay(const std::string& path, double& seconds) const {
         seconds = 0;
         if (!live_ || !options_.replay_seconds) return {"the replay buffer is off"};
@@ -904,6 +941,10 @@ public:
         if (!overlays_) return {"this recording draws the capture as is; start it with a screen area or an overlay to change it"};
         return overlays_->set_screen(visible, area);
     }
+    Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
+        if (!overlays_) return {"this recording draws the capture as is; start it with a screen area or an overlay to change it"};
+        return overlays_->set_layout(canvas, layer, layout);
+    }
     Result set_volume(AudioInput input, double gain_db, bool muted) {
         if (!(gain_db >= -60 && gain_db <= 24)) return {"volume must be between -60 and 24 dB"};
         auto& source = audio_[input == AudioInput::system ? kSystem : kMic];
@@ -913,8 +954,13 @@ public:
         return {};
     }
 
-    bool preview(PreviewFrame& frame) const { return preview_.take(frame); }
-    void show_preview(bool on) { preview_.show(on); }
+    bool preview(PreviewFrame& frame, std::size_t canvas) const {
+        return canvas == kSecondCanvas ? preview2_.take(frame) : preview_.take(frame);
+    }
+    void show_preview(bool on) {
+        preview_.show(on);
+        preview2_.show(on);
+    }
     Result pause() {
         if (!recording_.load() || finished_.load()) return {"not recording"};
         if (!timeline_.pause(now_ticks())) return {"already paused"};
@@ -930,8 +976,64 @@ private:
     // Frames need composing: overlays, or the main capture moved or hidden.
     bool layered() const {
         const auto& a = options_.screen_area;
+        const auto& c = options_.screen_crop;
         return !options_.overlays.empty() || options_.clicks || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 ||
-               a.height < 1;
+               a.height < 1 || c.x > 0 || c.y > 0 || c.width < 1 || c.height < 1 || options_.canvas2.width;
+    }
+
+    // The second canvas's frame pool and encoder: its servers and its movie.
+    Result start_second() {
+        const auto& c = options_.canvas2;
+        auto input = video_type(MFVideoFormat_NV12, {c.width, c.height}, options_.fps);
+        input->SetUINT32(MF_MT_DEFAULT_STRIDE, c.width);
+        HRESULT hr = MFCreateVideoSampleAllocatorEx(IID_PPV_ARGS(&allocator2_));
+        if (SUCCEEDED(hr)) hr = allocator2_->SetDirectXManager(manager_.Get());
+        ComPtr<IMFAttributes> pool;
+        MFCreateAttributes(&pool, 1);
+        pool->SetUINT32(MF_SA_D3D11_BINDFLAGS, D3D11_BIND_RENDER_TARGET);
+        // The encoder's queue holds four frames and the encoder a few more.
+        if (SUCCEEDED(hr)) hr = allocator2_->InitializeSampleAllocatorEx(2, 12, pool.Get(), input.Get());
+        if (FAILED(hr)) return {failed("could not allocate the second canvas's frames", hr)};
+        if (c.stream_urls.empty() && c.output.empty()) return {};
+        if (options_.stream_kbps < 500 || options_.stream_kbps > 50000) return {"stream bitrate must be between 500 and 50000 kb/s"};
+        win::LiveSettings live;
+        live.urls = c.stream_urls;
+        live.movie = c.output;
+        live.width = c.width;
+        live.height = c.height;
+        live.fps = options_.fps;
+        live.video_kbps = options_.stream_kbps;
+        live.manager = manager_.Get();
+        live.vendor = vendor_;
+        live2_ = std::make_unique<win::LiveStream>();
+        if (auto started = live2_->start(live); !started) return {"second canvas: " + started.error};
+        return {};
+    }
+
+    // Composes the second canvas from the same frame and hands it to its encoder. It never
+    // holds back the main canvas: without a free frame it skips this one.
+    void write_second(std::uint64_t slot, int frame) {
+        ComPtr<IMFSample> sample;
+        const HRESULT hr = allocator2_->AllocateSample(&sample);
+        if (FAILED(hr)) { canvas2_dropped_.fetch_add(1); return; }
+        ComPtr<IMFMediaBuffer> buffer;
+        ComPtr<IMFDXGIBuffer> dxgi;
+        ComPtr<ID3D11Texture2D> target;
+        UINT subresource = 0;
+        if (FAILED(sample->GetBufferByIndex(0, &buffer)) || FAILED(buffer.As(&dxgi)) ||
+            FAILED(dxgi->GetResource(IID_PPV_ARGS(&target))) || FAILED(dxgi->GetSubresourceIndex(&subresource)) ||
+            !overlays_->draw(kSecondCanvas, context_.Get(), slots_[frame].texture.Get(), target.Get(), subresource, shown_at_)) {
+            canvas2_dropped_.fetch_add(1);
+            return;
+        }
+        if (previewer2_ && preview2_.due(slot, options_.fps)) previewer2_->render(context_.Get(), target.Get(), subresource, preview2_);
+        ComPtr<IMF2DBuffer> planar;
+        DWORD length = 0;
+        if (SUCCEEDED(buffer.As(&planar)) && SUCCEEDED(planar->GetContiguousLength(&length))) buffer->SetCurrentLength(length);
+        sample->SetSampleTime(static_cast<std::int64_t>(slot) * kTicks / options_.fps);
+        sample->SetSampleDuration(kTicks / options_.fps);
+        if (live2_) live2_->video(sample.Get());
+        canvas2_frames_.fetch_add(1);
     }
 
     void fail(std::string text) {
@@ -1320,7 +1422,7 @@ private:
         const bool system = audio_[kSystem].enabled, mic = audio_[kMic].enabled;
         const bool file_mix = system && mic && options_.audio_tracks != AudioTracks::stems;
         // A stream always carries the mix, even when the file keeps only stems.
-        mixing_ = file_mix || (system && mic && live_);
+        mixing_ = file_mix || (system && mic && (live_ || live2_));
         const bool stems = !file_mix || options_.audio_tracks == AudioTracks::both;
         auto add_audio = [&](std::uint32_t channels, std::uint32_t bytes_per_second, int& index) -> Result {
             DWORD added = 0;
@@ -1380,7 +1482,7 @@ private:
 
     // The frame as encoded: the slot composed with the layers, or the slot as is.
     bool compose(int frame, ID3D11Texture2D* target, unsigned subresource) {
-        if (overlays_) return overlays_->draw(context_.Get(), slots_[frame].texture.Get(), target, subresource, shown_at_);
+        if (overlays_) return overlays_->draw(kMainCanvas, context_.Get(), slots_[frame].texture.Get(), target, subresource, shown_at_);
         context_->CopySubresourceRegion(target, subresource, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
         return true;
     }
@@ -1391,6 +1493,9 @@ private:
             return;
         }
         previewer_->render(context_.Get(), composed_.Get(), 0, preview_);
+        if (composed2_ && previewer2_ &&
+            overlays_->draw(kSecondCanvas, context_.Get(), slots_[frame].texture.Get(), composed2_.Get(), 0, shown_at_))
+            previewer2_->render(context_.Get(), composed2_.Get(), 0, preview2_);
     }
 
     enum class Write { done, busy, failed };
@@ -1432,6 +1537,7 @@ private:
         const HRESULT hr = writer_->WriteSample(video_stream_, sample.Get());
         if (FAILED(hr)) { fail(failed("video encoding failed", hr)); return Write::failed; }
         if (live_) live_->video(sample.Get());
+        if (allocator2_ && allocator_) write_second(slot, frame);
         return Write::done;
     }
 
@@ -1500,7 +1606,10 @@ private:
             ok = ok && write_pcm(source.stream, alone ? program : data, frames, source.stem_channels, start);
         }
         if (mixing_) mixer_.add(kind, start, program, frames);
-        else if (live_) live_->audio(start, program, frames);
+        else {
+            if (live_) live_->audio(start, program, frames);
+            if (live2_) live2_->audio(start, program, frames);
+        }
         source.next = start + static_cast<std::int64_t>(frames);
         if (ok) source.written.fetch_add(1);
         else source.dropped.fetch_add(1);
@@ -1532,6 +1641,7 @@ private:
             const auto frames = static_cast<std::size_t>(std::min<std::int64_t>({target - first, 4800, mixer_.capacity()}));
             mixer_.take(frames, mixed_);
             if (live_) live_->audio(first, mixed_.data(), frames);
+            if (live2_) live2_->audio(first, mixed_.data(), frames);
             if (mix_stream_ < 0) continue;
             if (!write_pcm(mix_stream_, mixed_.data(), frames, 2, first)) return;
             mix_written_.fetch_add(1);
@@ -1637,8 +1747,9 @@ private:
                 if (options_.test_tone || options_.test_mic)
                     write_synthetic_audio(((slot + 1) * static_cast<std::uint64_t>(kMixRate)) / options_.fps);
                 // A stream without audio sources still carries a silent AAC track; services expect one.
-                if (live_ && !audio_[kSystem].enabled && !audio_[kMic].enabled)
-                    live_->audio(0, nullptr, static_cast<std::size_t>(video_end_samples()));
+                if (!audio_[kSystem].enabled && !audio_[kMic].enabled)
+                    for (auto* stream : {live_.get(), live2_.get()})
+                        if (stream) stream->audio(0, nullptr, static_cast<std::size_t>(video_end_samples()));
             } else if (!stop_requested_.load() && !finished_.load()) {
                 dropped_.fetch_add(1);
             }
@@ -1691,6 +1802,13 @@ private:
     std::unique_ptr<win::FramePreview> previewer_;
     ComPtr<ID3D11Texture2D> composed_;  // The frame as drawn, in preview-only mode.
     core::PreviewBuffer preview_;
+    // The second canvas.
+    std::unique_ptr<win::FramePreview> previewer2_;
+    ComPtr<ID3D11Texture2D> composed2_;
+    core::PreviewBuffer preview2_;
+    ComPtr<IMFVideoSampleAllocatorEx> allocator2_;
+    std::unique_ptr<win::LiveStream> live2_;  // With servers or a movie; kept after stop() for its counters.
+    std::atomic<std::uint64_t> canvas2_frames_{0}, canvas2_dropped_{0};
     ComPtr<IMFVideoSampleAllocatorEx> allocator_;
 
     ComPtr<IMFSinkWriter> writer_;
@@ -1934,7 +2052,11 @@ Result Recorder::set_overlay(std::size_t index, bool visible, std::optional<Area
 Result Recorder::set_volume(AudioInput input, double gain_db, bool muted) {
     return impl_->capture.set_volume(input, gain_db, muted);
 }
-bool Recorder::preview(PreviewFrame& frame) const { return impl_->capture.preview(frame); }
+Result Recorder::set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
+    return impl_->capture.set_layout(canvas, layer, layout);
+}
+bool Recorder::preview(PreviewFrame& frame) const { return impl_->capture.preview(frame, kMainCanvas); }
+bool Recorder::preview(PreviewFrame& frame, std::size_t canvas) const { return impl_->capture.preview(frame, canvas); }
 void Recorder::show_preview(bool on) noexcept { impl_->capture.show_preview(on); }
 
 } // namespace rec

@@ -121,7 +121,7 @@ private:
     struct Ended {
         std::uint64_t id = 0;
         Stats stats;
-        std::string failure, stream_failure, saved;
+        std::string failure, stream_failure, saved, saved2;  // saved2: the second canvas's movie.
     };
 
     std::string start(const std::string& rest) {
@@ -140,6 +140,7 @@ private:
             if (!path.empty() && u8path(path).is_relative()) path = text((base / u8path(path)).lexically_normal());
         };
         resolve(options.output);
+        resolve(options.canvas2.output);
         for (auto& overlay : options.overlays)
             if (overlay.kind == Overlay::Kind::image) resolve(overlay.source);
         return launch(std::move(options));
@@ -153,6 +154,9 @@ private:
         if (!decode_options(split(rest), options, error)) return "error " + error + "\n";
         if (options.preview_only) return "error the engine records; preview_only is for in-process previews\n";
         if (options.output.empty() || u8path(options.output).is_relative()) return "error the output path must be absolute\n";
+        if (!options.canvas2.output.empty() && u8path(options.canvas2.output).is_relative())
+            return "error the second canvas's output path must be absolute\n";
+        std::cout << "Starting a recording" << std::endl;
         return launch(std::move(options));
     }
 
@@ -171,13 +175,16 @@ private:
             const std::size_t width = options_.preview_width;
             // Portrait captures are up to twice as tall as wide in the preview.
             preview_ = SharedFrame::create(width * width * 2, error);
+            if (options_.canvas2.width && preview_.valid()) preview2_ = SharedFrame::create(width * width * 2, error);
             if (preview_.valid()) {
                 reply += "preview=" + preview_.name() + "\n";
+                if (preview2_.valid()) reply += "preview2=" + preview2_.name() + "\n";
                 pumping_ = true;
                 pump_ = std::thread([this, recorder = recorder_.get()] {
-                    PreviewFrame frame;
+                    PreviewFrame frame, second;
                     while (pumping_.load()) {
                         if (recorder->preview(frame)) preview_.write(frame);
+                        if (preview2_.valid() && recorder->preview(second, kSecondCanvas)) preview2_.write(second);
                         std::this_thread::sleep_for(std::chrono::milliseconds(8));
                     }
                 });
@@ -209,6 +216,7 @@ private:
         pumping_ = false;
         if (pump_.joinable()) pump_.join();
         preview_ = {};
+        preview2_ = {};
         const auto stopped = recorder_->stop();
         const auto stats = recorder_->stats();
         std::string reply = summary(options_, stats, wall.count());
@@ -221,6 +229,8 @@ private:
         recorder_.reset();
         std::error_code ignored;
         if (fs::exists(u8path(options_.output), ignored)) ended_.saved = options_.output;
+        if (!options_.canvas2.output.empty() && fs::exists(u8path(options_.canvas2.output), ignored))
+            ended_.saved2 = options_.canvas2.output;
         if (failure.empty()) {
             last_saved_ = options_.output;
             return reply + "ok Saved " + options_.output + "\n";
@@ -231,7 +241,7 @@ private:
 
     std::string ended_text() const {
         return encode_stats(ended_.stats) + "failure=" + one_line(ended_.failure) + "\nstream_failure=" +
-               one_line(ended_.stream_failure) + "\nsaved=" + ended_.saved + "\nok\n";
+               one_line(ended_.stream_failure) + "\nsaved=" + ended_.saved + "\nsaved2=" + ended_.saved2 + "\nok\n";
     }
 
     // finish ID: stops recording ID and reports how it ended, or reports it when it already ended.
@@ -269,8 +279,10 @@ private:
         if (!recorder_) return "error not recording\n";
         Options shown = options_;
         for (auto& url : shown.stream_urls) url = redact(url);
+        for (auto& url : shown.canvas2.stream_urls) url = redact(url);
         std::string reply = "id=" + std::to_string(id_) + "\n";
         if (preview_.valid()) reply += "preview=" + preview_.name() + "\n";
+        if (preview2_.valid()) reply += "preview2=" + preview2_.name() + "\n";
         return reply + "options=" + join(encode_options(shown)) + "\nok\n";
     }
 
@@ -288,6 +300,7 @@ private:
                 for (std::uint32_t i = 0; i < stats.stream_count; ++i) live += stats.streams[i].live ? 1 : 0;
                 out << "streams_live=" << live << '/' << stats.stream_count << '\n';
             }
+            if (options_.canvas2.width) out << "canvas2_frames=" << stats.canvas2_frames << '\n';
             if (options_.replay_seconds) out << "replay_seconds=" << static_cast<int>(stats.replay_seconds) << '\n';
             if (const auto muted = controls_->muted(); !muted.empty()) out << "muted=" << muted << '\n';
         }
@@ -305,7 +318,7 @@ private:
     std::uint64_t id_ = 0;
     Ended ended_;
     std::string last_saved_, last_error_;
-    SharedFrame preview_;
+    SharedFrame preview_, preview2_;  // The second canvas's in preview2_.
     std::thread pump_;  // Copies preview frames into preview_ while recording.
     std::atomic_bool pumping_{false};
 };

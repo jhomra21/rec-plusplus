@@ -24,6 +24,8 @@ struct Request {
     std::size_t layer = 0;      // show, hide, flip, move and place: 0-based overlay, or kScreen.
     std::optional<Area> area;   // move and place.
     bool visible = true;        // place.
+    std::size_t canvas = kMainCanvas;  // place.
+    std::optional<Area> crop;   // place: the part of the source shown.
     // audio: the source, and its new mute (none: toggle) or volume.
     AudioInput input = AudioInput::system;
     std::optional<bool> muted;
@@ -31,7 +33,8 @@ struct Request {
 };
 
 // One control line: pause, resume, toggle, save, show N|screen, hide N|screen,
-// move N|screen X,Y,W,H, place N|screen 0|1 X,Y,W,H (visibility and area at once),
+// move N|screen X,Y,W,H, place [canvas2] N|screen 0|1 X,Y,W,H [CROP] (visibility, area and
+// optionally the crop at once, in the main or the second canvas),
 // mute system|mic, unmute system|mic, volume system|mic DB, level system|mic DB 0|1 (volume
 // and mute at once), stop.
 // Empty with error set when line is not one.

@@ -25,8 +25,9 @@ struct ClickSource {
 };
 
 // Composes NV12 frames on the GPU: the main capture in its area, click marks, then the
-// image, camera, display and window overlays. The recording thread calls draw(); set() and
-// set_screen() may come from any thread. Each camera has a reader thread that only replaces
+// image, camera, display and window overlays. Each canvas (the main one and, with
+// options.canvas2, a second one) has its own size and layout of the same sources. The
+// recording thread calls draw(); set(), set_screen() and set_layout() may come from any thread. Each camera has a reader thread that only replaces
 // one CPU copy of its newest frame, and each display or window capture only retains its
 // newest frame; draw() uploads what changed. With options.clicks a low-level mouse hook on
 // its own thread records presses.
@@ -37,16 +38,21 @@ public:
     Overlays(const Overlays&) = delete;
     Overlays& operator=(const Overlays&) = delete;
 
-    // Uses options.overlays, screen_area, screen_visible, cursor and clicks.
+    // Uses options.overlays, screen_area, screen_visible, screen_crop, canvas2, cursor and
+    // clicks. width and height are the main canvas's.
     Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const Options& options,
                  const ClickSource& clicks = {});
-    // Draws into frame, whose index in a texture array is subresource (as IMFDXGIBuffer
-    // reports it). screen is the main capture: an NV12 frame of the same size that can be
+    // Draws a canvas (kMainCanvas or kSecondCanvas) into frame, an NV12 texture of that
+    // canvas's size whose index in a texture array is subresource (as IMFDXGIBuffer reports
+    // it). screen is the main capture: an NV12 frame of the main canvas's size that can be
     // sampled per plane. at is the instant the frame shows, for click marks.
-    bool draw(ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame, unsigned subresource,
-              std::chrono::steady_clock::time_point at);
+    bool draw(std::size_t canvas, ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame,
+              unsigned subresource, std::chrono::steady_clock::time_point at);
+    // The main canvas: shows, hides or moves an overlay or the main capture, keeping its crop.
     Result set(std::size_t index, bool visible, const std::optional<Area>& area);
     Result set_screen(bool visible, const std::optional<Area>& area);
+    // layer: an index into options.overlays, or kScreenLayer.
+    Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout);
     std::uint64_t camera_frames() const;
     void stop();
 

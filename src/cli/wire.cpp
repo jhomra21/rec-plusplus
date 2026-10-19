@@ -59,6 +59,16 @@ bool area(std::string_view text, Area& out) {
     return p.size() == 4 && real(p[0], out.x) && real(p[1], out.y) && real(p[2], out.width) && real(p[3], out.height);
 }
 
+// visible/area/crop
+std::string layout_text(const Layout& l) { return std::string(l.visible ? "1" : "0") + '/' + area_text(l.area) + '/' + area_text(l.crop); }
+
+bool layout(std::string_view text, Layout& out) {
+    const auto first = text.find('/');
+    const auto second = first == std::string_view::npos ? first : text.find('/', first + 1);
+    return second != std::string_view::npos && flag(text.substr(0, first), out.visible) &&
+           area(text.substr(first + 1, second - first - 1), out.area) && area(text.substr(second + 1), out.crop);
+}
+
 bool region(std::string_view text, Region& out) {
     const auto p = parts(text);
     return p.size() == 4 && integer(p[0], out.x) && integer(p[1], out.y) && integer(p[2], out.width) && integer(p[3], out.height);
@@ -107,6 +117,7 @@ std::vector<std::string> encode_options(const Options& o) {
     add("replay", std::to_string(o.replay_seconds));
     add("screen_area", area_text(o.screen_area));
     add("screen_visible", yes(o.screen_visible));
+    add("screen_crop", area_text(o.screen_crop));
     add("preview_width", std::to_string(o.preview_width));
     add("preview_only", yes(o.preview_only));
     for (const auto& l : o.overlays) {
@@ -117,6 +128,14 @@ std::vector<std::string> encode_options(const Options& o) {
         if (l.region) add("overlay.region", region_text(*l.region));
         add("overlay.area", area_text(l.area));
         add("overlay.visible", yes(l.visible));
+        add("overlay.crop", area_text(l.crop));
+    }
+    if (const auto& c = o.canvas2; c.width) {
+        add("canvas2", std::to_string(c.width) + 'x' + std::to_string(c.height));
+        add("canvas2.screen", layout_text(c.screen));
+        for (const auto& l : c.overlays) add("canvas2.overlay", layout_text(l));
+        for (const auto& url : c.stream_urls) add("canvas2.stream", url);
+        if (!c.output.empty()) add("canvas2.output", c.output);
     }
     return w;
 }
@@ -164,6 +183,17 @@ bool decode_options(const std::vector<std::string>& words, Options& o, std::stri
         else if (key == "replay") ok = integer(v, o.replay_seconds);
         else if (key == "screen_area") ok = area(v, o.screen_area);
         else if (key == "screen_visible") ok = flag(v, o.screen_visible);
+        else if (key == "screen_crop") ok = area(v, o.screen_crop);
+        else if (key == "canvas2") {
+            const auto x = v.find('x');
+            ok = x != std::string_view::npos && integer(v.substr(0, x), o.canvas2.width) && integer(v.substr(x + 1), o.canvas2.height);
+        } else if (key == "canvas2.screen") ok = layout(v, o.canvas2.screen);
+        else if (key == "canvas2.overlay") {
+            Layout l;
+            ok = layout(v, l) && o.canvas2.overlays.size() < 15;
+            o.canvas2.overlays.push_back(l);
+        } else if (key == "canvas2.stream") { ok = o.canvas2.stream_urls.size() < kMaxStreams; o.canvas2.stream_urls.emplace_back(v); }
+        else if (key == "canvas2.output") o.canvas2.output = v;
         else if (key == "preview_width") ok = integer(v, o.preview_width) && o.preview_width <= 3840;
         else if (key == "preview_only") ok = flag(v, o.preview_only);
         else if (key == "overlay") {
@@ -177,6 +207,7 @@ bool decode_options(const std::vector<std::string>& words, Options& o, std::stri
             else if (field == "region") { ok = region(v, r); layer->region = r; }
             else if (field == "area") ok = area(v, layer->area);
             else if (field == "visible") ok = flag(v, layer->visible);
+            else if (field == "crop") ok = area(v, layer->crop);
             else ok = false;
         } else ok = false;
         if (!ok) {
@@ -222,6 +253,8 @@ std::string encode_stats(const Stats& s) {
     }
     add("replay_seconds", number(s.replay_seconds));
     add("camera_frames", std::to_string(s.camera_frames));
+    add("canvas2_frames", std::to_string(s.canvas2_frames));
+    add("canvas2_dropped", std::to_string(s.canvas2_dropped));
     return out;
 }
 
@@ -260,6 +293,8 @@ bool decode_stat(std::string_view key, std::string_view v, Stats& s) {
     }
     if (key == "replay_seconds") return real(v, s.replay_seconds);
     if (key == "camera_frames") return integer(v, s.camera_frames);
+    if (key == "canvas2_frames") return integer(v, s.canvas2_frames);
+    if (key == "canvas2_dropped") return integer(v, s.canvas2_dropped);
     return false;
 }
 

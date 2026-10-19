@@ -10,6 +10,7 @@
 
 #include "rec/rec.hpp"
 #include "core/mixer.hpp"
+#include "core/overlay.hpp"
 #include "core/pause.hpp"
 #include "core/preview.hpp"
 #include "core/sync.hpp"
@@ -603,6 +604,8 @@ public:
                 if (!options_.preview_width) return {"a preview needs a preview width"};
                 options_.system_audio = options_.microphone = options_.test_tone = options_.test_mic = false;
                 options_.stream_urls.clear();
+                options_.canvas2.stream_urls.clear();
+                options_.canvas2.output.clear();
                 options_.replay_seconds = 0;
                 options_.duration_seconds = 0;
             }
@@ -611,6 +614,13 @@ public:
             if (options_.replay_seconds && (options_.replay_seconds < 5 || options_.replay_seconds > 300))
                 return {"replay must be between 5 and 300 seconds"};
             if (options_.stream_urls.size() > kMaxStreams) return {"at most " + std::to_string(kMaxStreams) + " streams"};
+            if (auto error = core::check_canvas(options_); !error.empty()) return {error};
+            if (!options_.preview_only && !options_.canvas2.output.empty()) {
+                NSString* second = [NSString stringWithUTF8String:options_.canvas2.output.c_str()];
+                if (!second) return {"invalid output path for the second canvas"};
+                if ([[NSFileManager defaultManager] fileExistsAtPath:second])
+                    return {"output file already exists: " + options_.canvas2.output};
+            }
             if (options_.fps == 0 || options_.fps > 120) return {"invalid frame rate"};
             if ((options_.test_tone || options_.test_mic) && !options_.test_pattern)
                 return {"synthetic audio needs the test pattern"};
@@ -678,6 +688,12 @@ public:
                     stop();
                     return {"could not make the preview"};
                 }
+                if (const auto& c = options_.canvas2; c.width && preview_pixels_) {
+                    const auto second = core::preview_size(c.width, c.height, options_.preview_width);
+                    if (CVPixelBufferCreate(kCFAllocatorDefault, second.width, second.height, kCVPixelFormatType_32BGRA, nullptr,
+                                            &preview2_pixels_) == kCVReturnSuccess)
+                        preview2_.reset(second);
+                }
             }
             if (!options_.stream_urls.empty() || options_.replay_seconds) {
                 mac::LiveSettings live;
@@ -693,6 +709,8 @@ public:
                     return {(options_.stream_urls.empty() ? "replay: " : "stream: ") + started.error};
                 }
             }
+            if (options_.canvas2.width && !options_.preview_only)
+                if (auto started = start_second(); !started) { stop(); return started; }
             if (!options_.preview_only) {
                 auto ready = create_writer();
                 if (!ready) { stop(); return ready; }
@@ -750,6 +768,8 @@ public:
                 writer_ = nil;
             }
             if (live_) live_->stop();
+            if (live2_)
+                if (auto error = live2_->stop(); !error.empty() && result) result = {"second canvas: " + error};
             if (overlays_) {
                 camera_frames_ = overlays_->camera_frames();
                 overlays_->stop();
@@ -757,6 +777,7 @@ public:
             }
             if (transfer_) { VTPixelTransferSessionInvalidate(transfer_); CFRelease(transfer_); transfer_ = nullptr; }
             if (preview_pixels_) { CVPixelBufferRelease(preview_pixels_); preview_pixels_ = nullptr; }
+            if (preview2_pixels_) { CVPixelBufferRelease(preview2_pixels_); preview2_pixels_ = nullptr; }
             if (activity_) { [[NSProcessInfo processInfo] endActivity:activity_]; activity_ = nil; }
             recording_.store(false);
             {
@@ -839,25 +860,33 @@ public:
         stats.paused = timeline_.paused();
         stats.paused_seconds = static_cast<double>(timeline_.paused_total(now_nanos())) / kNanos;
         stats.window_closed = window_closed_.load();
-        if (live_) {
-            const auto live = live_->counters();
-            stats.streaming = live.live;
-            stats.stream_reconnecting = live.reconnecting;
-            stats.stream_reconnects = live.reconnects;
-            stats.stream_hardware = live.hardware;
-            stats.stream_frames = live.frames;
-            stats.stream_dropped = live.dropped;
-            stats.stream_bytes = live.bytes;
-            stats.stream_queued_ms = live.queued_ms;
-            stats.streams = live.servers;
-            stats.stream_count = live.server_count;
-            stats.replay_seconds = live.replay_seconds;
+        // The second canvas's servers follow the main canvas's.
+        for (const auto* stream : {live_.get(), live2_.get()}) {
+            if (!stream) continue;
+            const auto live = stream->counters();
+            stats.streaming = stats.streaming || live.live;
+            stats.stream_reconnecting = stats.stream_reconnecting || live.reconnecting;
+            stats.stream_reconnects += live.reconnects;
+            stats.stream_hardware = stats.stream_hardware || live.hardware;
+            stats.stream_frames = std::max(stats.stream_frames, live.frames);
+            stats.stream_dropped += live.dropped;
+            stats.stream_bytes += live.bytes;
+            stats.stream_queued_ms = std::max(stats.stream_queued_ms, live.queued_ms);
+            for (std::uint32_t i = 0; i < live.server_count && stats.stream_count < kMaxStreams; ++i)
+                stats.streams[stats.stream_count++] = live.servers[i];
+            if (stream == live_.get()) stats.replay_seconds = live.replay_seconds;
         }
+        stats.canvas2_frames = canvas2_frames_.load();
+        stats.canvas2_dropped = canvas2_dropped_.load();
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
         return stats;
     }
     std::string failure() const { std::lock_guard lock(mutex_); return failure_; }
-    std::string stream_failure() const { return live_ ? live_->failure() : std::string(); }
+    std::string stream_failure() const {
+        std::string main = live_ ? live_->failure() : std::string(), second = live2_ ? live2_->failure() : std::string();
+        if (!second.empty()) second = "second canvas: " + second;
+        return main.empty() ? second : second.empty() ? main : main + "; " + second;
+    }
     Result save_replay(const std::string& path, double& seconds) const {
         seconds = 0;
         if (!live_ || !options_.replay_seconds) return {"the replay buffer is off"};
@@ -871,6 +900,10 @@ public:
         if (!overlays_) return {"this recording draws the capture as is; start it with a screen area or an overlay to change it"};
         return overlays_->set_screen(visible, area);
     }
+    Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
+        if (!overlays_) return {"this recording draws the capture as is; start it with a screen area or an overlay to change it"};
+        return overlays_->set_layout(canvas, layer, layout);
+    }
     Result set_volume(AudioInput input, double gain_db, bool muted) {
         if (!(gain_db >= -60 && gain_db <= 24)) return {"volume must be between -60 and 24 dB"};
         auto& source = audio_[input == AudioInput::system ? kSystem : kMic];
@@ -880,8 +913,13 @@ public:
         return {};
     }
 
-    bool preview(PreviewFrame& frame) const { return preview_.take(frame); }
-    void show_preview(bool on) { preview_.show(on); }
+    bool preview(PreviewFrame& frame, std::size_t canvas) const {
+        return canvas == kSecondCanvas ? preview2_.take(frame) : preview_.take(frame);
+    }
+    void show_preview(bool on) {
+        preview_.show(on);
+        preview2_.show(on);
+    }
     Result pause() {
         if (!recording_.load() || finished_.load()) return {"not recording"};
         if (!timeline_.pause(now_nanos())) return {"already paused"};
@@ -894,13 +932,51 @@ public:
     }
 
 private:
-    // Frames need composing: overlays, or the main capture moved or hidden.
+    // Frames need composing: overlays, or the main capture moved, cropped or hidden, or a
+    // second canvas.
     bool layered() const {
         const auto& a = options_.screen_area;
+        const auto& c = options_.screen_crop;
         return !options_.overlays.empty() || options_.clicks || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 ||
-               a.height < 1;
+               a.height < 1 || c.x > 0 || c.y > 0 || c.width < 1 || c.height < 1 || options_.canvas2.width;
     }
 
+    // The second canvas's encoder: its servers and its movie.
+    Result start_second() {
+        const auto& c = options_.canvas2;
+        if (c.stream_urls.empty() && c.output.empty()) return {};
+        if (options_.stream_kbps < 500 || options_.stream_kbps > 50000) return {"stream bitrate must be between 500 and 50000 kb/s"};
+        mac::LiveSettings live;
+        live.urls = c.stream_urls;
+        live.movie = c.output;
+        live.width = c.width;
+        live.height = c.height;
+        live.fps = options_.fps;
+        live.video_kbps = options_.stream_kbps;
+        live2_ = std::make_unique<mac::LiveStream>();
+        if (auto started = live2_->start(live); !started) return {"second canvas: " + started.error};
+        return {};
+    }
+
+    // Composes the second canvas from the captured frame and hands it to its encoder. It
+    // never holds back the main canvas: without a free frame it skips this one.
+    void write_second(CVPixelBufferRef base, std::uint64_t slot) {
+        const bool preview = preview2_pixels_ && preview2_.due(slot, options_.fps);
+        if (!overlays_ || (!live2_ && !preview)) return;
+        CVPixelBufferRef drawn = overlays_->compose(kSecondCanvas, base);
+        if (!drawn) {
+            canvas2_dropped_.fetch_add(1);
+            return;
+        }
+        if (preview) render_preview(drawn, preview2_pixels_, preview2_);
+        if (live2_) {
+            live2_->video(drawn, slot);
+            if (!audio_[kSystem].enabled && !audio_[kMic].enabled)
+                live2_->audio(0, nullptr, static_cast<std::size_t>((slot + 1) * kMixRate / options_.fps));
+            canvas2_frames_.fetch_add(1);
+        }
+        CVPixelBufferRelease(drawn);
+    }
     void fail(std::string text) {
         {
             std::lock_guard lock(mutex_);
@@ -974,7 +1050,7 @@ private:
         config.minimumFrameInterval = CMTimeMake(9, static_cast<int32_t>(options_.fps * 10));
         // Up to three pending frames plus the current one and the encoder's in-flight surfaces;
         // a live stream's queue and encoder hold a few more.
-        config.queueDepth = options_.stream_urls.empty() && !options_.replay_seconds ? 6 : 8;
+        config.queueDepth = options_.stream_urls.empty() && !options_.replay_seconds && !options_.canvas2.width ? 6 : 8;
         config.showsCursor = options_.cursor;
         config.capturesAudio = options_.system_audio;
         config.sampleRate = kMixRate;
@@ -1087,7 +1163,7 @@ private:
         // A live stream always carries the mix, even when the file keeps only stems.
         const bool system = audio_[kSystem].enabled, mic = audio_[kMic].enabled;
         const bool file_mix = system && mic && options_.audio_tracks != AudioTracks::stems;
-        mixing_ = file_mix || (system && mic && live_);
+        mixing_ = file_mix || (system && mic && (live_ || live2_));
         const bool stems = !file_mix || options_.audio_tracks == AudioTracks::both;
         NSMutableArray<AVAssetWriterInput*>* audio_inputs = [NSMutableArray array];
         if (mixing_) mixer_.reset(static_cast<std::size_t>(kMixRate) * 2);
@@ -1208,7 +1284,7 @@ private:
             if (!ramp.unity()) ramp.apply(pcm_.data(), pcm_.size() / 2);
         }
         // A single source goes to the live stream as it is; two go through the mix.
-        if (mixing_ || live_) {
+        if (mixing_ || live_ || live2_) {
             if (pcm) {
                 auto first = static_cast<std::int64_t>(std::llround(CMTimeGetSeconds(start) * kMixRate));
                 // Timestamps jitter by a sample or two; keep a continuous stream continuous.
@@ -1216,8 +1292,12 @@ private:
                     first = source.next_mix;
                 const auto frames = pcm_.size() / 2;
                 source.next_mix = first + static_cast<std::int64_t>(frames);
-                if (mixing_) mixer_.add(kind, first, pcm_.data(), frames);
-                else live_->audio(first, pcm_.data(), frames);
+                if (mixing_) {
+                    mixer_.add(kind, first, pcm_.data(), frames);
+                } else {
+                    if (live_) live_->audio(first, pcm_.data(), frames);
+                    if (live2_) live2_->audio(first, pcm_.data(), frames);
+                }
                 used = true;
             } else if (!source.stem) {
                 source.dropped.fetch_add(1);
@@ -1248,6 +1328,7 @@ private:
             const auto frames = static_cast<std::size_t>(std::min<std::int64_t>(target - first, 4096));
             mixer_.take(frames, mixed_);
             if (live_) live_->audio(first, mixed_.data(), frames);
+            if (live2_) live2_->audio(first, mixed_.data(), frames);
             if (!mix_input_) continue;
             CMSampleBufferRef sample = pcm_buffer(mix_format_, mixed_.data(), mixed_.size() * sizeof(float),
                                                   frames, CMTimeMake(first, kMixRate));
@@ -1361,20 +1442,22 @@ private:
                 CVPixelBufferRef frame = select_frame(slot, due);
                 if (options_.preview_only) {
                     if (frame && preview_.due(slot, options_.fps)) {
-                        CVPixelBufferRef drawn = overlays_ ? overlays_->compose(frame) : nullptr;
+                        CVPixelBufferRef drawn = overlays_ ? overlays_->compose(kMainCanvas, frame) : nullptr;
                         if (overlays_ && !drawn) fail("could not draw the overlays");
-                        else render_preview(drawn ? drawn : frame);
+                        else render_preview(drawn ? drawn : frame, preview_pixels_, preview_);
                         if (drawn) CVPixelBufferRelease(drawn);
                     }
+                    if (frame) write_second(frame, slot);
                     continue;
                 }
                 CVPixelBufferRef composed = nullptr;
+                CVPixelBufferRef captured = frame;
                 if (frame && overlays_) {
-                    composed = overlays_->compose(frame);
+                    composed = overlays_->compose(kMainCanvas, frame);
                     if (!composed) fail("could not draw the overlays");
                     frame = composed;
                 }
-                if (frame && preview_.due(slot, options_.fps)) render_preview(frame);
+                if (frame && preview_.due(slot, options_.fps)) render_preview(frame, preview_pixels_, preview_);
                 // Retry the same timestamp for up to 500 ms on transient backpressure.
                 // Never hold a stream callback or create an unbounded frame queue.
                 bool appended = false;
@@ -1399,6 +1482,7 @@ private:
                         if (!audio_[kSystem].enabled && !audio_[kMic].enabled)
                             live_->audio(0, nullptr, static_cast<std::size_t>((slot + 1) * kMixRate / options_.fps));
                     }
+                    write_second(captured, slot);
                     if ((options_.test_tone || options_.test_mic) &&
                         !write_synthetic_audio(((slot + 1) * static_cast<std::uint64_t>(kMixRate)) / options_.fps) &&
                         !stop_requested_.load())
@@ -1415,13 +1499,12 @@ private:
         finished_.store(true);
     }
 
-    // Scales and converts the frame as encoded into BGRA for the preview.
-    void render_preview(CVPixelBufferRef frame) {
-        if (VTPixelTransferSessionTransferImage(transfer_, frame, preview_pixels_) != noErr) return;
-        if (CVPixelBufferLockBaseAddress(preview_pixels_, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
-        preview_.publish(static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(preview_pixels_)),
-                         CVPixelBufferGetBytesPerRow(preview_pixels_));
-        CVPixelBufferUnlockBaseAddress(preview_pixels_, kCVPixelBufferLock_ReadOnly);
+    // Scales and converts a canvas's frame as encoded into BGRA for its preview.
+    void render_preview(CVPixelBufferRef frame, CVPixelBufferRef pixels, core::PreviewBuffer& preview) {
+        if (VTPixelTransferSessionTransferImage(transfer_, frame, pixels) != noErr) return;
+        if (CVPixelBufferLockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
+        preview.publish(static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(pixels)), CVPixelBufferGetBytesPerRow(pixels));
+        CVPixelBufferUnlockBaseAddress(pixels, kCVPixelBufferLock_ReadOnly);
     }
 
     void cleanup_capture() {
@@ -1479,6 +1562,11 @@ private:
     VTPixelTransferSessionRef transfer_ = nullptr;  // Preview scaling, on the recording thread.
     CVPixelBufferRef preview_pixels_ = nullptr;
     core::PreviewBuffer preview_;
+    // The second canvas.
+    std::unique_ptr<mac::LiveStream> live2_;  // With servers or a movie; kept after stop() for its counters.
+    CVPixelBufferRef preview2_pixels_ = nullptr;
+    core::PreviewBuffer preview2_;
+    std::atomic<std::uint64_t> canvas2_frames_{0}, canvas2_dropped_{0};
 };
 
 namespace {
@@ -1679,7 +1767,11 @@ Result Recorder::set_screen(bool visible, std::optional<Area> area) { return imp
 Result Recorder::set_volume(AudioInput input, double gain_db, bool muted) {
     return impl_->capture.set_volume(input, gain_db, muted);
 }
-bool Recorder::preview(PreviewFrame& frame) const { return impl_->capture.preview(frame); }
+Result Recorder::set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
+    return impl_->capture.set_layout(canvas, layer, layout);
+}
+bool Recorder::preview(PreviewFrame& frame) const { return impl_->capture.preview(frame, kMainCanvas); }
+bool Recorder::preview(PreviewFrame& frame, std::size_t canvas) const { return impl_->capture.preview(frame, canvas); }
 void Recorder::show_preview(bool on) noexcept { impl_->capture.show_preview(on); }
 
 } // namespace rec

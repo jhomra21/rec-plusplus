@@ -145,6 +145,33 @@ else
   color sample_3 "$artifacts/overlay-camera.probe" white
   "$rec" probe "$artifacts/overlay.mov" --sample 150,100,250,100 | tee "$artifacts/overlay-image.probe"
   for second in 0 1 2 3; do color "sample_$second" "$artifacts/overlay-image.probe" red; done
+  # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
+  # pattern fills it and the camera sits near the bottom; mid-recording "place canvas2 1 0 ..."
+  # hides the camera there while the main movie keeps showing it.
+  expect_failure 'need --canvas2' record --test-pattern --canvas2-output "$artifacts/no-canvas.mp4"
+  expect_failure 'must be even' record --test-pattern -t 1 --canvas2 721x1280 -o "$artifacts/odd-canvas.mov"
+  expect_failure 'add the overlay first' record --test-pattern --canvas2 vertical --canvas2-place 1:0,0,1,1
+  { sleep 2.5; echo 'place canvas2 1 0 0.6,0.8,0.35,0.15'; sleep 5; } |
+    "$rec" record --test-pattern --test-tone -r 1080p -f 30 -t 5 --camera test --canvas2 720x1280 \
+      --canvas2-place screen:0,0,1,1:0.34,0,0.32,1 --canvas2-place 1:0.6,0.8,0.35,0.15 \
+      --canvas2-output "$artifacts/canvas2-vertical.mp4" -o "$artifacts/canvas2-main.mov" | tee "$artifacts/canvas2.record.log"
+  grep -q 'Second canvas 720x1280: 150 frames, skipped 0' "$artifacts/canvas2.record.log"
+  grep -q 'written 150, dropped 0' "$artifacts/canvas2.record.log"
+  "$rec" probe "$artifacts/canvas2-vertical.mp4" | tee "$artifacts/canvas2-vertical.probe"
+  grep -qx 'codec=h264' "$artifacts/canvas2-vertical.probe"
+  grep -qx 'width=720' "$artifacts/canvas2-vertical.probe"
+  grep -qx 'height=1280' "$artifacts/canvas2-vertical.probe"
+  grep -qx 'frames=150' "$artifacts/canvas2-vertical.probe"
+  grep -qx 'audio_codec=aac' "$artifacts/canvas2-vertical.probe"
+  within "$(value av_sync_events "$artifacts/canvas2-vertical.probe")" 5 5
+  within "$(value av_offset_max_ms "$artifacts/canvas2-vertical.probe")" 0 20
+  # The camera's area is 432,1024 252x192 in the vertical movie and 1402,772 480x270 in the main one.
+  "$rec" probe "$artifacts/canvas2-vertical.mp4" --sample 460,1050,190,140 | tee "$artifacts/canvas2-vertical-camera.probe"
+  color sample_1 "$artifacts/canvas2-vertical-camera.probe" green
+  color sample_4 "$artifacts/canvas2-vertical-camera.probe" white
+  "$rec" probe "$artifacts/canvas2-main.mov" --sample 1450,800,380,200 | tee "$artifacts/canvas2-main-camera.probe"
+  color sample_1 "$artifacts/canvas2-main-camera.probe" green
+  color sample_4 "$artifacts/canvas2-main-camera.probe" green
   # Scene layers: the pattern in the bottom middle on black and the test camera top left.
   # Mid-recording "hide 1" hides the camera and "move screen" moves the pattern to the bottom
   # left. Display and window layers need Screen Recording permission, which CI runners lack.
@@ -264,6 +291,18 @@ else
   grep -q 'rtmps://127.0.0.1:1936/live/\*\*\*\*: 120 frames' "$artifacts/stream-multi.record.log"
   if grep -q smokekey "$artifacts/stream-multi.record.log"; then echo 'a stream key was printed' >&2; exit 1; fi
 
+  # Both canvases live at once, each to its own server: landscape and vertical.
+  expect_failure 'at most 4 stream servers across both canvases' record --test-pattern --canvas2 vertical \
+    --stream rtmp://127.0.0.1:1935/live/a1 --stream rtmp://127.0.0.1:1935/live/a2 --stream rtmp://127.0.0.1:1935/live/a3 \
+    --canvas2-stream rtmp://127.0.0.1:1935/live/b1 --canvas2-stream rtmp://127.0.0.1:1935/live/b2
+  "$rec" record --test-pattern --test-tone -r 720p -f 30 -t 4 --stream rtmp://127.0.0.1:1935/live/smokekey10 \
+    --canvas2 720x1280 --canvas2-place screen:0,0,1,1:0.34,0,0.32,1 --canvas2-stream rtmp://127.0.0.1:1935/live/smokekey11 \
+    -o "$artifacts/stream-canvas2-local.mov" | tee "$artifacts/stream-canvas2.record.log"
+  grep -q 'Streaming to rtmp://127.0.0.1:1935/live/\*\*\*\*; the second canvas: rtmp://127.0.0.1:1935/live/\*\*\*\*' \
+    "$artifacts/stream-canvas2.record.log"
+  grep -q 'Second canvas 720x1280: 120 frames, skipped 0' "$artifacts/stream-canvas2.record.log"
+  if grep -q smokekey "$artifacts/stream-canvas2.record.log"; then echo 'a stream key was printed' >&2; exit 1; fi
+
   # A server restart mid-stream: the stream reconnects and resumes at the next keyframe.
   "$rec" record --test-pattern --test-tone -r 720p -f 30 -t 10 --stream rtmp://127.0.0.1:1935/live/smokekey5 \
     -o "$artifacts/stream-reconnect.mov" </dev/null >"$artifacts/stream-reconnect.record.log" 2>&1 &
@@ -301,6 +340,18 @@ else
     [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
     "$rec" probe "$file" | tee "$artifacts/stream-received-$key.probe"
   done
+  # Same AVFoundation priming allowance as below.
+  for key in smokekey10 smokekey11; do
+    file="$(find "$received/live/$key" -name '*.mp4' -print -quit)"
+    [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
+    "$rec" probe "$file" | tee "$artifacts/stream-received-$key.probe"
+    within "$(value frames "$artifacts/stream-received-$key.probe")" 119 120
+    within "$(value av_sync_events "$artifacts/stream-received-$key.probe")" 4 4
+    within "$(value av_offset_max_ms "$artifacts/stream-received-$key.probe")" 0 55
+  done
+  grep -qx 'width=1280' "$artifacts/stream-received-smokekey10.probe"
+  grep -qx 'height=1280' "$artifacts/stream-received-smokekey11.probe"
+  grep -qx 'width=720' "$artifacts/stream-received-smokekey11.probe"
   got="$artifacts/stream-received-smokekey1.probe"
   grep -qx 'codec=h264' "$got"
   grep -qx 'width=1280' "$got"

@@ -21,14 +21,14 @@ struct Placement {
     double u0 = 0, v0 = 0, u1 = 1, v1 = 1;
 };
 
-// A camera is cropped to fill the rectangle; any other picture keeps its aspect ratio inside it.
-inline Placement place(Overlay::Kind kind, const Area& area, std::uint32_t frame_width, std::uint32_t frame_height,
-                       std::uint32_t picture_width, std::uint32_t picture_height) {
+// place() for a picture size in pixels that may be fractional (a cropped picture).
+inline Placement place_fitted(Overlay::Kind kind, const Area& area, std::uint32_t frame_width, std::uint32_t frame_height,
+                       double picture_width, double picture_height) {
     const double x = area.x * frame_width, y = area.y * frame_height;
     const double w = area.width * frame_width, h = area.height * frame_height;
     Placement p{x, y, x + w, y + h};
-    if (!picture_width || !picture_height || w <= 0 || h <= 0) return p;
-    const double box = w / h, picture = static_cast<double>(picture_width) / picture_height;
+    if (picture_width <= 0 || picture_height <= 0 || w <= 0 || h <= 0) return p;
+    const double box = w / h, picture = picture_width / picture_height;
     if (kind == Overlay::Kind::camera) {
         if (picture > box) { p.u0 = (1 - box / picture) / 2; p.u1 = 1 - p.u0; }
         else { p.v0 = (1 - picture / box) / 2; p.v1 = 1 - p.v0; }
@@ -44,6 +44,22 @@ inline Placement place(Overlay::Kind kind, const Area& area, std::uint32_t frame
     return p;
 }
 
+// Shows the crop (fractions of the picture) of a picture. A camera is cropped further to fill
+// the rectangle; any other picture keeps its aspect ratio inside it.
+inline Placement place(Overlay::Kind kind, const Area& area, std::uint32_t frame_width, std::uint32_t frame_height,
+                       std::uint32_t picture_width, std::uint32_t picture_height, const Area& crop = {}) {
+    const double x = area.x * frame_width, y = area.y * frame_height;
+    const double w = area.width * frame_width, h = area.height * frame_height;
+    Placement p{x, y, x + w, y + h, crop.x, crop.y, crop.x + crop.width, crop.y + crop.height};
+    if (!picture_width || !picture_height || w <= 0 || h <= 0) return p;
+    p = place_fitted(kind, area, frame_width, frame_height, picture_width * crop.width, picture_height * crop.height);
+    p.u0 = crop.x + p.u0 * crop.width;
+    p.u1 = crop.x + p.u1 * crop.width;
+    p.v0 = crop.y + p.v0 * crop.height;
+    p.v1 = crop.y + p.v1 * crop.height;
+    return p;
+}
+
 inline bool valid(const Area& a) {
     constexpr double slack = 1e-6;
     return std::isfinite(a.x) && std::isfinite(a.y) && std::isfinite(a.width) && std::isfinite(a.height) &&
@@ -54,6 +70,49 @@ inline bool valid(const Area& a) {
 inline std::string check_area(std::size_t index, const Area& a) {
     if (valid(a)) return {};
     return "overlay " + std::to_string(index + 1) + " must lie inside the frame: x, y, width and height are fractions of it";
+}
+
+inline std::string check_crop(const std::string& name, const Area& a) {
+    if (valid(a)) return {};
+    return name + ": the crop must lie inside the picture: x, y, width and height are fractions of it";
+}
+
+inline std::string layer_name(std::size_t layer) {
+    return layer == SIZE_MAX ? std::string("the screen") : "overlay " + std::to_string(layer + 1);
+}
+
+inline std::string check_layout(std::size_t layer, const Layout& l) {
+    if (!valid(l.area)) return layer_name(layer) + " must lie inside the canvas: x, y, width and height are fractions of it";
+    return check_crop(layer_name(layer), l.crop);
+}
+
+// The second canvas's size, layouts and output; empty when it is off or fine.
+inline std::string check_canvas(const Options& o) {
+    const auto& c = o.canvas2;
+    if (!c.width && !c.height) {
+        if (!c.stream_urls.empty() || !c.output.empty()) return "the second canvas needs a size";
+        return {};
+    }
+    if (c.width < 64 || c.height < 64 || c.width > 4096 || c.height > 4096 || c.width % 2 || c.height % 2)
+        return "the second canvas must be even, 64 to 4096 pixels on each side";
+    if (c.overlays.size() > o.overlays.size()) return "the second canvas places more overlays than the recording has";
+    if (auto e = check_layout(SIZE_MAX, c.screen); !e.empty()) return "second canvas: " + e;
+    for (std::size_t i = 0; i < c.overlays.size(); ++i)
+        if (auto e = check_layout(i, c.overlays[i]); !e.empty()) return "second canvas: " + e;
+    if (o.stream_urls.size() + c.stream_urls.size() > kMaxStreams)
+        return "at most " + std::to_string(kMaxStreams) + " stream servers across both canvases";
+    if (!c.output.empty()) {
+        if (c.output.size() < 4 || c.output.substr(c.output.size() - 4) != ".mp4") return "the second canvas's movie must end with .mp4";
+        if (c.output == o.output) return "the second canvas's movie needs its own file";
+    }
+    return {};
+}
+
+// The second canvas's layout of overlay index: its own, or by default the main canvas's.
+inline Layout canvas_layout(const Options& o, std::size_t index) {
+    if (index < o.canvas2.overlays.size()) return o.canvas2.overlays[index];
+    const auto& overlay = o.overlays[index];
+    return {overlay.visible, overlay.area, overlay.crop};
 }
 
 inline std::string check_overlays(const std::vector<Overlay>& overlays) {
@@ -79,6 +138,7 @@ inline std::string check_overlays(const std::vector<Overlay>& overlays) {
             break;
         }
         if (auto error = check_area(i, overlays[i].area); !error.empty()) return error;
+        if (auto error = check_crop(name, overlays[i].crop); !error.empty()) return error;
     }
     return {};
 }

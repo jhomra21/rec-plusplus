@@ -50,17 +50,18 @@ public:
     }
 
     // The marks shown at time at for a capture of source (desktop units) that is fitted into a
-    // width x height frame (centered, keeping its shape) and placed in area. Returns how
-    // many were written to out.
+    // width x height picture (centered, keeping its shape), whose crop is placed in area of a
+    // canvas_width x canvas_height canvas. Returns how many were written to out.
     std::size_t marks(Clock::time_point at, const DesktopRect& source, std::uint32_t width, std::uint32_t height,
-                      const Area& area, std::array<ClickMark, kMax>& out) const {
+                      std::uint32_t canvas_width, std::uint32_t canvas_height, const Area& area, const Area& crop,
+                      std::array<ClickMark, kMax>& out) const {
         if (source.width <= 0 || source.height <= 0 || !width || !height) return 0;
         const double scale = std::min(width / source.width, height / source.height);
         const double fit_w = source.width * scale, fit_h = source.height * scale;
         const double fit_x = (width - fit_w) / 2, fit_y = (height - fit_h) / 2;
-        const auto p = place(Overlay::Kind::image, area, width, height, width, height);
-        const double sx = (p.right - p.left) / width, sy = (p.bottom - p.top) / height;
-        const double diameter = std::max(16.0, 0.06 * (p.bottom - p.top));
+        const auto p = place(Overlay::Kind::image, area, canvas_width, canvas_height, width, height, crop);
+        if (p.u1 <= p.u0 || p.v1 <= p.v0) return 0;
+        const double diameter = std::max(16.0, 0.06 * (p.bottom - p.top) / (p.v1 - p.v0));
         std::size_t count = 0;
         std::lock_guard lock(mutex_);
         for (const auto& c : presses_) {
@@ -75,7 +76,11 @@ public:
             }
             const double u = (c.x - source.x) / source.width, v = (c.y - source.y) / source.height;
             if (u < 0 || v < 0 || u > 1 || v > 1) continue;
-            out[count++] = {p.left + (fit_x + u * fit_w) * sx, p.top + (fit_y + v * fit_h) * sy, diameter * grow, alpha, c.right};
+            // Where the press lands in the shown part of the picture.
+            const double su = ((fit_x + u * fit_w) / width - p.u0) / (p.u1 - p.u0);
+            const double sv = ((fit_y + v * fit_h) / height - p.v0) / (p.v1 - p.v0);
+            if (su < 0 || sv < 0 || su > 1 || sv > 1) continue;
+            out[count++] = {p.left + su * (p.right - p.left), p.top + sv * (p.bottom - p.top), diameter * grow, alpha, c.right};
         }
         return count;
     }

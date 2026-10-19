@@ -94,6 +94,9 @@ run_app() {
   cat "$1"
   if [[ "$code" != 0 ]]; then
     cat "$2" >&2
+    ps -axo pid=,command= | awk '/[R]ec --engine/ { print $1 }' | while read -r engine; do
+      sample "$engine" 2 -file "$1.engine-sample.txt" >/dev/null 2>&1 || true
+    done
     echo "Rec exited with $code" >&2
     exit 1
   fi

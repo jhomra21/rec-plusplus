@@ -191,6 +191,15 @@ void usage() {
                  "                                 X,Y,W,H after @ are fractions of the frame, e.g. 0.73,0.715,0.25,0.25\n"
                  "  --screen-area X,Y,W,H          Where the capture itself sits in the frame (default: all of it)\n"
                  "  --hide-screen                  Start with the capture hidden, so only overlays show\n"
+                 "  --crop N|screen:X,Y,W,H        Show only this part of an overlay or the capture (fractions of it)\n"
+                 "  --canvas2 WxH|vertical         Also compose a second canvas, e.g. 1080x1920 (vertical), from the same\n"
+                 "                                 sources, encoded once at the stream bitrate\n"
+                 "  --canvas2-place N|screen:X,Y,W,H[:CROP]\n"
+                 "                                 Where a source sits in the second canvas, and which part of it shows\n"
+                 "                                 (default: as in the main canvas, the whole capture fitted)\n"
+                 "  --canvas2-hide N               Hide overlay N in the second canvas; --canvas2-hide-screen the capture\n"
+                 "  --canvas2-stream URL           Stream the second canvas (with --stream, up to 4 servers in all)\n"
+                 "  --canvas2-output FILE.mp4      Save the second canvas as its own MP4\n"
                  "  --test-pattern                 Synthetic video that flashes once a second\n"
                  "  --test-tone                    Add a beep with each flash as system audio\n"
                  "  --test-mic                     Add a quiet synthetic microphone\n\n"
@@ -199,8 +208,8 @@ void usage() {
                  "hide an overlay (in the order given), m or a to mute or unmute the microphone or system\n"
                  "audio, q or Ctrl-C to stop.\n"
                  "With stdin piped, and with rec send, the control lines are: pause, resume, toggle, save,\n"
-                 "show N|screen, hide N|screen, move N|screen X,Y,W,H, mute system|mic, unmute system|mic,\n"
-                 "volume system|mic DB, stop.\n"
+                 "show N|screen, hide N|screen, move N|screen X,Y,W,H, place [canvas2] N|screen 0|1 X,Y,W,H [CROP],\n"
+                 "mute system|mic, unmute system|mic, volume system|mic DB, stop.\n"
                  "The engine keeps recording after the terminal or app that started it exits. Its socket is\n"
                  "per user (REC_ENGINE_SOCKET overrides it) and it logs to engine.log beside the socket.\n"
                  "rec probe --sample reports the mean color of a rectangle (video pixels) once a second, and the spread\n"
@@ -387,17 +396,26 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_signal);
     const bool audio = options.system_audio || options.microphone || options.test_tone || options.test_mic;
     const bool live = terminal();
-    const bool streaming = !options.stream_urls.empty();
+    // Both canvases' servers, in Stats::streams order.
+    std::vector<std::string> urls = options.stream_urls;
+    urls.insert(urls.end(), options.canvas2.stream_urls.begin(), options.canvas2.stream_urls.end());
+    const bool streaming = !urls.empty();
     std::cout << "Recording to " << options.output
               << (!keyboard() ? " (Ctrl-C to stop)\n"
                   : options.replay_seconds ? " (p: pause/resume, s: save replay, q or Ctrl-C: stop)\n"
                                            : " (p: pause/resume, q or Ctrl-C: stop)\n");
     if (options.replay_seconds)
         std::cout << "Keeping the last " << options.replay_seconds << " s for replays at " << options.stream_kbps << " kb/s\n";
+    if (options.canvas2.width)
+        std::cout << "Second canvas " << options.canvas2.width << 'x' << options.canvas2.height
+                  << (options.canvas2.output.empty() ? std::string() : " to " + options.canvas2.output) << '\n';
     if (streaming) {
         const auto stats = recorder.stats();
         std::cout << "Streaming to ";
         for (std::size_t i = 0; i < options.stream_urls.size(); ++i) std::cout << (i ? ", " : "") << redact(options.stream_urls[i]);
+        for (std::size_t i = 0; i < options.canvas2.stream_urls.size(); ++i)
+            std::cout << (i ? ", " : options.stream_urls.empty() ? "the second canvas: " : "; the second canvas: ")
+                      << redact(options.canvas2.stream_urls[i]);
         std::cout << " at " << options.stream_kbps << " kb/s ("
                   << (stats.stream_hardware ? "hardware" : "software") << " H.264)\n";
     }
@@ -434,7 +452,7 @@ int main(int argc, char** argv) {
                 const auto& s = stats.streams[i];
                 const bool back = s.reconnects != reconnects[i];
                 if (!back && s.reconnecting == reconnecting[i]) continue;
-                const auto name = stats.stream_count > 1 ? "Stream " + redact(options.stream_urls[i]) : std::string("Stream");
+                const auto name = stats.stream_count > 1 && i < urls.size() ? "Stream " + redact(urls[i]) : std::string("Stream");
                 if (live) std::cout << "\r\033[K";
                 if (back) std::cout << name << " reconnected at " << clock_text(recorded()) << '\n';
                 else if (!s.reconnecting) std::cout << name << " gave up reconnecting at " << clock_text(recorded()) << '\n';

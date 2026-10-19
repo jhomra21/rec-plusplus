@@ -205,7 +205,41 @@ try {
     Expect-Color $camera 'sample_3' 'white'
     $image = Get-Probe $rec $overlayPath (Join-Path $artifacts 'overlay-image.probe') @('--sample', '150,100,250,100')
     foreach ($second in 0..3) { Expect-Color $image "sample_$second" 'red' }
-    # Scene layers: the test pattern in the bottom middle, a blue window as a window layer top
+    # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
+    # test pattern fills it and the camera sits near the bottom; mid-recording
+    # "place canvas2 1 0 ..." hides the camera there while the main movie keeps showing it.
+    Expect-Failure 'need --canvas2' @('record', '--test-pattern', '--canvas2-output', (Join-Path $artifacts 'no-canvas.mp4'))
+    Expect-Failure 'must be even' @('record', '--test-pattern', '-t', '1', '--canvas2', '721x1280', '-o', (Join-Path $artifacts 'odd-canvas.mp4'))
+    Expect-Failure 'add the overlay first' @('record', '--test-pattern', '--canvas2', 'vertical', '--canvas2-place', '1:0,0,1,1')
+    $mainPath = Join-Path $artifacts 'canvas2-main.mp4'
+    $verticalPath = Join-Path $artifacts 'canvas2-vertical.mp4'
+    $run = Start-RecProcess $rec @('record', '--test-pattern', '--test-tone', '-r', '1080p', '-f', '30', '-t', '5', '--camera', 'test',
+        '--canvas2', '720x1280', '--canvas2-place', 'screen:0,0,1,1:0.34,0,0.32,1', '--canvas2-place', '1:0.6,0.8,0.35,0.15',
+        '--canvas2-output', $verticalPath, '-o', $mainPath)
+    Start-Sleep -Milliseconds 2500
+    Send-RecCommand $run 'place canvas2 1 0 0.6,0.8,0.35,0.15'
+    $two = Stop-RecProcess $run
+    Set-Content -Path (Join-Path $artifacts 'canvas2.record.log') -Value $two.Text
+    Write-Host $two.Text
+    if ($two.Code -ne 0) { throw "the two-canvas recording failed: $($two.Text)" }
+    Expect-Text $two.Text 'Second canvas 720x1280: 150 frames, skipped 0'
+    Expect-Text $two.Text 'written 150, dropped 0'
+    $vertical = Get-Probe $rec $verticalPath (Join-Path $artifacts 'canvas2-vertical.probe')
+    Expect-Field $vertical 'codec' 'h264'
+    Expect-Field $vertical 'width' '720'
+    Expect-Field $vertical 'height' '1280'
+    Expect-Field $vertical 'frames' '150'
+    Expect-Field $vertical 'audio_codec' 'aac'
+    Expect-Within $vertical 'av_sync_events' 5 5
+    Expect-Within $vertical 'av_offset_max_ms' 0 20
+    # The camera's area is 432,1024 252x192 in the vertical movie and 1402,772 480x270 in the main one.
+    $verticalCamera = Get-Probe $rec $verticalPath (Join-Path $artifacts 'canvas2-vertical-camera.probe') @('--sample', '460,1050,190,140')
+    Expect-Color $verticalCamera 'sample_1' 'green'
+    Expect-Color $verticalCamera 'sample_4' 'white'
+    $mainCamera = Get-Probe $rec $mainPath (Join-Path $artifacts 'canvas2-main-camera.probe') @('--sample', '1450,800,380,200')
+    Expect-Color $mainCamera 'sample_1' 'green'
+    Expect-Color $mainCamera 'sample_4' 'green'
+    Expect-Field (Get-Probe $rec $mainPath (Join-Path $artifacts 'canvas2-main.probe')) 'width' '1920'    # Scene layers: the test pattern in the bottom middle, a blue window as a window layer top
     # left, and the part of the display it covers top right. Mid-recording "hide 1" hides the
     # window layer and "move screen" moves the pattern to the bottom left.
     Expect-Failure 'the screen area must be' @('record', '--test-pattern', '--screen-area', '0.5,0.5,0.6,0.5')
@@ -396,6 +430,15 @@ try {
         Expect-Text $multi.Log 'rtmps://127.0.0.1:1936/live/****: 120 frames'
         if ($multi.Log.Contains('smokekey')) { throw 'a stream key was printed' }
 
+        # Both canvases live at once, each to its own server: landscape and vertical.
+        Expect-Failure 'at most 4 stream servers across both canvases' (@('record', '--test-pattern', '--canvas2', 'vertical') +
+            (1..3 | ForEach-Object { '--stream'; "rtmp://127.0.0.1:1935/live/a$_" }) + (1..2 | ForEach-Object { '--canvas2-stream'; "rtmp://127.0.0.1:1935/live/b$_" }))
+        $canvases = Record 'stream-canvas2' 'stream-canvas2-local.mp4' @('--test-pattern', '--test-tone', '-r', '720p', '-f', '30', '-t', '4',
+            '--stream', 'rtmp://127.0.0.1:1935/live/smokekey10', '--canvas2', '720x1280', '--canvas2-place', 'screen:0,0,1,1:0.34,0,0.32,1',
+            '--canvas2-stream', 'rtmp://127.0.0.1:1935/live/smokekey11')
+        Expect-Text $canvases.Log 'Streaming to rtmp://127.0.0.1:1935/live/****; the second canvas: rtmp://127.0.0.1:1935/live/****'
+        Expect-Text $canvases.Log 'Second canvas 720x1280: 120 frames, skipped 0'
+        if ($canvases.Log.Contains('smokekey')) { throw 'a stream key was printed' }
         # Losing one server ends only its stream.
         $relay = Start-TcpRelay 1937 1935
         $onePath = Join-Path $artifacts 'stream-one-lost.mp4'
@@ -478,6 +521,16 @@ try {
         Expect-Within $both 'frames' 119 120
         Expect-Within $both 'av_sync_events' 4 4
         Expect-Within $both 'av_offset_max_ms' 0 20
+    }
+    foreach ($key in 'smokekey10', 'smokekey11') {
+        $file = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received "live\$key") | Select-Object -First 1
+        if (-not $file) { throw "MediaMTX recorded nothing for $key" }
+        $canvas = Get-Probe $rec $file.FullName (Join-Path $artifacts "stream-received-$key.probe")
+        Expect-Field $canvas 'width' $(if ($key -eq 'smokekey10') { '1280' } else { '720' })
+        Expect-Field $canvas 'height' $(if ($key -eq 'smokekey10') { '720' } else { '1280' })
+        Expect-Within $canvas 'frames' 119 120
+        Expect-Within $canvas 'av_sync_events' 4 4
+        Expect-Within $canvas 'av_offset_max_ms' 0 20
     }
     $file = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received 'live\smokekey8') | Select-Object -First 1
     if (-not $file) { throw 'MediaMTX recorded nothing for the server that stayed' }

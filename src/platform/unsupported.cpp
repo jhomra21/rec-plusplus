@@ -38,6 +38,8 @@ Result Recorder::save_replay(const std::string&, double* seconds) {
 Result Recorder::set_overlay(std::size_t, bool, std::optional<Area>) { return {"not recording"}; }
 Result Recorder::set_screen(bool, std::optional<Area>) { return {"not recording"}; }
 Result Recorder::set_volume(AudioInput, double, bool) { return {"not recording"}; }
+Result Recorder::set_layout(std::size_t, std::size_t, const Layout&) { return {"not recording"}; }
 bool Recorder::preview(PreviewFrame&) const { return false; }
+bool Recorder::preview(PreviewFrame&, std::size_t) const { return false; }
 void Recorder::show_preview(bool) noexcept {}
 } // namespace rec

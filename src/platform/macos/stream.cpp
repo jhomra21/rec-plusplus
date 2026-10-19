@@ -57,6 +57,11 @@ public:
             replay_ = std::make_unique<core::ReplayBuffer>(settings_.replay_seconds, settings_.width, settings_.height, settings_.fps);
             replay_->set_priming(static_cast<std::uint32_t>(leading_));
         }
+        if (!settings_.movie.empty()) {
+            movie_ = std::make_unique<core::MovieWriter>(settings_.width, settings_.height, settings_.fps);
+            movie_->set_priming(static_cast<std::uint32_t>(leading_));
+            if (auto error = movie_->open(settings_.movie); !error.empty()) { movie_.reset(); release(); return {error}; }
+        }
         core::StreamInfo info{settings_.width, settings_.height, settings_.fps, settings_.video_kbps, settings_.audio_kbps};
         if (!settings_.urls.empty())
             if (auto error = servers_.open(settings_.urls, info); !error.empty()) { release(); return {error}; }
@@ -112,7 +117,7 @@ public:
         wake_.notify_one();
     }
 
-    void stop() {
+    std::string stop() {
         {
             std::lock_guard lock(mutex_);
             stopping_ = true;
@@ -121,6 +126,13 @@ public:
         if (thread_.joinable()) thread_.join();
         servers_.close(0);
         release();
+        std::string error;
+        // Kept, so counters() can still read its frame count.
+        if (movie_ && !movie_finished_) {
+            movie_finished_ = true;
+            error = movie_->finish();
+        }
+        return error;
     }
 
     LiveCounters counters() const {
@@ -143,6 +155,7 @@ public:
         }
         c.dropped = dropped_.load() + skipped;
         c.replay_seconds = replay_ ? replay_->seconds() : 0;
+        c.movie_frames = movie_ ? movie_->frames() : 0;
         return c;
     }
 
@@ -405,11 +418,13 @@ private:
 
     void send_video(std::uint32_t ms, bool key, bool header, core::Bytes body) {
         if (replay_) replay_->video(ms, key, header, body);
+        if (movie_) movie_->video(ms, key, header, body);
         servers_.video(ms, key, header, std::move(body));
     }
 
     void send_audio(std::uint32_t ms, bool header, core::Bytes body) {
         if (replay_) replay_->audio(ms, header, body);
+        if (movie_) movie_->audio(ms, header, body);
         servers_.audio(ms, header, std::move(body));
     }
 
@@ -483,6 +498,8 @@ private:
     LiveSettings settings_;
     core::Broadcast servers_;
     std::unique_ptr<core::ReplayBuffer> replay_;
+    std::unique_ptr<core::MovieWriter> movie_;  // Set before the thread starts.
+    bool movie_finished_ = false;
     VTCompressionSessionRef session_ = nullptr;
     AudioConverterRef converter_ = nullptr;
     bool hardware_ = false;
@@ -524,7 +541,7 @@ LiveStream::~LiveStream() = default;
 Result LiveStream::start(const LiveSettings& settings) { return impl_->start(settings); }
 void LiveStream::video(CVPixelBufferRef frame, std::uint64_t slot) { impl_->video(frame, slot); }
 void LiveStream::audio(std::int64_t start, const float* stereo, std::size_t frames) { impl_->audio(start, stereo, frames); }
-void LiveStream::stop() { impl_->stop(); }
+std::string LiveStream::stop() { return impl_->stop(); }
 LiveCounters LiveStream::counters() const { return impl_->counters(); }
 std::string LiveStream::failure() const { return impl_->failure(); }
 Result LiveStream::save_replay(const std::string& path, double& seconds) const { return impl_->save_replay(path, seconds); }

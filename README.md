@@ -84,6 +84,17 @@ While recording, keys `1` to `9`, or `show N|screen` and `hide N|screen` on stdi
 
 `--clicks` marks mouse presses on the recorded screen: a circle at the pointer, yellow for the left button and blue for the right, which grows in over 0.1 s, stays while the button is held and fades out over 0.35 s after release. It is drawn into the screen's picture before the other layers, so it follows `--screen-area`, and a press outside the recorded display, region or window shows nothing. On Windows a low-level mouse hook on its own thread records presses; on macOS the compositor reads the system's mouse-down counters each frame, so a press shorter than a frame still shows and no extra permission is needed.
 
+### A second canvas (vertical video)
+
+`--canvas2 WxH` composes a second picture of the same recording, for TikTok, YouTube Shorts or Instagram Reels; `--canvas2 vertical` is 1080x1920. The sources are captured once and drawn twice, each canvas with its own layout. The second canvas is encoded once with H.264 at `--stream-bitrate` and AAC, like a stream; `--canvas2-stream URL` sends it to its own servers (with `--stream`, up to four in all) and `--canvas2-output FILE.mp4` saves it as a fragmented MP4 that stays playable if rec is killed:
+
+```sh
+./build/rec record --system-audio --camera default --stream rtmps://live.twitch.tv:443/app/KEY \
+  --canvas2 vertical --canvas2-place screen:0,0,1,1:0.34,0,0.32,1 --canvas2-place 1:0.05,0.7,0.9,0.28 \
+  --canvas2-stream rtmps://SERVER/app/KEY2 --canvas2-output show-vertical.mp4 -t 0 -o show.mov
+```
+
+`--canvas2-place N|screen:X,Y,W,H[:CROP]` puts a source in the second canvas and, after the second colon, shows only part of it (fractions of the picture: `0.34,0,0.32,1` is the middle third of a 16:9 screen, which fills 9:16). Without it a source sits where it does in the main canvas and the screen is fitted whole. `--canvas2-hide N` and `--canvas2-hide-screen` hide a source there only, and `--crop N|screen:X,Y,W,H` crops a source in the main canvas. While recording, `place [canvas2] N|screen 0|1 X,Y,W,H [CROP]` on stdin (or `rec send`) shows or hides and moves a source in either canvas. The second canvas never slows the main one: when its encoder falls behind, it skips the frame and the summary counts it.
 ### Replay buffer
 
 `--replay SECONDS` (5 to 300) keeps the last seconds of the recording in memory, already encoded, so you can save a clip of something that just happened without stopping. Press `s` in the terminal, or send `save` on stdin, and rec writes `NAME-replay-1.mp4` (then `-2`, and so on) beside the recording:

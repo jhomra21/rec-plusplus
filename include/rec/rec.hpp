@@ -45,6 +45,15 @@ struct Area {
     double height = 1;
 };
 
+// How a canvas shows one source: whether, where (fractions of the canvas) and which part of
+// the source (fractions of it; the default is all of it). A camera is cropped further to fill
+// its area; the others keep their aspect ratio inside it.
+struct Layout {
+    bool visible = true;
+    Area area;
+    Area crop;
+};
+
 // A picture drawn over the capture in every frame: an image file, a camera, or another
 // display or window captured live. Overlays draw in order, later ones on top.
 struct Overlay {
@@ -59,7 +68,25 @@ struct Overlay {
     // A camera is cropped to fill the area; the others keep their aspect ratio inside it.
     Area area;
     bool visible = true;
+    Area crop;  // The part of the picture shown, in fractions of it.
 };
+
+// A second picture of the same recording with its own size and its own layout of every
+// source, for vertical video (TikTok, YouTube Shorts). The sources are captured once and
+// composed twice. The second canvas is encoded once with H.264 at Options::stream_kbps, sent
+// to its own servers and, with output set, written to an MP4 that survives a crash.
+struct Canvas {
+    std::uint32_t width = 0, height = 0;  // Even, 64 to 4096; 0 = no second canvas.
+    Layout screen;                        // The main capture; crop is in fractions of it as the main canvas shows it.
+    std::vector<Layout> overlays;         // One per Options::overlays.
+    std::vector<std::string> stream_urls; // Counted with Options::stream_urls against kMaxStreams.
+    std::string output;                   // An .mp4 path; empty = no file.
+};
+
+// Canvases for Recorder::set_layout() and preview().
+inline constexpr std::size_t kMainCanvas = 0, kSecondCanvas = 1;
+// The main capture's index in Recorder::set_layout().
+inline constexpr std::size_t kScreenLayer = SIZE_MAX;
 
 struct Options {
     std::string output = "rec.mov";
@@ -93,7 +120,7 @@ struct Options {
     double mic_offset_ms = 0;
     double duration_seconds = 10.0; // 0 = until stop()
     // Live streams of the same timeline, encoded once beside the file and sent to each server
-    // (at most kMaxStreams): rtmp[s]://host[:port]/app/stream-key.
+    // (at most kMaxStreams with canvas2's): rtmp[s]://host[:port]/app/stream-key.
     std::vector<std::string> stream_urls;
     std::uint32_t stream_kbps = 6000; // Stream video bitrate; audio is 160 kb/s AAC.
     // Keep the last N seconds (5 to 300) of the stream encode in memory for save_replay();
@@ -103,7 +130,9 @@ struct Options {
     // keeping its aspect ratio, and whether it shows. The rest of the frame is black.
     Area screen_area;
     bool screen_visible = true;
+    Area screen_crop; // The part of the capture shown, in fractions of it.
     std::vector<Overlay> overlays; // At most 15, drawn over the capture.
+    Canvas canvas2; // A second canvas, usually vertical; off while its width is 0.
     // Make preview() frames up to this many pixels wide, in the output's shape; 0 = no preview.
     std::uint32_t preview_width = 0;
     // Capture and draw the overlays for preview() only: no file, audio, stream or replay, and
@@ -179,6 +208,10 @@ struct Stats {
     std::uint32_t stream_count = 0;
     double replay_seconds = 0; // Media the replay buffer holds now.
     std::uint64_t camera_frames = 0; // Frames received from camera overlays.
+    // The second canvas: frames composed and encoded, and frames skipped because its encoder
+    // fell behind. Its servers follow the main canvas's in streams.
+    std::uint64_t canvas2_frames = 0;
+    std::uint64_t canvas2_dropped = 0;
 };
 
 struct Probe {
@@ -254,12 +287,17 @@ public:
     Result set_overlay(std::size_t index, bool visible, std::optional<Area> area = std::nullopt);
     // Shows, hides or moves the main capture (Options::screen_area) from the next frame on.
     Result set_screen(bool visible, std::optional<Area> area = std::nullopt);
+    // Places a source (an index into Options::overlays, or kScreenLayer) in a canvas
+    // (kMainCanvas or kSecondCanvas) from the next frame on.
+    Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout);
     // Changes a source's volume (-60 to 24 dB) and mute in the program audio while
     // recording, ramped over one audio buffer.
     Result set_volume(AudioInput input, double gain_db, bool muted);
     // Copies the newest preview frame (at most 30 a second, with Options::preview_width set)
     // into frame when it is newer than frame.number. Returns whether frame changed.
     bool preview(PreviewFrame& frame) const;
+    // The same for the second canvas, in its shape.
+    bool preview(PreviewFrame& frame, std::size_t canvas) const;
     // Stops or resumes making preview frames, for example while the preview is hidden. On
     // at start.
     void show_preview(bool on) noexcept;

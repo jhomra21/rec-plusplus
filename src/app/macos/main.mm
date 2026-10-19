@@ -1874,9 +1874,12 @@ struct PreviewHit {
     };
     const auto fail = [&](NSString* why) {
         note([@"failed=" stringByAppendingString:why]);
+        // A stack of every thread shows where a wait that never ended was stuck.
+        const std::string sample = "/usr/bin/sample " + std::to_string(getpid()) + " 2 -file '" +
+                                   std::string(reportPath.UTF8String) + ".sample.txt' >/dev/null 2>&1";
+        std::system(sample.c_str());
         std::_Exit(1);
-    };
-    const auto ui = [](void (^block)(void)) { dispatch_sync(dispatch_get_main_queue(), block); };
+    };    const auto ui = [](void (^block)(void)) { dispatch_sync(dispatch_get_main_queue(), block); };
     const auto status = [&] {
         __block NSString* text;
         ui(^{ text = self->_status.stringValue; });

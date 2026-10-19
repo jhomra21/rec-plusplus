@@ -603,16 +603,31 @@ public:
         ComPtr<ID3D11Texture2D> texture;
         ComPtr<ID3D11ShaderResourceView> luma, chroma;
     };
+    // A canvas's size and where it shows each source.
+    struct Canvas {
+        std::uint32_t width = 0, height = 0;
+        Layout screen;
+        std::vector<Layout> layers;  // One per layers_.
+    };
 
     Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const Options& options,
                  const ClickSource& clicks) {
         if (auto error = core::check_overlays(options.overlays); !error.empty()) return {error};
         if (!core::valid(options.screen_area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
+        if (auto error = core::check_crop("the screen", options.screen_crop); !error.empty()) return {error};
+        if (auto error = core::check_canvas(options); !error.empty()) return {error};
         device_ = device;
         width_ = width;
         height_ = height;
-        screen_area_ = options.screen_area;
-        screen_visible_ = options.screen_visible;
+        auto& main = canvases_[kMainCanvas];
+        main = {width, height, {options.screen_visible, options.screen_area, options.screen_crop}, {}};
+        for (const auto& overlay : options.overlays) main.layers.push_back({overlay.visible, overlay.area, overlay.crop});
+        canvases_[kSecondCanvas] = {};
+        if (options.canvas2.width) {
+            auto& second = canvases_[kSecondCanvas];
+            second = {options.canvas2.width, options.canvas2.height, options.canvas2.screen, {}};
+            for (std::size_t i = 0; i < options.overlays.size(); ++i) second.layers.push_back(core::canvas_layout(options, i));
+        }
         UINT support = 0;
         if (FAILED(device->CheckFormatSupport(DXGI_FORMAT_NV12, &support)) || !(support & D3D11_FORMAT_SUPPORT_RENDER_TARGET))
             return {"this graphics driver cannot draw overlays into video frames"};
@@ -691,20 +706,33 @@ public:
 
     Result set(std::size_t index, bool visible, const std::optional<Area>& area) {
         std::lock_guard lock(mutex_);
-        if (index >= layers_.size()) return {"no overlay " + std::to_string(index + 1)};
+        auto& layers = canvases_[kMainCanvas].layers;
+        if (index >= layers.size()) return {"no overlay " + std::to_string(index + 1)};
         if (area) {
             if (auto error = core::check_area(index, *area); !error.empty()) return {error};
-            layers_[index].overlay.area = *area;
+            layers[index].area = *area;
         }
-        layers_[index].overlay.visible = visible;
+        layers[index].visible = visible;
         return {};
     }
 
     Result set_screen(bool visible, const std::optional<Area>& area) {
         if (area && !core::valid(*area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
         std::lock_guard lock(mutex_);
-        if (area) screen_area_ = *area;
-        screen_visible_ = visible;
+        auto& screen = canvases_[kMainCanvas].screen;
+        if (area) screen.area = *area;
+        screen.visible = visible;
+        return {};
+    }
+
+    Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
+        if (auto error = core::check_layout(layer, layout); !error.empty()) return {error};
+        std::lock_guard lock(mutex_);
+        if (canvas > kSecondCanvas || !canvases_[canvas].width) return {"this recording has no second canvas"};
+        auto& c = canvases_[canvas];
+        if (layer == kScreenLayer) c.screen = layout;
+        else if (layer < c.layers.size()) c.layers[layer] = layout;
+        else return {"no overlay " + std::to_string(layer + 1)};
         return {};
     }
 
@@ -716,23 +744,27 @@ public:
         return total;
     }
 
-    bool draw(ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame, unsigned subresource,
-              std::chrono::steady_clock::time_point at) {
-        struct Job { Layer* layer; Area area; };
+    bool draw(std::size_t canvas, ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame,
+              unsigned subresource, std::chrono::steady_clock::time_point at) {
+        struct Job { Layer* layer; Layout layout; };
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
-        Area screen_area;
-        bool screen_visible = true;
+        Layout shown;
         {
             std::lock_guard lock(mutex_);
-            for (auto& layer : layers_)
-                if (layer.overlay.visible) jobs[count++] = {&layer, layer.overlay.area};
-            screen_area = screen_area_;
-            screen_visible = screen_visible_;
+            if (canvas > kSecondCanvas || !canvases_[canvas].width) return false;
+            const auto& c = canvases_[canvas];
+            for (std::size_t i = 0; i < layers_.size(); ++i)
+                if (c.layers[i].visible) jobs[count++] = {&layers_[i], c.layers[i]};
+            shown = c.screen;
+            draw_width_ = c.width;
+            draw_height_ = c.height;
         }
         std::array<core::ClickMark, core::Clicks::kMax> marks;
-        const std::size_t mark_count = clicks_ && screen_visible ? clicks_->marks(at, click_area(), width_, height_, screen_area, marks) : 0;
-        const bool whole = screen_visible && screen_area.x <= 0 && screen_area.y <= 0 && screen_area.width >= 1 && screen_area.height >= 1;
+        const std::size_t mark_count = clicks_ && shown.visible
+            ? clicks_->marks(at, click_area(), width_, height_, draw_width_, draw_height_, shown.area, shown.crop, marks) : 0;
+        const auto full = [](const Area& a) { return a.x <= 0 && a.y <= 0 && a.width >= 1 && a.height >= 1; };
+        const bool whole = canvas == kMainCanvas && shown.visible && full(shown.area) && full(shown.crop);
         if (whole) context->CopySubresourceRegion(frame, subresource, 0, 0, 0, screen, 0, nullptr);
         if (whole && !count && !mark_count) return true;
         // Before taking the device lock: closing a capture frame takes its frame pool's lock,
@@ -750,10 +782,10 @@ public:
                 const float black[4] = {16.0f / 255, 0, 0, 0}, neutral[4] = {128.0f / 255, 128.0f / 255, 0, 0};
                 context->ClearRenderTargetView(target->luma.Get(), black);
                 context->ClearRenderTargetView(target->chroma.Get(), neutral);
-                if (screen_visible) drawn = draw_screen(context, *target, screen, screen_area);
+                if (shown.visible) drawn = draw_screen(context, *target, screen, shown);
             }
             for (std::size_t i = 0; i < mark_count && drawn; ++i) draw_mark(context, *target, marks[i]);
-            for (std::size_t i = 0; i < count && drawn; ++i) draw_layer(context, *target, *jobs[i].layer, jobs[i].area);
+            for (std::size_t i = 0; i < count && drawn; ++i) draw_layer(context, *target, *jobs[i].layer, jobs[i].layout);
             end(context);
         }
         if (multithread) multithread->Leave();
@@ -808,16 +840,17 @@ private:
     // One picture into both planes of the frame.
     void quad(ID3D11DeviceContext* context, Target& target, const core::Placement& p, const double (&uv)[4], bool opaque,
               ID3D11PixelShader* luma, ID3D11PixelShader* chroma, double fade = 1) {
+        const double w = draw_width_, h = draw_height_;
         const Constants constants{
-            {static_cast<float>(2 * p.left / width_ - 1), static_cast<float>(1 - 2 * p.top / height_),
-             static_cast<float>(2 * p.right / width_ - 1), static_cast<float>(1 - 2 * p.bottom / height_)},
+            {static_cast<float>(2 * p.left / w - 1), static_cast<float>(1 - 2 * p.top / h),
+             static_cast<float>(2 * p.right / w - 1), static_cast<float>(1 - 2 * p.bottom / h)},
             {static_cast<float>(uv[0]), static_cast<float>(uv[1]), static_cast<float>(uv[2]), static_cast<float>(uv[3])},
             opaque ? 1.0f : 0.0f,
             static_cast<float>(fade),
             {}};
         context->UpdateSubresource(constants_.Get(), 0, nullptr, &constants, 0, 0);
-        const D3D11_VIEWPORT full{0, 0, static_cast<float>(width_), static_cast<float>(height_), 0, 1};
-        const D3D11_VIEWPORT half{0, 0, static_cast<float>(width_ / 2), static_cast<float>(height_ / 2), 0, 1};
+        const D3D11_VIEWPORT full{0, 0, static_cast<float>(draw_width_), static_cast<float>(draw_height_), 0, 1};
+        const D3D11_VIEWPORT half{0, 0, static_cast<float>(draw_width_ / 2), static_cast<float>(draw_height_ / 2), 0, 1};
         context->OMSetRenderTargets(1, target.luma.GetAddressOf(), nullptr);
         context->RSSetViewports(1, &full);
         context->PSSetShader(luma, nullptr, 0);
@@ -828,13 +861,13 @@ private:
         context->Draw(4, 0);
     }
 
-    // The main capture, already fitted into a whole frame, fitted again into its area.
-    bool draw_screen(ID3D11DeviceContext* context, Target& target, ID3D11Texture2D* screen, const Area& area) {
+    // The main capture, already fitted into a whole main-canvas frame, fitted again into its area.
+    bool draw_screen(ID3D11DeviceContext* context, Target& target, ID3D11Texture2D* screen, const Layout& layout) {
         Planes* planes = planes_for(screen);
         if (!planes) return false;
         ID3D11ShaderResourceView* views[2] = {planes->luma.Get(), planes->chroma.Get()};
         context->PSSetShaderResources(1, 2, views);
-        const auto p = core::place(Overlay::Kind::image, area, width_, height_, width_, height_);
+        const auto p = core::place(Overlay::Kind::image, layout.area, draw_width_, draw_height_, width_, height_, layout.crop);
         const double uv[4] = {p.u0, p.v0, p.u1, p.v1};
         quad(context, target, p, uv, true, screen_luma_.Get(), screen_chroma_.Get());
         return true;
@@ -871,7 +904,7 @@ private:
         return click_rect_;
     }
 
-    void draw_layer(ID3D11DeviceContext* context, Target& target, Layer& layer, const Area& area) {
+    void draw_layer(ID3D11DeviceContext* context, Target& target, Layer& layer, const Layout& layout) {
         if (layer.camera) {
             layer.camera->upload(layer.seen, [&](const std::uint8_t* pixels, std::size_t row) {
                 D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -885,7 +918,7 @@ private:
             });
         }
         if (!layer.ready) return;
-        const auto p = core::place(layer.overlay.kind, area, width_, height_, layer.width, layer.height);
+        const auto p = core::place(layer.overlay.kind, layout.area, draw_width_, draw_height_, layer.width, layer.height, layout.crop);
         const double* c = layer.crop;
         const double uv[4] = {c[0] + p.u0 * (c[2] - c[0]), c[1] + p.v0 * (c[3] - c[1]), c[0] + p.u1 * (c[2] - c[0]),
                               c[1] + p.v1 * (c[3] - c[1])};
@@ -1043,17 +1076,17 @@ private:
 
     ComPtr<ID3D11Device> device_;
     wgdx::Direct3D11::IDirect3DDevice winrt_device_{nullptr};
-    std::uint32_t width_ = 0, height_ = 0;
+    std::uint32_t width_ = 0, height_ = 0;            // The main canvas, and the main capture's frames.
+    std::uint32_t draw_width_ = 0, draw_height_ = 0;  // The canvas being drawn.
     ComPtr<ID3D11VertexShader> vertex_;
     ComPtr<ID3D11PixelShader> luma_, chroma_, screen_luma_, screen_chroma_;
     ComPtr<ID3D11Buffer> constants_;
     ComPtr<ID3D11SamplerState> sampler_;
     ComPtr<ID3D11BlendState> blend_;
     ComPtr<ID3D11RasterizerState> raster_;
-    mutable std::mutex mutex_;  // Guards the layer list, each layer's visibility and rectangle, and the screen's.
+    mutable std::mutex mutex_;  // Guards the layer list and the canvases.
     std::vector<Layer> layers_;
-    Area screen_area_;
-    bool screen_visible_ = true;
+    std::array<Canvas, 2> canvases_;
     std::vector<Target> targets_;
     std::vector<Planes> planes_;
     std::unique_ptr<core::Clicks> clicks_;
@@ -1070,9 +1103,12 @@ Result Overlays::start(ID3D11Device* device, std::uint32_t width, std::uint32_t 
                        const ClickSource& clicks) {
     return impl_->start(device, width, height, options, clicks);
 }
-bool Overlays::draw(ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame, unsigned subresource,
-                    std::chrono::steady_clock::time_point at) {
-    return impl_->draw(context, screen, frame, subresource, at);
+bool Overlays::draw(std::size_t canvas, ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame,
+                    unsigned subresource, std::chrono::steady_clock::time_point at) {
+    return impl_->draw(canvas, context, screen, frame, subresource, at);
+}
+Result Overlays::set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
+    return impl_->set_layout(canvas, layer, layout);
 }
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }
 Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { return impl_->set_screen(visible, area); }

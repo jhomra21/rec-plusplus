@@ -22,8 +22,9 @@ struct ClickSource {
 
 // Composites each frame with Core Image on the GPU, into IOSurface-backed NV12 buffers
 // from a small pool: the main capture in its area, click marks, then the image, camera,
-// display and window overlays. The recording thread calls compose(); set() and
-// set_screen() may come from any thread. Each camera and each display or window stream
+// display and window overlays. Each canvas (the main one and, with options.canvas2, a
+// second one) has its own size, pool and layout of the same sources. The recording thread
+// calls compose(); set(), set_screen() and set_layout() may come from any thread. Each camera and each display or window stream
 // delivers on its own queue and only replaces its newest retained frame. With
 // options.clicks, compose() reads the system's mouse-down counters, so a press shorter than
 // a frame still shows and no input permission is needed.
@@ -34,14 +35,20 @@ public:
     Overlays(const Overlays&) = delete;
     Overlays& operator=(const Overlays&) = delete;
 
-    // Uses options.overlays, screen_area, screen_visible, cursor, clicks and fps.
+    // Uses options.overlays, screen_area, screen_visible, screen_crop, canvas2, cursor, clicks
+    // and fps. width and height are the main canvas's.
     Result start(std::uint32_t width, std::uint32_t height, const Options& options, const ClickSource& clicks = {});
-    // A retained frame to encode: base in its area with the visible overlays on top, or
-    // base itself (retained) when it fills the frame and no overlay is visible. Null when
-    // drawing failed.
-    CVPixelBufferRef compose(CVPixelBufferRef base);
+    // A retained frame of a canvas (kMainCanvas or kSecondCanvas) to encode: base in its
+    // area with the visible overlays on top, or, for the main canvas, base itself (retained)
+    // when it fills the frame and nothing else shows. Null when drawing failed or, for the
+    // second canvas, when all its frames are still with its encoder. Call the main canvas
+    // first for each frame; it reads the clicks.
+    CVPixelBufferRef compose(std::size_t canvas, CVPixelBufferRef base);
+    // The main canvas: shows, hides or moves an overlay or the main capture, keeping its crop.
     Result set(std::size_t index, bool visible, const std::optional<Area>& area);
     Result set_screen(bool visible, const std::optional<Area>& area);
+    // layer: an index into options.overlays, or kScreenLayer.
+    Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout);
     std::uint64_t camera_frames() const;
     void stop();
 

@@ -13,6 +13,7 @@
 #include "core/overlay.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -461,10 +462,20 @@ public:
     Result start(std::uint32_t width, std::uint32_t height, const Options& options, const ClickSource& clicks) {
         if (auto error = core::check_overlays(options.overlays); !error.empty()) return {error};
         if (!core::valid(options.screen_area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
-        width_ = width;
-        height_ = height;
-        screen_area_ = options.screen_area;
-        screen_visible_ = options.screen_visible;
+        if (auto error = core::check_crop("the screen", options.screen_crop); !error.empty()) return {error};
+        if (auto error = core::check_canvas(options); !error.empty()) return {error};
+        canvas_count_ = options.canvas2.width ? 2 : 1;
+        canvases_[kMainCanvas].width = width;
+        canvases_[kMainCanvas].height = height;
+        canvases_[kMainCanvas].screen = {options.screen_visible, options.screen_area, options.screen_crop};
+        for (const auto& overlay : options.overlays) canvases_[kMainCanvas].layers.push_back({overlay.visible, overlay.area, overlay.crop});
+        if (canvas_count_ == 2) {
+            auto& second = canvases_[kSecondCanvas];
+            second.width = options.canvas2.width;
+            second.height = options.canvas2.height;
+            second.screen = options.canvas2.screen;
+            for (std::size_t i = 0; i < options.overlays.size(); ++i) second.layers.push_back(core::canvas_layout(options, i));
+        }
         // No color management: pixels keep their values, as the capture and the encoder see them.
         NSDictionary* context_options = @{kCIContextWorkingColorSpace: [NSNull null], kCIContextOutputColorSpace: [NSNull null],
                                           kCIContextCacheIntermediates: @NO};
@@ -473,15 +484,18 @@ public:
         if (!context_) return {"could not set up overlay drawing"};
         // Without Metal Performance Shaders, Core Image shrinks a native-size capture instead.
         if (options.scaler == Scaler::lanczos) lanczos_.start(device);
-        NSDictionary* attributes = @{
-            (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
-            (id)kCVPixelBufferWidthKey: @(width),
-            (id)kCVPixelBufferHeightKey: @(height),
-            (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
-            (id)kCVPixelBufferMetalCompatibilityKey: @YES
-        };
-        if (CVPixelBufferPoolCreate(kCFAllocatorDefault, nullptr, (__bridge CFDictionaryRef)attributes, &pool_) != kCVReturnSuccess)
-            return {"could not allocate composited frames"};
+        for (std::size_t i = 0; i < canvas_count_; ++i) {
+            auto& canvas = canvases_[i];
+            NSDictionary* attributes = @{
+                (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
+                (id)kCVPixelBufferWidthKey: @(canvas.width),
+                (id)kCVPixelBufferHeightKey: @(canvas.height),
+                (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+                (id)kCVPixelBufferMetalCompatibilityKey: @YES
+            };
+            if (CVPixelBufferPoolCreate(kCFAllocatorDefault, nullptr, (__bridge CFDictionaryRef)attributes, &canvas.pool) != kCVReturnSuccess)
+                return {"could not allocate composited frames"};
+        }
         if (options.clicks) {
             click_source_ = clicks;
             for (int right = 0; right < 2; ++right) {
@@ -534,65 +548,77 @@ public:
         return {};
     }
 
-    CVPixelBufferRef compose(CVPixelBufferRef base) {
-        struct Job { Layer* layer; Area area; };
+    CVPixelBufferRef compose(std::size_t index, CVPixelBufferRef base) {
+        if (index >= canvas_count_) return nullptr;
+        Canvas& canvas = canvases_[index];
+        struct Job { Layer* layer; Layout layout; };
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
-        Area screen_area;
-        bool screen_visible = true;
+        Layout screen;
         {
             std::lock_guard lock(mutex_);
-            for (auto& layer : layers_)
-                if (layer.overlay.visible) jobs[count++] = {&layer, layer.overlay.area};
-            screen_area = screen_area_;
-            screen_visible = screen_visible_;
+            for (std::size_t i = 0; i < layers_.size(); ++i)
+                if (canvas.layers[i].visible) jobs[count++] = {&layers_[i], canvas.layers[i]};
+            screen = canvas.screen;
         }
+        const auto full = [](const Area& a) { return a.x <= 0 && a.y <= 0 && a.width >= 1 && a.height >= 1; };
+        const std::uint32_t width = canvas.width, height = canvas.height;
+        const auto base_width = static_cast<std::uint32_t>(CVPixelBufferGetWidth(base));
+        const auto base_height = static_cast<std::uint32_t>(CVPixelBufferGetHeight(base));
         std::array<core::ClickMark, core::Clicks::kMax> marks;
         std::size_t mark_count = 0;
         if (clicks_) {
             // The presses are stamped when this reads them, about one frame late, so marks are
             // drawn for now rather than for the frame's slot, which is 40 ms behind.
             const auto now = core::Clicks::Clock::now();
-            read_clicks(now);
-            if (screen_visible) mark_count = clicks_->marks(now, click_area(), width_, height_, screen_area, marks);
+            if (index == kMainCanvas) {
+                read_clicks(now);
+                click_now_ = click_area();
+            }
+            if (screen.visible)
+                mark_count = clicks_->marks(now, click_now_, base_width, base_height, width, height, screen.area, screen.crop, marks);
         }
-        const bool whole = screen_visible && screen_area.x <= 0 && screen_area.y <= 0 && screen_area.width >= 1 && screen_area.height >= 1;
+        const bool whole = screen.visible && full(screen.area) && full(screen.crop);
         // A capture at its native size (Scaler::lanczos) is shrunk here, straight to the size
-        // it takes in the frame.
+        // it takes in the main canvas.
         struct Shrunk {
             CVPixelBufferRef frame = nullptr;
             ~Shrunk() { if (frame) CVPixelBufferRelease(frame); }
         } shrunk;
-        if (screen_visible && lanczos_.ready() &&
-            (CVPixelBufferGetWidth(base) != width_ || CVPixelBufferGetHeight(base) != height_)) {
-            const auto p = core::place(Overlay::Kind::image, screen_area, width_, height_,
-                                       static_cast<std::uint32_t>(CVPixelBufferGetWidth(base)),
-                                       static_cast<std::uint32_t>(CVPixelBufferGetHeight(base)));
+        if (index == kMainCanvas && screen.visible && full(screen.crop) && lanczos_.ready() &&
+            (base_width != width || base_height != height)) {
+            const auto p = core::place(Overlay::Kind::image, screen.area, width, height, base_width, base_height);
             const auto even = [](double size) { return std::max<std::uint32_t>(2, static_cast<std::uint32_t>(std::lround(size / 2)) * 2); };
             // Filling the frame, it takes the frame's exact size, so no further pass is needed.
-            const std::uint32_t w = whole ? width_ : even(p.right - p.left), h = whole ? height_ : even(p.bottom - p.top);
-            if (w < CVPixelBufferGetWidth(base) || h < CVPixelBufferGetHeight(base)) {
+            const std::uint32_t w = whole ? width : even(p.right - p.left), h = whole ? height : even(p.bottom - p.top);
+            if (w < base_width || h < base_height) {
                 shrunk.frame = lanczos_.scale(base, w, h);
                 if (!shrunk.frame) return nullptr;
                 base = shrunk.frame;
             }
         }
-        const bool fits = CVPixelBufferGetWidth(base) == width_ && CVPixelBufferGetHeight(base) == height_;
-        if (whole && fits && !count && !mark_count) return CVPixelBufferRetain(base);
+        const bool fits = CVPixelBufferGetWidth(base) == width && CVPixelBufferGetHeight(base) == height;
+        if (index == kMainCanvas && whole && fits && !count && !mark_count) return CVPixelBufferRetain(base);
         @autoreleasepool {
             CVPixelBufferRef out = nullptr;
-            if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool_, &out) != kCVReturnSuccess) return nullptr;
+            // The second canvas's pool is bounded: past it, its encoder has fallen behind and
+            // the frame is skipped.
+            NSDictionary* limit = index == kMainCanvas ? nil : @{(id)kCVPixelBufferPoolAllocationThresholdKey: @(kSecondFrames)};
+            if (CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(kCFAllocatorDefault, canvas.pool, (__bridge CFDictionaryRef)limit,
+                                                                   &out) != kCVReturnSuccess)
+                return nullptr;
             CVBufferPropagateAttachments(base, out);
-            const CGRect frame = CGRectMake(0, 0, width_, height_);
+            const CGRect frame = CGRectMake(0, 0, width, height);
             CIImage* result = nil;
             if (whole && fits) {
                 result = [CIImage imageWithCVPixelBuffer:base];
             } else {
                 result = [[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0]] imageByCroppingToRect:frame];
-                if (screen_visible)
-                    result = [placed([CIImage imageWithCVPixelBuffer:base], Overlay::Kind::image, screen_area) imageByCompositingOverImage:result];
+                if (screen.visible)
+                    result = [placed([CIImage imageWithCVPixelBuffer:base], Overlay::Kind::image, screen, width, height)
+                        imageByCompositingOverImage:result];
             }
-            for (std::size_t i = 0; i < mark_count; ++i) result = [mark(marks[i]) imageByCompositingOverImage:result];
+            for (std::size_t i = 0; i < mark_count; ++i) result = [mark(marks[i], height) imageByCompositingOverImage:result];
             for (std::size_t i = 0; i < count; ++i) {
                 Layer& layer = *jobs[i].layer;
                 CIImage* picture = layer.image;
@@ -602,7 +628,7 @@ public:
                     picture = [CIImage imageWithCVPixelBuffer:pixel options:@{kCIImageColorSpace: [NSNull null]}];
                     CVPixelBufferRelease(pixel);
                 }
-                result = [placed(picture, layer.overlay.kind, jobs[i].area) imageByCompositingOverImage:result];
+                result = [placed(picture, layer.overlay.kind, jobs[i].layout, width, height) imageByCompositingOverImage:result];
             }
             [context_ render:result toCVPixelBuffer:out bounds:frame colorSpace:nil];
             return out;
@@ -614,20 +640,32 @@ public:
         if (index >= layers_.size()) return {"no overlay " + std::to_string(index + 1)};
         if (area) {
             if (auto error = core::check_area(index, *area); !error.empty()) return {error};
-            layers_[index].overlay.area = *area;
+            canvases_[kMainCanvas].layers[index].area = *area;
         }
-        layers_[index].overlay.visible = visible;
+        canvases_[kMainCanvas].layers[index].visible = visible;
         return {};
     }
 
     Result set_screen(bool visible, const std::optional<Area>& area) {
         if (area && !core::valid(*area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
         std::lock_guard lock(mutex_);
-        if (area) screen_area_ = *area;
-        screen_visible_ = visible;
+        if (area) canvases_[kMainCanvas].screen.area = *area;
+        canvases_[kMainCanvas].screen.visible = visible;
         return {};
     }
 
+    Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
+        if (canvas >= canvas_count_) return {canvas == kSecondCanvas ? "this recording has no second canvas" : "no such canvas"};
+        if (auto error = core::check_layout(layer, layout); !error.empty()) return {error};
+        std::lock_guard lock(mutex_);
+        if (layer == kScreenLayer) {
+            canvases_[canvas].screen = layout;
+            return {};
+        }
+        if (layer >= layers_.size()) return {"no overlay " + std::to_string(layer + 1)};
+        canvases_[canvas].layers[layer] = layout;
+        return {};
+    }
     std::uint64_t camera_frames() const {
         std::lock_guard lock(mutex_);
         std::uint64_t total = 0;
@@ -643,13 +681,27 @@ public:
             if (layer.screen) layer.screen->stop();
         }
         layers_.clear();
-        if (pool_) { CVPixelBufferPoolRelease(pool_); pool_ = nullptr; }
+        for (auto& canvas : canvases_) {
+            if (canvas.pool) CVPixelBufferPoolRelease(canvas.pool);
+            canvas = {};
+        }
+        canvas_count_ = 1;
         lanczos_.stop();
         context_ = nil;
     }
 
 private:
     static constexpr std::uint32_t kMarkSize = 128;
+    // The second canvas's frames: its encoder's queue of four plus what VideoToolbox holds.
+    static constexpr int kSecondFrames = 12;
+
+    // One picture of the recording: its size, frames and the layout of every source.
+    struct Canvas {
+        std::uint32_t width = 0, height = 0;
+        CVPixelBufferPoolRef pool = nullptr;
+        Layout screen;
+        std::vector<Layout> layers;  // One per layers_ entry.
+    };
 
     // Turns new mouse-down counts and released buttons into presses and releases at the
     // pointer. A press and release between two reads still counts.
@@ -705,28 +757,29 @@ private:
         return click_rect_ = {bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height};
     }
 
-    // A click mark centered on its point, faded to its opacity. Core Image's origin is at the
-    // bottom left.
-    CIImage* mark(const core::ClickMark& m) const {
+    // A click mark centered on its point in a canvas height pixels tall, faded to its
+    // opacity. Core Image's origin is at the bottom left.
+    CIImage* mark(const core::ClickMark& m, std::uint32_t height) const {
         const double scale = m.diameter / kMarkSize;
         CIImage* picture = [click_marks_[m.right ? 1 : 0]
-            imageByApplyingTransform:CGAffineTransformMake(scale, 0, 0, scale, m.x - m.diameter / 2, height_ - m.y - m.diameter / 2)];
+            imageByApplyingTransform:CGAffineTransformMake(scale, 0, 0, scale, m.x - m.diameter / 2, height - m.y - m.diameter / 2)];
         if (m.alpha >= 1) return picture;
         // CIColorMatrix works on unpremultiplied color, so scaling alpha alone fades the mark.
         return [picture imageByApplyingFilter:@"CIColorMatrix"
                           withInputParameters:@{@"inputAVector": [CIVector vectorWithX:0 Y:0 Z:0 W:m.alpha]}];
     }
 
-    // A picture scaled and cropped into its area, as core::place lays it out.
-    CIImage* placed(CIImage* picture, Overlay::Kind kind, const Area& area) const {
+    // A picture's crop scaled and cropped into its area of a width x height canvas, as
+    // core::place lays it out.
+    CIImage* placed(CIImage* picture, Overlay::Kind kind, const Layout& layout, std::uint32_t width, std::uint32_t height) const {
         const CGRect extent = picture.extent;
         const double pw = extent.size.width, ph = extent.size.height;
-        const auto p = core::place(kind, area, width_, height_, static_cast<std::uint32_t>(pw), static_cast<std::uint32_t>(ph));
+        const auto p = core::place(kind, layout.area, width, height, static_cast<std::uint32_t>(pw), static_cast<std::uint32_t>(ph),
+                                   layout.crop);
         // Core Image puts the origin at the bottom left.
         const CGRect shown = CGRectMake(extent.origin.x + p.u0 * pw, extent.origin.y + (1 - p.v1) * ph,
                                         (p.u1 - p.u0) * pw, (p.v1 - p.v0) * ph);
-        const CGRect target = CGRectMake(p.left, height_ - p.bottom, p.right - p.left, p.bottom - p.top);
-        const double sx = target.size.width / shown.size.width, sy = target.size.height / shown.size.height;
+        const CGRect target = CGRectMake(p.left, height - p.bottom, p.right - p.left, p.bottom - p.top);        const double sx = target.size.width / shown.size.width, sy = target.size.height / shown.size.height;
         CIImage* cropped = [picture imageByCroppingToRect:shown];
         CGAffineTransform move = CGAffineTransformMakeTranslation(-shown.origin.x, -shown.origin.y);
         move = CGAffineTransformConcat(move, CGAffineTransformMakeScale(sx, sy));
@@ -734,14 +787,13 @@ private:
         return [[cropped imageByApplyingTransform:move highQualityDownsample:YES] imageByCroppingToRect:target];
     }
 
-    std::uint32_t width_ = 0, height_ = 0;
     CIContext* __strong context_ = nil;
-    CVPixelBufferPoolRef pool_ = nullptr;
     PlaneScaler lanczos_;
-    mutable std::mutex mutex_;  // Guards the layer list, each layer's visibility and area, and the screen's.
+    mutable std::mutex mutex_;  // Guards the layer list and each canvas's layouts.
     std::vector<Layer> layers_;
-    Area screen_area_;
-    bool screen_visible_ = true;
+    std::array<Canvas, 2> canvases_;
+    std::size_t canvas_count_ = 1;
+    core::DesktopRect click_now_;  // The capture's place on the desktop for this frame's marks.
     std::unique_ptr<core::Clicks> clicks_;
     ClickSource click_source_;
     core::DesktopRect click_rect_;
@@ -756,9 +808,12 @@ Overlays::~Overlays() = default;
 Result Overlays::start(std::uint32_t width, std::uint32_t height, const Options& options, const ClickSource& clicks) {
     return impl_->start(width, height, options, clicks);
 }
-CVPixelBufferRef Overlays::compose(CVPixelBufferRef base) { return impl_->compose(base); }
+CVPixelBufferRef Overlays::compose(std::size_t canvas, CVPixelBufferRef base) { return impl_->compose(canvas, base); }
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }
 Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { return impl_->set_screen(visible, area); }
+Result Overlays::set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
+    return impl_->set_layout(canvas, layer, layout);
+}
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }
 void Overlays::stop() { impl_->stop(); }
 

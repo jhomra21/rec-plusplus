@@ -53,6 +53,33 @@ bool area(std::string_view s, Area& a) {
     return a.width >= 0.01 && a.height >= 0.01 && a.x + a.width <= 1 + 1e-6 && a.y + a.height <= 1 + 1e-6;
 }
 
+// WIDTHxHEIGHT
+bool canvas_size(std::string_view s, std::uint32_t& width, std::uint32_t& height) {
+    const auto x = s.find('x');
+    return x != std::string_view::npos && integer(s.substr(0, x), width) && integer(s.substr(x + 1), height);
+}
+
+// N|screen:X,Y,W,H or N|screen:X,Y,W,H:CX,CY,CW,CH for --canvas2-place and --crop's N|screen:CROP.
+bool layer_areas(std::string_view s, std::size_t& layer, Area& first, std::optional<Area>& second) {
+    const auto colon = s.find(':');
+    if (colon == std::string_view::npos) return false;
+    const auto name = s.substr(0, colon);
+    if (name == "screen") layer = kScreen;
+    else {
+        std::uint32_t n = 0;
+        if (!integer(name, n) || n < 1 || n > 15) return false;
+        layer = n - 1;
+    }
+    auto rest = s.substr(colon + 1);
+    const auto next = rest.find(':');
+    if (!area(rest.substr(0, next), first)) return false;
+    if (next == std::string_view::npos) return true;
+    Area crop;
+    if (!area(rest.substr(next + 1), crop)) return false;
+    second = crop;
+    return true;
+}
+
 // SOURCE or SOURCE@X,Y,W,H. A path may contain @, so only a valid area after the last one counts.
 Overlay overlay(Overlay::Kind kind, std::string_view value, Area fallback) {
     Overlay o;
@@ -130,6 +157,7 @@ bool parse_options(const std::vector<std::string>& args, Options& o, std::string
         if (arg == "--mute-system") { o.system_muted = true; continue; }
         if (arg == "--mute-mic") { o.mic_muted = true; continue; }
         if (arg == "--hide-screen") { o.screen_visible = false; continue; }
+        if (arg == "--canvas2-hide-screen") { o.canvas2.screen.visible = false; continue; }
         if (i + 1 >= args.size()) { error = "missing value for " + std::string(arg); return false; }
         std::string_view value(args[++i]);
         double real = 0;
@@ -217,6 +245,50 @@ bool parse_options(const std::vector<std::string>& args, Options& o, std::string
                 if (!integer(what, layer.display) || layer.display == 0) { error = "--add-display needs a display number"; return false; }
             }
             o.overlays.push_back(layer);
+        } else if (arg == "--canvas2") {
+            if (value == "vertical") { o.canvas2.width = 1080; o.canvas2.height = 1920; }
+            else if (!canvas_size(value, o.canvas2.width, o.canvas2.height)) {
+                error = "--canvas2 must be WIDTHxHEIGHT, for example 1080x1920, or vertical"; return false;
+            }
+        } else if (arg == "--canvas2-stream") {
+            if (value.empty()) { error = "--canvas2-stream needs an rtmp:// or rtmps:// URL"; return false; }
+            o.canvas2.stream_urls.emplace_back(value);
+        } else if (arg == "--canvas2-output") {
+            o.canvas2.output = value;
+        } else if (arg == "--canvas2-place" || arg == "--crop") {
+            std::size_t layer = 0;
+            Area first;
+            std::optional<Area> crop;
+            const bool place = arg == "--canvas2-place";
+            if (!layer_areas(value, layer, first, crop) || (!place && crop)) {
+                error = place ? "--canvas2-place must be N|screen:X,Y,W,H or N|screen:X,Y,W,H:CROP_X,CROP_Y,CROP_W,CROP_H (fractions)"
+                              : "--crop must be N|screen:X,Y,W,H, fractions of the source";
+                return false;
+            }
+            if (layer != kScreen && layer >= o.overlays.size()) {
+                error = std::string(arg) + " " + std::to_string(layer + 1) + ": add the overlay first"; return false;
+            }
+            if (!place) {
+                (layer == kScreen ? o.screen_crop : o.overlays[layer].crop) = first;
+            } else if (layer == kScreen) {
+                o.canvas2.screen.area = first;
+                if (crop) o.canvas2.screen.crop = *crop;
+            } else {
+                while (o.canvas2.overlays.size() <= layer) {
+                    const auto& source = o.overlays[o.canvas2.overlays.size()];
+                    o.canvas2.overlays.push_back({source.visible, source.area, source.crop});
+                }
+                o.canvas2.overlays[layer].area = first;
+                if (crop) o.canvas2.overlays[layer].crop = *crop;
+            }
+        } else if (arg == "--canvas2-hide") {
+            std::uint32_t n = 0;
+            if (!integer(value, n) || n < 1 || n > o.overlays.size()) { error = "--canvas2-hide needs an overlay number"; return false; }
+            while (o.canvas2.overlays.size() < n) {
+                const auto& source = o.overlays[o.canvas2.overlays.size()];
+                o.canvas2.overlays.push_back({source.visible, source.area, source.crop});
+            }
+            o.canvas2.overlays[n - 1].visible = false;
         } else if (arg == "--screen-area") {
             if (!area(value, o.screen_area)) {
                 error = "the screen area must be X,Y,WIDTH,HEIGHT as fractions of the frame, inside it"; return false;
@@ -249,6 +321,12 @@ bool parse_options(const std::vector<std::string>& args, Options& o, std::string
     if ((o.system_audio || o.microphone) && o.test_pattern) {
         error = std::string(o.system_audio ? "--system-audio" : "--mic") + " needs a real screen capture"; return false;
     }
+    if ((!o.canvas2.stream_urls.empty() || !o.canvas2.output.empty()) && !o.canvas2.width) {
+        error = "--canvas2-stream and --canvas2-output need --canvas2"; return false;
+    }
+    if (o.stream_urls.size() + o.canvas2.stream_urls.size() > kMaxStreams) {
+        error = "at most " + std::to_string(kMaxStreams) + " stream servers across both canvases"; return false;
+    }
     if (o.output.empty() || (o.output.size() < 4 ||
         (o.output.substr(o.output.size() - 4) != ".mov" && o.output.substr(o.output.size() - 4) != ".mp4"))) {
         error = "output must end with .mov or .mp4";
@@ -279,20 +357,24 @@ std::optional<Request> parse_request(std::string_view line, std::string& error) 
         r.layer = *layer;
         r.area = to;
     } else if (line.rfind("place ", 0) == 0) {
-        const auto args = std::string(rest(6));
-        const auto first = args.find(' ');
-        const auto second = first == std::string::npos ? std::string::npos : args.find(' ', first + 1);
-        const auto layer = first == std::string::npos ? std::nullopt : layer_index(std::string_view(args).substr(0, first));
-        const auto shown = second == std::string::npos ? std::string() : args.substr(first + 1, second - first - 1);
-        Area to;
-        if (!layer || (shown != "0" && shown != "1") || !area(std::string_view(args).substr(second + 1), to)) {
-            error = "Use: place N|screen 0|1 X,Y,W,H (fractions of the frame)";
+        std::istringstream words{std::string(rest(6))};
+        std::vector<std::string> w;
+        for (std::string word; words >> word;) w.push_back(word);
+        std::size_t i = 0;
+        if (!w.empty() && w[0] == "canvas2") { r.canvas = kSecondCanvas; ++i; }
+        const auto layer = w.size() > i ? layer_index(w[i]) : std::nullopt;
+        Area to, crop;
+        const bool ok = layer && (w.size() == i + 3 || w.size() == i + 4) && (w[i + 1] == "0" || w[i + 1] == "1") &&
+                        area(w[i + 2], to) && (w.size() == i + 3 || area(w[i + 3], crop));
+        if (!ok) {
+            error = "Use: place [canvas2] N|screen 0|1 X,Y,W,H [CROP_X,CROP_Y,CROP_W,CROP_H] (fractions)";
             return std::nullopt;
         }
         r.action = Action::place;
         r.layer = *layer;
-        r.visible = shown == "1";
+        r.visible = w[i + 1] == "1";
         r.area = to;
+        if (w.size() == i + 4) r.crop = crop;
     } else if (line.rfind("level ", 0) == 0) {
         const auto args = std::string(rest(6));
         const auto first = args.find(' ');
@@ -359,6 +441,16 @@ Result Controls::apply(const Request& request, double recorded, std::string& mes
         const std::size_t n = request.layer;
         if (n != kScreen && n >= visible_.size())
             return {"No overlay " + std::to_string(n + 1) + "; add one with --camera, --image, --add-display or --add-window"};
+        if (request.action == Action::place && (request.canvas != kMainCanvas || request.crop)) {
+            // A layout replaces the source's crop too; without one it shows all of it.
+            const Layout layout{request.visible, *request.area, request.crop.value_or(Area{})};
+            if (auto changed = recorder_.set_layout(request.canvas, n == kScreen ? kScreenLayer : n, layout); !changed) return changed;
+            if (request.canvas == kMainCanvas) {
+                if (n == kScreen) screen_visible_ = request.visible;
+                else visible_[n] = request.visible;
+            }
+            return {};
+        }
         const bool was = n == kScreen ? screen_visible_ : static_cast<bool>(visible_[n]);
         const bool show = request.action == Action::place  ? request.visible
                           : request.action == Action::move ? was
@@ -438,15 +530,21 @@ std::string summary(const Options& options, const Stats& stats, double wall_seco
         out << "Camera frames " << stats.camera_frames << '\n';
     if (stats.paused_seconds > 0)
         out << "Paused " << std::fixed << std::setprecision(1) << stats.paused_seconds << " s (not in the movie)\n";
-    if (!options.stream_urls.empty())
+    std::vector<std::string> urls = options.stream_urls;
+    urls.insert(urls.end(), options.canvas2.stream_urls.begin(), options.canvas2.stream_urls.end());
+    if (options.canvas2.width)
+        out << "Second canvas " << options.canvas2.width << 'x' << options.canvas2.height << ": " << stats.canvas2_frames
+            << " frames, skipped " << stats.canvas2_dropped
+            << (options.canvas2.output.empty() ? std::string() : ", saved " + options.canvas2.output) << '\n';
+    if (!urls.empty())
         out << "Streamed " << stats.stream_frames << " frames (" << std::fixed << std::setprecision(1)
             << static_cast<double>(stats.stream_bytes) / 1e6 << " MB, "
             << static_cast<int>(static_cast<double>(stats.stream_bytes) * 8 / 1000 / std::max(1.0, wall_seconds))
             << " kb/s), skipped " << stats.stream_dropped
             << (stats.stream_reconnects ? ", reconnected " + std::to_string(stats.stream_reconnects) : std::string()) << '\n';
-    for (std::uint32_t i = 0; stats.stream_count > 1 && i < stats.stream_count; ++i) {
+    for (std::uint32_t i = 0; stats.stream_count > 1 && i < stats.stream_count && i < urls.size(); ++i) {
         const auto& s = stats.streams[i];
-        out << "  " << redact(options.stream_urls[i]) << ": " << s.frames << " frames, " << std::fixed << std::setprecision(1)
+        out << "  " << redact(urls[i]) << ": " << s.frames << " frames, " << std::fixed << std::setprecision(1)
             << static_cast<double>(s.bytes) / 1e6 << " MB, skipped " << s.dropped
             << (s.reconnects ? ", reconnected " + std::to_string(s.reconnects) : std::string()) << '\n';
     }
