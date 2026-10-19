@@ -330,6 +330,9 @@ private:
                 }
                 if (!broken_.load()) encode_video(frame);
                 CVPixelBufferRelease(frame.pixel);
+                // A video encoder slower than real time keeps this loop full; audio must not
+                // wait behind it, or its ring overflows and the stream loses its start.
+                encode_audio();
             }
             encode_audio();
             if (done) break;

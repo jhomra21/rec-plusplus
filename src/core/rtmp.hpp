@@ -178,7 +178,16 @@ private:
         RtmpPublisher publisher;
         std::atomic<std::uint64_t> frames{0};
     };
+    struct Held {
+        std::uint32_t ms;
+        Bytes body;
+    };
+    void send_audio(std::uint32_t ms, bool header, Bytes body);
+    void release_audio(std::uint32_t upto);
+
     std::vector<std::unique_ptr<Server>> servers_;  // Set by open() only.
+    std::mutex order_;
+    std::deque<Held> held_;  // Encoded audio waiting for video to reach its time, at most kHoldMs.
 };
 
 } // namespace rec::core

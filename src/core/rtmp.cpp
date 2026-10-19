@@ -804,7 +804,14 @@ std::string Broadcast::open(const std::vector<std::string>& urls, const StreamIn
     return {};
 }
 
+// Encoded audio runs ahead of video, most of all behind a slow software video encoder. It
+// waits here until video reaches its time, so servers get the two interleaved in timestamp
+// order; past kHoldMs it goes anyway, as video has stalled.
+constexpr std::uint32_t kHoldMs = 3000;
+
 void Broadcast::video(std::uint32_t ms, bool key, bool header, Bytes body) {
+    std::lock_guard lock(order_);
+    if (!header) release_audio(ms);
     for (std::size_t i = 0; i < servers_.size(); ++i) {
         auto& server = *servers_[i];
         const bool queued = i + 1 < servers_.size() ? server.publisher.video(ms, key, header, body)
@@ -814,6 +821,23 @@ void Broadcast::video(std::uint32_t ms, bool key, bool header, Bytes body) {
 }
 
 void Broadcast::audio(std::uint32_t ms, bool header, Bytes body) {
+    std::lock_guard lock(order_);
+    if (header) { send_audio(ms, true, std::move(body)); return; }
+    held_.push_back({ms, std::move(body)});
+    while (!held_.empty() && ms - held_.front().ms > kHoldMs) {
+        send_audio(held_.front().ms, false, std::move(held_.front().body));
+        held_.pop_front();
+    }
+}
+
+void Broadcast::release_audio(std::uint32_t upto) {
+    while (!held_.empty() && held_.front().ms <= upto) {
+        send_audio(held_.front().ms, false, std::move(held_.front().body));
+        held_.pop_front();
+    }
+}
+
+void Broadcast::send_audio(std::uint32_t ms, bool header, Bytes body) {
     for (std::size_t i = 0; i < servers_.size(); ++i) {
         if (i + 1 < servers_.size()) servers_[i]->publisher.audio(ms, header, body);
         else servers_[i]->publisher.audio(ms, header, std::move(body));
@@ -821,6 +845,10 @@ void Broadcast::audio(std::uint32_t ms, bool header, Bytes body) {
 }
 
 void Broadcast::close(int flush_ms) {
+    {
+        std::lock_guard lock(order_);
+        release_audio(UINT32_MAX);
+    }
     std::vector<std::thread> closing;
     for (std::size_t i = 1; i < servers_.size(); ++i)
         closing.emplace_back([this, i, flush_ms] { servers_[i]->publisher.close(flush_ms); });
