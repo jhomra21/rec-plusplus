@@ -46,6 +46,19 @@ struct Scene {
 // The vertical video's size: 9:16 for TikTok, YouTube Shorts and Reels.
 inline constexpr std::uint32_t kVerticalWidth = 1080, kVerticalHeight = 1920;
 
+// A place the live stream goes. Presets (Twitch, YouTube) have a fixed server; X, TikTok and
+// custom servers are pasted in. Its key is kept by the platform's secret store under
+// key_name(), never in the settings file.
+struct Destination {
+    bool on = true;                   // Off: kept, with its key, but not sent to.
+    std::string service = "twitch";   // One of kServices.
+    std::string server;               // Typed services: rtmp[s]://host[:port]/app.
+    bool vertical = false;            // Send the vertical video instead of the landscape one.
+};
+
+// The engine sends one encode to at most four servers, across both canvases.
+inline constexpr std::size_t kMaxDestinations = 4;
+
 // With the camera and the image, the engine's 15 overlays.
 inline constexpr std::size_t kMaxLayers = 13;
 
@@ -77,14 +90,8 @@ struct Settings {
     int system_volume = 0, mic_volume = 0;
     bool system_muted = false, mic_muted = false;
     bool stream = false;              // Go live while recording.
-    std::string destination = "twitch"; // twitch, youtube, x, tiktok, custom.
-    std::string server;               // Custom destination: rtmp[s]://host[:port]/app.
-    // A second server sent the same stream: none, or one of the destinations.
-    std::string destination2 = "none";
-    std::string server2;              // Custom second destination.
-    std::string x_server, tiktok_server;  // Pasted from X Media Studio and TikTok LIVE Center.
-    // Send the vertical video instead of the landscape one to each destination.
-    bool destination_vertical = false, destination2_vertical = false;
+    // Up to kMaxDestinations; each one that is on gets the stream. Never empty.
+    std::vector<Destination> destinations{Destination{}};
     bool vertical_movie = false;      // Also save the vertical video, as NAME-vertical.mp4.
     std::uint32_t stream_kbps = 6000;
     bool replay = false;              // Keep the last replay_seconds for Save Replay.
@@ -126,12 +133,6 @@ inline constexpr std::uint32_t kPreviewWidth = 960;
 // Custom stays last; the self-test picks it by position.
 inline constexpr std::array<Choice, 5> kServices{
     {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"x", "X (Twitter)"}, {"tiktok", "TikTok"}, {"custom", "Custom RTMP server"}}};
-inline constexpr std::array<Choice, 6> kSecondServices{{{"none", "None"},
-                                                        {"twitch", "Twitch"},
-                                                        {"youtube", "YouTube"},
-                                                        {"x", "X (Twitter)"},
-                                                        {"tiktok", "TikTok"},
-                                                        {"custom", "Custom RTMP server"}}};
 inline constexpr std::array<Choice, 5> kCorners{{{"bottom-right", "Bottom right"},
                                                 {"bottom-left", "Bottom left"},
                                                 {"top-right", "Top right"},
@@ -236,19 +237,23 @@ Layout vertical_layout(const Scene& scene, const SourceRef& source, double aspec
 
 // rtmp:// or rtmps://host/app for the destination; the stream key is appended as the last
 // segment. The Twitch and YouTube presets use RTMPS.
-std::string server_url(const Settings& settings);
-// The same for the second destination; empty when there is none.
-std::string second_server_url(const Settings& settings);
-std::string server_url(const std::string& destination, const std::string& server);
+std::string server_url(const Destination& destination);
+std::string server_url(const std::string& service, const std::string& server);
 // X and TikTok give each account (TikTok each LIVE) its own server, so it is pasted like a
-// custom one. These destinations take a typed server URL.
-bool typed_server(const std::string& destination);
-// The typed server of the first or second destination: each custom destination has its own,
-// and both share the X and the TikTok server.
-std::string typed_server_of(const Settings& settings, bool second);
-void set_typed_server(Settings& settings, bool second, const std::string& server);
-// Where to find the server URL and key for a destination, as a placeholder; empty for presets.
-const char* server_hint(const std::string& destination);
+// custom one. These services take a typed server URL.
+bool typed_server(const std::string& service);
+// Where to find the server URL and key for a service, as a placeholder; empty for presets.
+const char* server_hint(const std::string& service);
+// The name a destination's key is kept under: its server URL, then "#2", "#3" ... for later
+// destinations with the same server (two YouTube channels). Empty without a server.
+std::string key_name(const Settings& settings, std::size_t destination);
+// "YouTube", or "YouTube 2" when an earlier destination uses the same service.
+std::string destination_name(const Settings& settings, std::size_t destination);
+// Adds a destination after the others: the first service none of them uses. False at
+// kMaxDestinations.
+bool add_destination(Settings& settings);
+// Removes one, unless it is the only one.
+void remove_destination(Settings& settings, std::size_t destination);
 enum class State { idle, starting, recording, paused, finishing };
 
 struct Status {
@@ -301,11 +306,10 @@ public:
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
-    // The keys are used only when settings.stream is set, second_key only with a second
-    // destination. test_pattern records the synthetic flash/beep sources instead of the
-    // screen, for end-to-end checks.
-    Result start(const Settings& settings, const std::string& stream_key, const std::string& second_key,
-                 bool test_pattern = false);
+    // keys holds each destination's stream key, in order; they are used only when
+    // settings.stream is set, and only for destinations that are on. test_pattern records the
+    // synthetic flash/beep sources instead of the screen, for end-to-end checks.
+    Result start(const Settings& settings, const std::vector<std::string>& keys, bool test_pattern = false);
     void stop();
     // Takes over the recording the background engine runs, if any: one this app left
     // running when it quit, or `rec start`'s. True when there was one; it then runs as if

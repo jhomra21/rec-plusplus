@@ -115,6 +115,9 @@ Settings load_settings(const std::string& path) {
     // Before scenes: one camera placement and a scene by name.
     std::string old_corner, old_size, old_scene;
     std::optional<Area> old_custom;
+    std::map<std::size_t, Destination> destinations;
+    // Before the destination list: a first and an optional second destination.
+    std::map<std::string, std::string> old_stream;
     std::ifstream in(utf8_path(path), std::ios::binary);
     std::string line;
     while (std::getline(in, line)) {
@@ -145,14 +148,9 @@ Settings load_settings(const std::string& path) {
         else if (key == "system_muted") s.system_muted = yes;
         else if (key == "mic_muted") s.mic_muted = yes;
         else if (key == "stream") s.stream = yes;
-        else if (key == "destination" && is_choice(kServices, value)) s.destination = value;
-        else if (key == "server") s.server = value;
-        else if (key == "destination2" && is_choice(kSecondServices, value)) s.destination2 = value;
-        else if (key == "server2") s.server2 = value;
-        else if (key == "x_server") s.x_server = value;
-        else if (key == "tiktok_server") s.tiktok_server = value;
-        else if (key == "destination_vertical") s.destination_vertical = yes;
-        else if (key == "destination2_vertical") s.destination2_vertical = yes;
+        else if (key == "destination" || key == "server" || key == "destination2" || key == "server2" || key == "x_server" ||
+                 key == "tiktok_server" || key == "destination_vertical" || key == "destination2_vertical")
+            old_stream[key] = value;
         else if (key == "vertical_movie") s.vertical_movie = yes;
         else if (key == "stream_kbps") s.stream_kbps = std::clamp(number(value, 6000), 500u, 50000u);
         else if (key == "replay") s.replay = yes;
@@ -177,7 +175,13 @@ Settings load_settings(const std::string& path) {
         else {
             std::size_t n = 0;
             std::string field;
-            if (indexed(key, "layer.", n, field)) {
+            if (indexed(key, "destination.", n, field)) {
+                Destination& d = destinations[n];
+                if (field == "on") d.on = yes;
+                else if (field == "service" && is_choice(kServices, value)) d.service = value;
+                else if (field == "server") d.server = value;
+                else if (field == "vertical") d.vertical = yes;
+            } else if (indexed(key, "layer.", n, field)) {
                 Layer& layer = layers[n];
                 if (field == "kind" && (value == "display" || value == "window")) layer.kind = value;
                 else if (field == "display") layer.display = std::max(1u, number(value, 1));
@@ -203,6 +207,24 @@ Settings load_settings(const std::string& path) {
     }
     // Indices count from 0; a gap ends the list.
     for (std::size_t i = 0; layers.count(i) && s.layers.size() < kMaxLayers; ++i) s.layers.push_back(layers[i]);
+    if (destinations.count(0)) {
+        s.destinations.clear();
+        for (std::size_t i = 0; destinations.count(i) && s.destinations.size() < kMaxDestinations; ++i)
+            s.destinations.push_back(destinations[i]);
+    } else if (!old_stream.empty()) {
+        // X and TikTok servers were shared by both destinations; custom ones were each their own.
+        const auto old = [&](const char* key) { return old_stream.count(key) ? old_stream[key] : std::string(); };
+        const auto typed = [&](const std::string& service, const char* custom) {
+            return service == "x" ? old("x_server") : service == "tiktok" ? old("tiktok_server") : service == "custom" ? old(custom) : std::string();
+        };
+        Destination first;
+        if (is_choice(kServices, old("destination"))) first.service = old("destination");
+        first.server = typed(first.service, "server");
+        first.vertical = old("destination_vertical") == "1";
+        s.destinations = {first};
+        if (const auto second = old("destination2"); is_choice(kServices, second))
+            s.destinations.push_back({true, second, typed(second, "server2"), old("destination2_vertical") == "1"});
+    }
     const auto hidden = SceneItem{false, Area{}};
     if (!scenes.empty()) {
         std::vector<Scene> loaded;
@@ -250,15 +272,18 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nmicrophone=" << s.microphone << "\nmicrophone_device=" << s.microphone_device
             << "\nsystem_volume=" << s.system_volume << "\nmic_volume=" << s.mic_volume
             << "\nsystem_muted=" << s.system_muted << "\nmic_muted=" << s.mic_muted
-            << "\nstream=" << s.stream << "\ndestination=" << s.destination << "\nserver=" << s.server
-            << "\ndestination2=" << s.destination2 << "\nserver2=" << s.server2 << "\nx_server=" << s.x_server
-            << "\ntiktok_server=" << s.tiktok_server << "\ndestination_vertical=" << s.destination_vertical
-            << "\ndestination2_vertical=" << s.destination2_vertical << "\nvertical_movie=" << s.vertical_movie
+            << "\nstream=" << s.stream << "\nvertical_movie=" << s.vertical_movie
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
             << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
             << "\nkeep_recording=" << s.keep_recording
             << "\nlast_recording=" << s.last_recording << '\n';
+        for (std::size_t i = 0; i < s.destinations.size(); ++i) {
+            const Destination& d = s.destinations[i];
+            const auto key = "destination." + std::to_string(i) + ".";
+            out << key << "on=" << d.on << '\n' << key << "service=" << d.service << '\n'
+                << key << "server=" << one_line(d.server) << '\n' << key << "vertical=" << d.vertical << '\n';
+        }
         for (std::size_t i = 0; i < s.layers.size(); ++i) {
             const Layer& layer = s.layers[i];
             const auto key = "layer." + std::to_string(i) + ".";
@@ -318,7 +343,11 @@ std::optional<Window> find_window(const std::string& app, const std::string& tit
 std::optional<Window> find_window(const Settings& s) { return find_window(s.window_app, s.window_title); }
 
 bool uses_vertical(const Settings& s) {
-    return s.vertical_movie || (s.stream && (s.destination_vertical || (s.destination2 != "none" && s.destination2_vertical)));
+    if (s.vertical_movie) return true;
+    if (!s.stream) return false;
+    for (const auto& d : s.destinations)
+        if (d.on && d.vertical) return true;
+    return false;
 }
 
 Layout vertical_layout(const Scene& scene, const SourceRef& source, double aspect, bool camera) {
@@ -362,28 +391,47 @@ Layout vertical_layout(const Scene& scene, const SourceRef& source, double aspec
     area.height = std::min(1 - area.y, (bottom - top) / region.height * target.height);
     return {item.visible, area, crop};
 }
-std::string server_url(const Settings& s) { return server_url(s.destination, typed_server_of(s, false)); }
+std::string server_url(const Destination& d) { return server_url(d.service, d.server); }
 
-std::string second_server_url(const Settings& s) {
-    return s.destination2 == "none" ? std::string() : server_url(s.destination2, typed_server_of(s, true));
+bool typed_server(const std::string& service) { return service == "custom" || service == "x" || service == "tiktok"; }
+
+std::string key_name(const Settings& s, std::size_t index) {
+    if (index >= s.destinations.size()) return {};
+    const auto url = server_url(s.destinations[index]);
+    if (url.empty()) return {};
+    std::size_t same = 1;
+    for (std::size_t i = 0; i < index; ++i)
+        if (server_url(s.destinations[i]) == url) ++same;
+    return same == 1 ? url : url + "#" + std::to_string(same);
 }
 
-bool typed_server(const std::string& destination) {
-    return destination == "custom" || destination == "x" || destination == "tiktok";
+std::string destination_name(const Settings& s, std::size_t index) {
+    if (index >= s.destinations.size()) return {};
+    const auto& service = s.destinations[index].service;
+    std::size_t same = 1;
+    for (std::size_t i = 0; i < index; ++i)
+        if (s.destinations[i].service == service) ++same;
+    const std::string label = service == "custom" ? "Custom" : service == "x" ? "X" : kServices[choice_index(kServices, service)].label;
+    return same == 1 ? label : label + " " + std::to_string(same);
 }
 
-std::string typed_server_of(const Settings& s, bool second) {
-    const auto& destination = second ? s.destination2 : s.destination;
-    if (destination == "x") return s.x_server;
-    if (destination == "tiktok") return s.tiktok_server;
-    return second ? s.server2 : s.server;
+bool add_destination(Settings& s) {
+    if (s.destinations.size() >= kMaxDestinations) return false;
+    Destination d;
+    for (const auto& choice : kServices) {
+        const bool used = std::any_of(s.destinations.begin(), s.destinations.end(),
+                                      [&](const Destination& o) { return o.service == choice.value; });
+        if (!used) { d.service = choice.value; break; }
+    }
+    // TikTok is watched on phones.
+    d.vertical = d.service == "tiktok";
+    s.destinations.push_back(d);
+    return true;
 }
 
-void set_typed_server(Settings& s, bool second, const std::string& server) {
-    const auto& destination = second ? s.destination2 : s.destination;
-    if (destination == "x") s.x_server = server;
-    else if (destination == "tiktok") s.tiktok_server = server;
-    else if (destination == "custom") (second ? s.server2 : s.server) = server;
+void remove_destination(Settings& s, std::size_t index) {
+    if (s.destinations.size() > 1 && index < s.destinations.size())
+        s.destinations.erase(s.destinations.begin() + static_cast<std::ptrdiff_t>(index));
 }
 
 const char* server_hint(const std::string& destination) {
@@ -827,8 +875,7 @@ Session::~Session() {
     if (idle_thread_.joinable()) idle_thread_.join();
 }
 
-Result Session::start(const Settings& s, const std::string& stream_key, const std::string& second_key,
-                      bool test_pattern) {
+Result Session::start(const Settings& s, const std::vector<std::string>& keys, bool test_pattern) {
     {
         std::lock_guard lock(mutex_);
         if (state_ != State::idle) return {"a recording is already running"};
@@ -843,18 +890,22 @@ Result Session::start(const Settings& s, const std::string& stream_key, const st
     if (error) return {"cannot use the recordings folder: " + error.message()};
     o.output = next_output(s.folder, o.codec == Codec::prores ? "mov" : s.format);
     if (s.stream) {
-        const auto server = server_url(s);
-        if (server.empty()) return {"enter the stream server URL"};
-        if (stream_key.empty()) return {"enter the stream key"};
-        // Each destination gets the picture it is set to; a vertical one the second canvas.
-        (s.destination_vertical ? o.canvas2.stream_urls : o.stream_urls).push_back(server + "/" + stream_key);
-        if (s.destination2 != "none") {
-            const auto second = second_server_url(s);
-            if (second.empty()) return {"enter the second stream's server URL"};
-            if (second_key.empty()) return {"enter the second stream's key"};
-            if (second == server && second_key == stream_key) return {"both streams go to the same place; choose another second destination"};
-            (s.destination2_vertical ? o.canvas2.stream_urls : o.stream_urls).push_back(second + "/" + second_key);
+        std::vector<std::string> urls;
+        for (std::size_t i = 0; i < s.destinations.size() && i < kMaxDestinations; ++i) {
+            const Destination& d = s.destinations[i];
+            if (!d.on) continue;
+            const auto name = destination_name(s, i);
+            const auto server = server_url(d);
+            const auto key = i < keys.size() ? keys[i] : std::string();
+            if (server.empty()) return {name + ": enter the server URL"};
+            if (key.empty()) return {name + ": enter the stream key"};
+            const auto url = server + "/" + key;
+            if (std::find(urls.begin(), urls.end(), url) != urls.end()) return {name + " goes to the same place as another destination"};
+            urls.push_back(url);
+            // Each destination gets the picture it is set to; a vertical one the second canvas.
+            (d.vertical ? o.canvas2.stream_urls : o.stream_urls).push_back(url);
         }
+        if (urls.empty()) return {"turn on a destination to go live"};
     }
     if (s.vertical_movie) {
         // NAME-vertical.mp4 beside the recording, with -2, -3 ... like next_output() if taken.

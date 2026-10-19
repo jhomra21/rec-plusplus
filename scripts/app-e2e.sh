@@ -207,8 +207,11 @@ quit="$(value last_recording "$settings")"
 [[ "$quit" != "$(step hidden)" ]] || { echo 'quitting did not save a new recording' >&2; exit 1; }
 probe "$quit" app-quit
 within "$(value duration "$artifacts/app-quit.probe")" 1.5 3.5
-grep -qx 'server=rtmp://127.0.0.1:1935/live' "$settings"
-grep -qx 'destination=custom' "$settings"
+grep -qx 'destination.0.server=rtmp://127.0.0.1:1935/live' "$settings"
+grep -qx 'destination.0.service=custom' "$settings"
+grep -qx 'destination.1.server=rtmp://127.0.0.1:1935/live2' "$settings"
+grep -qx 'destination.1.service=custom' "$settings"
+if grep -q '^destination\.2\.' "$settings"; then echo 'the removed destination is still in the settings' >&2; exit 1; fi
 grep -qx 'stream_kbps=3000' "$settings"
 grep -qx 'fps=30' "$settings"
 grep -qx 'replay=0' "$settings"

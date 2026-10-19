@@ -34,7 +34,7 @@ using rec::app::kCorners;
 using rec::app::kFormats;
 using rec::app::kFrameRates;
 using rec::app::kResolutions;
-using rec::app::kSecondServices;
+using rec::app::kMaxDestinations;
 using rec::app::kServices;
 using rec::app::Session;
 using rec::app::Settings;
@@ -272,17 +272,23 @@ struct PreviewHit {
     NSButton *_record, *_pause, *_saveReplay, *_replay, *_systemAudio, *_microphone, *_cursor, *_clicks, *_stream, *_changeFolder, *_openFolder, *_showLast;
     NSButton *_camera, *_image, *_chooseImage, *_showPreview;
     NSButton *_newScene, *_deleteScene, *_sourceShown, *_addDisplay, *_addWindow, *_removeSource;
-    NSButton *_vertical, *_vertical2, *_verticalMovie;  // Which outputs get the vertical video.
+    NSButton* _verticalMovie;
+    // Each destination's row: on, service, Vertical and Remove, then its server and key.
+    NSStackView* _destRow[kMaxDestinations];
+    NSButton *_destOn[kMaxDestinations], *_destVertical[kMaxDestinations], *_destRemove[kMaxDestinations];
+    NSPopUpButton* _destService[kMaxDestinations];
+    NSTextField* _destServer[kMaxDestinations];
+    NSSecureTextField* _destKey[kMaxDestinations];
+    NSButton* _addDestination;
     NSPopUpButton* _verticalLayout;
     NSTextField* _sceneName;
     NSTableView* _sourcesTable;
     rec::app::SourceRef _selected;   // The source the Sources list selects.
     bool _filling;                   // The app, not the person, is setting the Sources list.
     std::vector<rec::Window> _menuWindows;  // What the Add Window menu offered.
-    NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service, *_service2, *_replayLength;
+    NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_replayLength;
     NSPopUpButton *_cameraDevice, *_corner, *_cameraSize, *_scene;
-    NSTextField *_server, *_server2, *_bitrate, *_imageFile;
-    NSSecureTextField *_key, *_key2;
+    NSTextField *_bitrate, *_imageFile;
     NSStatusItem* _statusItem;
     NSTimer* _timer;
     PreviewView* _preview;
@@ -845,30 +851,40 @@ struct PreviewHit {
                                        @[label(@"Codec"), _codec], @[label(@"Format"), _format]]];
 
     _stream = [self check:@"Go live while recording"];
-    _service = [self popup:@"Service"];
-    for (const auto& choice : kServices) [_service addItemWithTitle:ns(choice.label)];
-    _server = [self field:@"Server URL" secure:NO];
-    _key = (NSSecureTextField*)[self field:@"Stream key" secure:YES];
     _bitrate = [self field:@"Bitrate (kb/s)" secure:NO];
-    _service2 = [self popup:@"Also stream to"];
-    for (const auto& choice : kSecondServices) [_service2 addItemWithTitle:ns(choice.label)];
-    _server2 = [self field:@"Second server URL" secure:NO];
-    _key2 = (NSSecureTextField*)[self field:@"Second stream key" secure:YES];
+    NSMutableArray<NSView*>* liveViews = [NSMutableArray arrayWithObject:[self grid:@[@[_stream], @[label(@"Bitrate (kb/s)"), _bitrate]]]];
     // Each destination gets the landscape video or, ticked, the vertical one.
-    _vertical = [self check:@"Vertical"];
-    _vertical.accessibilityLabel = @"Stream the vertical video";
-    _vertical2 = [self check:@"Vertical"];
-    _vertical2.accessibilityLabel = @"Stream the vertical video to the second server";
-    const auto serviceRow = ^NSStackView*(NSPopUpButton* service, NSButton* vertical) {
-        NSStackView* row = [NSStackView stackViewWithViews:@[service, vertical]];
-        row.distribution = NSStackViewDistributionFill;
-        [vertical setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
-        return row;
-    };
-    NSGridView* live = [self grid:@[@[_stream], @[label(@"Service"), serviceRow(_service, _vertical)], @[label(@"Server URL"), _server],
-                                    @[label(@"Stream key"), _key], @[label(@"Bitrate (kb/s)"), _bitrate],
-                                    @[label(@"Also stream to"), serviceRow(_service2, _vertical2)], @[label(@"Server URL"), _server2],
-                                    @[label(@"Stream key"), _key2]]];
+    for (std::size_t i = 0; i < kMaxDestinations; ++i) {
+        _destOn[i] = [self check:@""];
+        _destService[i] = [self popup:@""];
+        for (const auto& choice : kServices) [_destService[i] addItemWithTitle:ns(choice.label)];
+        _destVertical[i] = [self check:@"Vertical"];
+        _destRemove[i] = [self button:@"Remove" action:@selector(removeDestination:)];
+        _destRemove[i].tag = static_cast<NSInteger>(i);
+        _destServer[i] = [self field:@"" secure:NO];
+        _destKey[i] = (NSSecureTextField*)[self field:@"" secure:YES];
+        _destKey[i].placeholderString = @"Stream key";
+        NSStackView* top = [NSStackView stackViewWithViews:@[_destOn[i], _destService[i], _destVertical[i], _destRemove[i]]];
+        top.distribution = NSStackViewDistributionFill;
+        for (NSView* view in @[_destOn[i], _destVertical[i], _destRemove[i]])
+            [view setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+        NSStackView* bottom = [NSStackView stackViewWithViews:@[_destServer[i], _destKey[i]]];
+        bottom.distribution = NSStackViewDistributionFillEqually;
+        bottom.edgeInsets = NSEdgeInsetsMake(0, 22, 0, 0);
+        _destRow[i] = [NSStackView stackViewWithViews:@[top, bottom]];
+        _destRow[i].orientation = NSUserInterfaceLayoutOrientationVertical;
+        _destRow[i].spacing = 6;
+        for (NSView* view in @[top, bottom]) [view.widthAnchor constraintEqualToAnchor:_destRow[i].widthAnchor].active = YES;
+        [liveViews addObject:_destRow[i]];
+    }
+    _addDestination = [self button:@"Add Destination" action:@selector(addDestination:)];
+    [liveViews addObject:_addDestination];
+    NSStackView* live = [NSStackView stackViewWithViews:liveViews];
+    live.orientation = NSUserInterfaceLayoutOrientationVertical;
+    live.alignment = NSLayoutAttributeLeading;
+    live.spacing = 12;
+    for (NSView* view in liveViews)
+        if (view != _addDestination) [view.widthAnchor constraintEqualToAnchor:live.widthAnchor].active = YES;
 
     _replay = [self check:@"Keep the last"];
     _replayLength = [self popup:@"Replay length"];
@@ -1015,10 +1031,6 @@ struct PreviewHit {
     [_codec selectItemAtIndex:choice_index(kCodecs, s.codec)];
     [_format selectItemAtIndex:choice_index(kFormats, s.format)];
     _stream.state = s.stream ? NSControlStateValueOn : NSControlStateValueOff;
-    [_service selectItemAtIndex:choice_index(kServices, s.destination)];
-    [_service2 selectItemAtIndex:choice_index(kSecondServices, s.destination2)];
-    _vertical.state = s.destination_vertical ? NSControlStateValueOn : NSControlStateValueOff;
-    _vertical2.state = s.destination2_vertical ? NSControlStateValueOn : NSControlStateValueOff;
     _verticalMovie.state = s.vertical_movie ? NSControlStateValueOn : NSControlStateValueOff;
     _bitrate.stringValue = [NSString stringWithFormat:@"%u", s.stream_kbps];
     _replay.state = s.replay ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1033,8 +1045,7 @@ struct PreviewHit {
     [self showCameras:_connected];
     _folder.stringValue = ns(s.folder);
     _folder.toolTip = ns(s.folder);
-    [self showServer];
-    [self showSecondServer];
+    [self showDestinations:std::vector<std::string>()];
     [self showDisplays:_displays windows:_windows microphones:_microphones];
     [self showScenes];
 }
@@ -1093,46 +1104,102 @@ struct PreviewHit {
 
 // Presets show their fixed server; X, TikTok and custom servers are pasted in, with a hint
 // where to find them.
-- (void)showServer {
-    [self showServer:NO];
+// keys holds what each row's key field shows, in order: a key moves with its destination
+// when rows are added or removed. An empty one shows the key kept for the row, if any; the
+// others are kept under the row's key name, which can change with the rows above it.
+- (void)showDestinations:(std::vector<std::string>)keys {
+    const auto& list = _settings.destinations;
+    keys.resize(list.size());
+    for (std::size_t i = 0; i < kMaxDestinations; ++i) {
+        _destRow[i].hidden = i >= list.size();
+        if (i >= list.size()) continue;
+        const auto& d = list[i];
+        _destOn[i].state = d.on ? NSControlStateValueOn : NSControlStateValueOff;
+        [_destService[i] selectItemAtIndex:choice_index(kServices, d.service)];
+        _destVertical[i].state = d.vertical ? NSControlStateValueOn : NSControlStateValueOff;
+        [self showServer:i];
+        _destKey[i].stringValue = ns(keys[i]);
+        if (keys[i].empty()) [self loadKey:i];
+        else store_key(rec::app::key_name(_settings, i), keys[i]);
+    }
+    _addDestination.hidden = list.size() >= kMaxDestinations;
+    // The rows have no labels of their own; VoiceOver says which destination each control is for.
+    for (std::size_t i = 0; i < list.size(); ++i) {
+        NSString* name = ns(rec::app::destination_name(_settings, i));
+        _destOn[i].accessibilityLabel = [@"Stream to " stringByAppendingString:name];
+        _destService[i].accessibilityLabel = [NSString stringWithFormat:@"Destination %zu service", i + 1];
+        _destVertical[i].accessibilityLabel = [@"Send the vertical video to " stringByAppendingString:name];
+        _destRemove[i].accessibilityLabel = [@"Remove " stringByAppendingString:name];
+        _destServer[i].accessibilityLabel = [name stringByAppendingString:@" server URL"];
+        _destKey[i].accessibilityLabel = [name stringByAppendingString:@" stream key"];
+    }
 }
 
-- (void)showSecondServer {
-    [self showServer:YES];
-}
-
-- (void)showServer:(BOOL)second {
-    const auto& destination = second ? _settings.destination2 : _settings.destination;
-    const bool typed = rec::app::typed_server(destination);
-    NSTextField* server = second ? _server2 : _server;
-    server.stringValue = ns(typed ? rec::app::typed_server_of(_settings, second)
-                                  : second ? rec::app::second_server_url(_settings) : rec::app::server_url(_settings));
+// Presets show their fixed server; X, TikTok and custom servers are pasted in, with a hint
+// where to find them.
+- (void)showServer:(std::size_t)i {
+    const auto& d = _settings.destinations[i];
+    const bool typed = rec::app::typed_server(d.service);
+    NSTextField* server = _destServer[i];
+    server.stringValue = ns(typed ? d.server : rec::app::server_url(d));
     server.editable = typed;
     server.selectable = YES;
-    server.placeholderString = ns(rec::app::server_hint(destination));
-    [self loadKey:second];
+    server.placeholderString = ns(rec::app::server_hint(d.service));
 }
 
 // Off the main thread: a keychain prompt (a rebuilt app no longer matches the item's access
 // list) would otherwise keep the window from appearing at launch until it is answered.
-- (void)loadKey:(BOOL)second {
-    const auto url = [second](const rec::app::Settings& s) {
-        return second ? rec::app::second_server_url(s) : rec::app::server_url(s);
-    };
-    const std::string server = url(_settings);
-    NSSecureTextField* field = second ? _key2 : _key;
-    field.stringValue = @"";
-    if (server.empty()) return;
+- (void)loadKey:(std::size_t)i {
+    const std::string name = rec::app::key_name(_settings, i);
+    if (name.empty()) return;
+    NSSecureTextField* field = _destKey[i];
     __weak RecController* weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString* key = ns(load_key(server));
+        NSString* key = ns(load_key(name));
         dispatch_async(dispatch_get_main_queue(), ^{
             RecController* me = weakSelf;
             // A key typed meanwhile, or another server chosen, wins.
-            if (!me || field.stringValue.length || url(me->_settings) != server) return;
+            if (!me || field.stringValue.length || rec::app::key_name(me->_settings, i) != name) return;
             field.stringValue = key;
         });
     });
+}
+
+- (std::vector<std::string>)streamKeys {
+    std::vector<std::string> keys;
+    for (std::size_t i = 0; i < _settings.destinations.size(); ++i) keys.push_back(utf8(_destKey[i].stringValue));
+    return keys;
+}
+
+// A key is kept as soon as it is entered, and forgotten when its field is emptied.
+- (void)keepKey:(std::size_t)i {
+    const auto name = rec::app::key_name(_settings, i);
+    const auto key = utf8(_destKey[i].stringValue);
+    if (key.empty()) delete_key(name);
+    else store_key(name, key);
+}
+
+- (void)addDestination:(id)sender {
+    [_window makeFirstResponder:nil];
+    auto keys = [self streamKeys];
+    [self readSettings];
+    if (!rec::app::add_destination(_settings)) return;
+    [self showDestinations:keys];
+    rec::app::save_settings(_settingsPath, _settings);
+    [self refresh];
+}
+
+- (void)removeDestination:(NSButton*)sender {
+    const auto i = static_cast<std::size_t>(sender.tag);
+    if (i >= _settings.destinations.size() || _settings.destinations.size() < 2) return;
+    [_window makeFirstResponder:nil];
+    auto keys = [self streamKeys];
+    [self readSettings];
+    keys.erase(keys.begin() + static_cast<std::ptrdiff_t>(i));
+    rec::app::remove_destination(_settings, i);
+    [self showDestinations:keys];
+    rec::app::save_settings(_settingsPath, _settings);
+    [self refresh];
 }
 
 - (void)readSettings {
@@ -1161,13 +1228,18 @@ struct PreviewHit {
     s.codec = kCodecs[at(_codec)].value;
     s.format = kFormats[at(_format)].value;
     s.stream = _stream.state == NSControlStateValueOn;
-    // A destination's typed server is read before switching to another.
-    if (rec::app::typed_server(s.destination)) rec::app::set_typed_server(s, false, utf8(_server.stringValue));
-    if (rec::app::typed_server(s.destination2)) rec::app::set_typed_server(s, true, utf8(_server2.stringValue));
-    s.destination = kServices[at(_service)].value;
-    s.destination2 = kSecondServices[at(_service2)].value;
-    s.destination_vertical = _vertical.state == NSControlStateValueOn;
-    s.destination2_vertical = _vertical2.state == NSControlStateValueOn;
+    for (std::size_t i = 0; i < s.destinations.size(); ++i) {
+        auto& d = s.destinations[i];
+        d.on = _destOn[i].state == NSControlStateValueOn;
+        d.vertical = _destVertical[i].state == NSControlStateValueOn;
+        // The typed server belongs to the service it was typed for.
+        if (rec::app::typed_server(d.service)) d.server = utf8(_destServer[i].stringValue);
+        const std::string service = kServices[at(_destService[i])].value;
+        if (service != d.service) {
+            d.service = service;
+            d.server.clear();
+        }
+    }
     s.vertical_movie = _verticalMovie.state == NSControlStateValueOn;
     s.replay = _replay.state == NSControlStateValueOn;
     s.replay_seconds = rec::app::kReplayLengths[std::min(at(_replayLength), rec::app::kReplayLengths.size() - 1)];
@@ -1196,21 +1268,20 @@ struct PreviewHit {
         }
         [self readSettings];
     }
-    // TikTok is watched on phones; its stream starts out vertical.
-    if (sender == _service && std::string(kServices[static_cast<std::size_t>(std::max<NSInteger>(0, _service.indexOfSelectedItem))].value) == "tiktok")
-        _vertical.state = NSControlStateValueOn;
-    if (sender == _service2 &&
-        std::string(kSecondServices[static_cast<std::size_t>(std::max<NSInteger>(0, _service2.indexOfSelectedItem))].value) == "tiktok")
-        _vertical2.state = NSControlStateValueOn;
-    if (sender == _service) {
-        [self readSettings];
-        [self showServer];
+    for (std::size_t i = 0; i < _settings.destinations.size(); ++i) {
+        if (sender == _destService[i]) {
+            // TikTok is watched on phones; its stream starts out vertical.
+            if (std::string(kServices[static_cast<std::size_t>(std::max<NSInteger>(0, _destService[i].indexOfSelectedItem))].value) == "tiktok")
+                _destVertical[i].state = NSControlStateValueOn;
+            [_window makeFirstResponder:nil];
+            auto keys = [self streamKeys];
+            keys[i].clear();  // Another service: the key kept for it.
+            [self remember];
+            [self showDestinations:keys];
+        }
+        if (sender == _destOn[i] || sender == _destVertical[i]) [self remember];
     }
-    if (sender == _service2) {
-        [self readSettings];
-        [self showSecondServer];
-    }
-    if (sender == _vertical || sender == _vertical2 || sender == _verticalMovie) [self remember];
+    if (sender == _verticalMovie) [self remember];
     if (sender == _verticalLayout) {
         rec::app::current_scene(_settings).vertical =
             rec::app::kVerticalLayouts[static_cast<std::size_t>(std::max<NSInteger>(0, _verticalLayout.indexOfSelectedItem))].value;
@@ -1451,13 +1522,13 @@ struct PreviewHit {
 
 - (void)controlTextDidEndEditing:(NSNotification*)notification {
     if (notification.object == _sceneName) rec::app::save_settings(_settingsPath, _settings);
-    if (notification.object == _server && rec::app::typed_server(_settings.destination)) {
-        [self readSettings];
-        [self loadKey:NO];
-    }
-    if (notification.object == _server2 && rec::app::typed_server(_settings.destination2)) {
-        [self readSettings];
-        [self loadKey:YES];
+    for (std::size_t i = 0; i < _settings.destinations.size(); ++i) {
+        // A pasted server finds the key kept for it.
+        if (notification.object == _destServer[i] && rec::app::typed_server(_settings.destinations[i].service)) {
+            [self remember];
+            [self loadKey:i];
+        }
+        if (notification.object == _destKey[i]) [self keepKey:i];
     }
 }
 
@@ -1471,15 +1542,12 @@ struct PreviewHit {
             return;
         }
         [self remember];
-        const std::string key = utf8(_key.stringValue), key2 = utf8(_key2.stringValue);
-        if (auto started = _session->start(_settings, key, key2, _testPattern); !started) {
+        if (auto started = _session->start(_settings, [self streamKeys], _testPattern); !started) {
             [self warn:ns(started.error)];
             return;
         }
-        if (_settings.stream) {
-            store_key(rec::app::server_url(_settings), key);
-            store_key(rec::app::second_server_url(_settings), key2);
-        }
+        for (std::size_t i = 0; i < _settings.destinations.size(); ++i)
+            if (_settings.stream && _settings.destinations[i].on) [self keepKey:i];
     }
     [self refresh];
 }
@@ -1842,10 +1910,12 @@ struct PreviewHit {
     _saveReplay.enabled = active && s.replay;
     const bool editable = s.state == State::idle;
     for (NSControl* control in @[_source, _systemAudio, _microphone, _cursor, _clicks, _resolution, _fps, _codec, _format,
-                                 _stream, _service, _server, _key, _bitrate, _service2, _replay, _replayLength, _changeFolder])
+                                 _stream, _bitrate, _replay, _replayLength, _changeFolder, _addDestination, _verticalMovie])
         control.enabled = editable;
-    for (NSControl* control in @[_server2, _key2, _vertical2]) control.enabled = editable && _settings.destination2 != "none";
-    for (NSControl* control in @[_vertical, _verticalMovie]) control.enabled = editable;
+    for (std::size_t i = 0; i < kMaxDestinations; ++i) {
+        for (NSControl* control in @[_destOn[i], _destService[i], _destVertical[i], _destServer[i], _destKey[i]]) control.enabled = editable;
+        _destRemove[i].enabled = editable && _settings.destinations.size() > 1;
+    }
     _micDevice.enabled = editable && _microphone.state == NSControlStateValueOn;
     // Volume and mute change during a recording that has the source.
     for (NSControl* control in @[_systemVolume, _systemMute])
@@ -2052,9 +2122,9 @@ struct PreviewHit {
                                      self->_sourceShown, self->_addDisplay, self->_addWindow, self->_removeSource,
                                      self->_image, self->_imageFile, self->_chooseImage, self->_source, self->_systemAudio, self->_microphone,
                                      self->_micDevice, self->_cursor, self->_clicks, self->_resolution, self->_fps, self->_codec,
-                                     self->_format, self->_stream, self->_service, self->_server, self->_key,
-                                     self->_service2, self->_server2, self->_key2,
-                                     self->_vertical, self->_vertical2, self->_verticalMovie, self->_verticalLayout,
+                                     self->_format, self->_stream, self->_destOn[0], self->_destService[0], self->_destServer[0],
+                                     self->_destKey[0], self->_destVertical[0], self->_destRemove[0], self->_addDestination,
+                                     self->_verticalMovie, self->_verticalLayout,
                                      self->_bitrate, self->_changeFolder, self->_openFolder, self->_showLast,
                                      self->_systemMeter, self->_micMeter, self->_systemVolume, self->_micVolume,
                                      self->_systemMute, self->_micMute]) {
@@ -2172,19 +2242,32 @@ struct PreviewHit {
         set_check(_stream, true);
         // The same stream also goes to a second server with its own key.
         const std::string server2 = server + "2";
+        const auto custom = [&](std::size_t i, const std::string& url, NSString* key) {
+            ui(^{
+                [self->_destService[i] selectItemAtIndex:static_cast<NSInteger>(kServices.size()) - 1];
+                [self->_destService[i] sendAction:self->_destService[i].action to:self->_destService[i].target];
+                self->_destServer[i].stringValue = ns(url);
+                self->_destKey[i].stringValue = key;
+            });
+        };
+        custom(0, server, @"appkey");
+        ui(^{ self->_bitrate.stringValue = @"3000"; });
+        press(_addDestination);
+        custom(1, server2, @"appkey2");
+        // A third destination, turned off, needs no key and gets nothing.
+        press(_addDestination);
+        __block std::string third;
+        __block NSString* names;
         ui(^{
-            [self->_service selectItemAtIndex:static_cast<NSInteger>(kServices.size()) - 1];
-            [self->_service sendAction:self->_service.action to:self->_service.target];
-            self->_server.stringValue = ns(server);
-            self->_key.stringValue = @"appkey";
-            self->_bitrate.stringValue = @"3000";
-            [self->_service2 selectItemAtIndex:static_cast<NSInteger>(kSecondServices.size()) - 1];
-            [self->_service2 sendAction:self->_service2.action to:self->_service2.target];
-            self->_server2.stringValue = ns(server2);
-            self->_key2.stringValue = @"appkey2";
+            third = self->_settings.destinations.size() == 3 ? self->_settings.destinations[2].service : "";
+            names = [NSString stringWithFormat:@"%@|%@", self->_destVertical[1].accessibilityLabel, self->_destKey[0].accessibilityLabel];
         });
+        if (third != "twitch") fail(@"Add Destination did not add Twitch third");
+        if (![names isEqualToString:@"Send the vertical video to Custom 2|Custom stream key"])
+            fail([@"destination names: " stringByAppendingString:names]);
+        set_check(_destOn[2], false);
         // The second server gets the vertical video, which is also saved beside the movie.
-        set_check(_vertical2, true);
+        set_check(_destVertical[1], true);
         set_check(_verticalMovie, true);
         press(_record);
         wait_for(recording, 20);
@@ -2218,8 +2301,12 @@ struct PreviewHit {
         __block NSString* verticalPath;
         ui(^{ verticalPath = ns(self->_session->status().saved_vertical); });
         note([@"stream-vertical=" stringByAppendingString:verticalPath]);
-        set_check(_vertical2, false);
+        set_check(_destVertical[1], false);
         set_check(_verticalMovie, false);
+        press(_destRemove[2]);
+        __block std::size_t left = 0;
+        ui(^{ left = self->_settings.destinations.size(); });
+        if (left != 2) fail(@"Remove did not remove the third destination");
         const std::string stored = load_key(server), stored2 = load_key(server2);
         delete_key(server);
         delete_key(server2);

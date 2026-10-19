@@ -53,16 +53,20 @@ enum Control : int {
     kRecord, kPause, kSaveReplay,
     kCaptureHeader, kSourceLabel, kSource, kSystemAudio, kMicrophone, kMicDevice, kCursor, kClicks,
     kQualityHeader, kResolutionLabel, kResolution, kFpsLabel, kFps, kCodecLabel, kCodec, kFormatLabel, kFormat,
-    kStreamHeader, kStream, kServiceLabel, kService, kServerLabel, kServer, kKeyLabel, kKey, kBitrateLabel, kBitrate,
-    kService2Label, kService2, kServer2Label, kServer2, kKey2Label, kKey2,
+    kStreamHeader, kStream, kBitrateLabel, kBitrate,
     kReplayHeader, kReplay, kReplayLength,
     kCameraHeader, kCamera, kCameraDevice, kPositionLabel, kCorner, kSizeLabel, kCameraSize, kSceneLabel, kScene,
     kImage, kImageFile, kBrowseImage,
     kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast, kPreview, kShowPreview,
     kScenesHeader, kNewScene, kDeleteScene, kSceneNameLabel, kSceneName, kSourcesLabel, kSceneSources, kSourceShown,
     kAddDisplay, kAddWindow, kRemoveSource,
-    kVertical, kVertical2, kVerticalMovie, kVerticalLayoutLabel, kVerticalLayout, kPreview2,
+    kVerticalMovie, kVerticalLayoutLabel, kVerticalLayout, kPreview2, kAddDestination,
+    // Each destination's row: kDestination + 10 * index + one of DestinationField.
+    kDestination = 400,
 };
+enum DestinationField : int { kOn, kService, kVertical, kRemove, kServer, kKey };
+constexpr int destination_id(std::size_t index, DestinationField field) { return kDestination + 10 * static_cast<int>(index) + field; }
+constexpr std::size_t kMaxDestinations = rec::app::kMaxDestinations;
 
 enum Command : UINT {
     kMenuRecord = 1000, kMenuPause, kMenuShow, kMenuFolder, kMenuQuit, kMenuReplay, kMenuMuteSystem, kMenuMuteMic,
@@ -79,7 +83,6 @@ using rec::app::kCorners;
 using rec::app::kFormats;
 using rec::app::kFrameRates;
 using rec::app::kResolutions;
-using rec::app::kSecondServices;
 using rec::app::kServices;
 
 std::wstring wide(const std::string& text) {
@@ -140,8 +143,8 @@ std::wstring clock(double seconds) {
     return out;
 }
 
-// Stream keys live in Windows Credential Manager, one generic credential per server URL,
-// never in the settings file.
+// Stream keys live in Windows Credential Manager, one generic credential per key_name()
+// (the server URL), never in the settings file.
 std::wstring key_target(const std::string& server) { return L"rec/stream/" + wide(server); }
 
 std::string load_key(const std::string& server) {
@@ -164,6 +167,10 @@ void store_key(const std::string& server, const std::string& key) {
     wchar_t user[] = L"stream key";
     credential.UserName = user;
     CredWriteW(&credential, 0);
+}
+
+void delete_key(const std::string& server) {
+    if (!server.empty()) CredDeleteW(key_target(server).c_str(), CRED_TYPE_GENERIC, 0);
 }
 
 // A filled circle with an anti-aliased edge, for the window and notification-area icons.
@@ -794,22 +801,20 @@ private:
 
         label(kStreamHeader, L"Live stream");
         check(kStream, L"&Go live while recording");
-        label(kServiceLabel, L"Ser&vice");
-        HWND service = combo(kService);
-        check(kVertical, L"Ver&tical");
-        label(kServerLabel, L"Server &URL");
-        edit(kServer);
-        label(kKeyLabel, L"Stream &key");
-        edit(kKey, ES_PASSWORD);
         label(kBitrateLabel, L"&Bitrate (kb/s)");
         edit(kBitrate, ES_NUMBER);
-        label(kService2Label, L"Also stream to");
-        HWND service2 = combo(kService2);
-        check(kVertical2, L"Vertical");
-        label(kServer2Label, L"Second server URL");
-        edit(kServer2);
-        label(kKey2Label, L"Second stream key");
-        edit(kKey2, ES_PASSWORD);
+        // Each destination: on, its service, Vertical and Remove, then its server and key.
+        std::array<HWND, kMaxDestinations> services{};
+        for (std::size_t i = 0; i < kMaxDestinations; ++i) {
+            check(destination_id(i, kOn), L"");
+            services[i] = combo(destination_id(i, kService));
+            check(destination_id(i, kVertical), L"Vertical");
+            button(destination_id(i, kRemove), L"Remove");
+            edit(destination_id(i, kServer));
+            edit(destination_id(i, kKey), ES_PASSWORD);
+            SendMessageW(get(destination_id(i, kKey)), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Stream key"));
+        }
+        button(kAddDestination, L"&Add Destination");
 
         label(kReplayHeader, L"Replay");
         check(kReplay, L"Keep the las&t");
@@ -852,8 +857,7 @@ private:
         fill(resolution, kResolutions);
         fill(codec, kCodecs);
         fill(format, kFormats);
-        fill(service, kServices);
-        fill(service2, kSecondServices);
+        for (HWND service : services) fill(service, kServices);
         fill(corner, kCorners);
         fill(vertical_layout, rec::app::kVerticalLayouts);
         fill(size, kCameraSizes);
@@ -872,9 +876,6 @@ private:
         if (SUCCEEDED(CoCreateInstance(CLSID_AccPropServices, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&access_)))) {
             access_->SetHwndPropStr(get(kSystemVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"System audio volume");
             access_->SetHwndPropStr(get(kMicVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Microphone volume");
-            // Both destinations have a Vertical box; say which is which.
-            access_->SetHwndPropStr(get(kVertical), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Stream the vertical video");
-            access_->SetHwndPropStr(get(kVertical2), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Stream the vertical video to the second server");
         }
 
         show_settings();
@@ -906,8 +907,7 @@ private:
             place(label_id, x, y + px(4), label_width - gap, px(20));
             // A drop-down list's height includes its open list.
             const bool list = control_id == kSource || control_id == kMicDevice || control_id == kResolution ||
-                              control_id == kFps || control_id == kCodec || control_id == kFormat || control_id == kService || control_id == kService2 ||
-                              control_id == kReplayLength;
+                              control_id == kFps || control_id == kCodec || control_id == kFormat || control_id == kReplayLength;
             place(control_id, x + label_width, y, width - label_width, list ? px(240) : h);
             y += h + gap;
         };
@@ -983,25 +983,31 @@ private:
         y = columns_top;
         header(kStreamHeader);
         line(kStream, px(22));
-        // A destination's list leaves room for its Vertical box.
-        const int vertical_box = px(80);
-        const auto service_row = [&](int label_id, int list_id, int box_id) {
-            place(label_id, x, y + px(4), label_width - gap, px(20));
-            place(list_id, x + label_width, y, width - label_width - vertical_box - gap, px(240));
-            place(box_id, x + width - vertical_box, y + px(2), vertical_box, px(22));
-            y += row + gap;
-        };
-        service_row(kServiceLabel, kService, kVertical);
-        pair(kServerLabel, kServer, row);
-        pair(kKeyLabel, kKey, row);
         pair(kBitrateLabel, kBitrate, row);
-        service_row(kService2Label, kService2, kVertical2);
-        pair(kServer2Label, kServer2, row);
-        pair(kKey2Label, kKey2, row);
+        const int on_box = px(26), vertical_box = px(76), remove = px(76);
+        for (std::size_t i = 0; i < kMaxDestinations; ++i) {
+            const bool shown = i < settings_.destinations.size();
+            for (auto field : {kOn, kService, kVertical, kRemove, kServer, kKey})
+                ShowWindow(get(destination_id(i, field)), shown ? SW_SHOWNA : SW_HIDE);
+            if (!shown) continue;
+            place(destination_id(i, kOn), x, y + px(2), on_box, px(22));
+            place(destination_id(i, kService), x + on_box, y, width - on_box - vertical_box - remove - 2 * gap, px(240));
+            place(destination_id(i, kVertical), x + width - vertical_box - remove - gap, y + px(2), vertical_box, px(22));
+            place(destination_id(i, kRemove), x + width - remove, y, remove, row);
+            y += row + gap;
+            const int half = (width - on_box - gap) / 2;
+            place(destination_id(i, kServer), x + on_box, y, half, row);
+            place(destination_id(i, kKey), x + on_box + half + gap, y, width - on_box - half - gap, row);
+            y += row + 2 * gap;
+        }
+        ShowWindow(get(kAddDestination), settings_.destinations.size() < kMaxDestinations ? SW_SHOWNA : SW_HIDE);
+        place(kAddDestination, x + on_box, y, px(150), row);
+        y += row + gap;
 
         header(kReplayHeader);
         beside(kReplay, kReplayLength);
-        const int right_bottom = y;
+        // The window keeps room for every destination, so adding one never resizes it.
+        const int right_bottom = y + static_cast<int>(kMaxDestinations - settings_.destinations.size()) * (2 * row + 3 * gap);
 
         // The scenes, their sources, the camera and the image in a narrow third column.
         x = margin + 2 * (column + px(30));
@@ -1088,10 +1094,6 @@ private:
         select(kCodec, choice_index(kCodecs, s.codec));
         select(kFormat, choice_index(kFormats, s.format));
         set_check(kStream, s.stream);
-        select(kService, choice_index(kServices, s.destination));
-        select(kService2, choice_index(kSecondServices, s.destination2));
-        set_check(kVertical, s.destination_vertical);
-        set_check(kVertical2, s.destination2_vertical);
         set_check(kVerticalMovie, s.vertical_movie);
         SetWindowTextW(get(kBitrate), std::to_wstring(s.stream_kbps).c_str());
         set_check(kReplay, s.replay);
@@ -1105,8 +1107,7 @@ private:
         set_check(kImage, s.image);
         set_check(kShowPreview, s.preview);
         show_image();
-        show_server();
-        show_second_server();
+        show_destinations({});
         SetWindowTextW(get(kFolder), wide(s.folder).c_str());
         show_scenes();
     }
@@ -1229,19 +1230,64 @@ private:
         remember();
     }
 
+    // keys holds what each row's key field shows, in order: a key moves with its destination
+    // when rows are added or removed. An empty one shows the key kept for the row, if any; the
+    // others are kept under the row's key name, which can change with the rows above it.
+    void show_destinations(std::vector<std::string> keys) {
+        keys.resize(settings_.destinations.size());
+        for (std::size_t i = 0; i < settings_.destinations.size(); ++i) {
+            const auto& d = settings_.destinations[i];
+            set_check(destination_id(i, kOn), d.on);
+            select(destination_id(i, kService), choice_index(kServices, d.service));
+            set_check(destination_id(i, kVertical), d.vertical);
+            show_server(i);
+            const auto name = rec::app::key_name(settings_, i);
+            if (keys[i].empty()) keys[i] = load_key(name);
+            else store_key(name, keys[i]);
+            SetWindowTextW(get(destination_id(i, kKey)), wide(keys[i]).c_str());
+        }
+        name_destinations();
+        layout();
+    }
+
     // Presets show their fixed server; X, TikTok and custom servers are pasted in, with a
     // hint where to find them.
-    void show_server() { show_server(false); }
-    void show_second_server() { show_server(true); }
-    void show_server(bool second) {
-        const auto& destination = second ? settings_.destination2 : settings_.destination;
-        const bool typed = rec::app::typed_server(destination);
-        const auto url = second ? rec::app::second_server_url(settings_) : rec::app::server_url(settings_);
-        HWND server = get(second ? kServer2 : kServer);
-        SetWindowTextW(server, wide(typed ? rec::app::typed_server_of(settings_, second) : url).c_str());
+    void show_server(std::size_t i) {
+        const auto& d = settings_.destinations[i];
+        const bool typed = rec::app::typed_server(d.service);
+        HWND server = get(destination_id(i, kServer));
+        SetWindowTextW(server, wide(typed ? d.server : rec::app::server_url(d)).c_str());
         SendMessageW(server, EM_SETREADONLY, !typed, 0);
-        SendMessageW(server, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(wide(rec::app::server_hint(destination)).c_str()));
-        SetWindowTextW(get(second ? kKey2 : kKey), wide(load_key(url)).c_str());
+        SendMessageW(server, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(wide(rec::app::server_hint(d.service)).c_str()));
+    }
+
+    // The rows have no labels of their own; screen readers hear which destination each
+    // control belongs to.
+    void name_destinations() {
+        if (!access_) return;
+        for (std::size_t i = 0; i < settings_.destinations.size(); ++i) {
+            const auto name = wide(rec::app::destination_name(settings_, i));
+            const std::pair<DestinationField, std::wstring> names[] = {
+                {kOn, L"Stream to " + name}, {kService, L"Destination " + std::to_wstring(i + 1) + L" service"},
+                {kVertical, L"Send the vertical video to " + name}, {kRemove, L"Remove " + name},
+                {kServer, name + L" server URL"}, {kKey, name + L" stream key"}};
+            for (const auto& [field, text] : names)
+                access_->SetHwndPropStr(get(destination_id(i, field)), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, text.c_str());
+        }
+    }
+
+    std::vector<std::string> stream_keys() const {
+        std::vector<std::string> keys;
+        for (std::size_t i = 0; i < settings_.destinations.size(); ++i) keys.push_back(narrow(text_of(get(destination_id(i, kKey)))));
+        return keys;
+    }
+
+    // A key is kept as soon as it is entered, and forgotten when its field is emptied.
+    void keep_key(std::size_t i) {
+        const auto name = rec::app::key_name(settings_, i);
+        const auto key = narrow(text_of(get(destination_id(i, kKey))));
+        if (key.empty()) delete_key(name);
+        else store_key(name, key);
     }
 
     void read_settings() {
@@ -1276,13 +1322,18 @@ private:
         s.camera_device = cameras_[std::min(at(kCameraDevice), cameras_.size() - 1)].id;
         s.image = checked(kImage);
         s.preview = checked(kShowPreview);
-        // A destination's typed server is read before switching to another.
-        if (rec::app::typed_server(s.destination)) rec::app::set_typed_server(s, false, narrow(text_of(get(kServer))));
-        if (rec::app::typed_server(s.destination2)) rec::app::set_typed_server(s, true, narrow(text_of(get(kServer2))));
-        s.destination = kServices[at(kService)].value;
-        s.destination2 = kSecondServices[at(kService2)].value;
-        s.destination_vertical = checked(kVertical);
-        s.destination2_vertical = checked(kVertical2);
+        for (std::size_t i = 0; i < s.destinations.size(); ++i) {
+            auto& d = s.destinations[i];
+            d.on = checked(destination_id(i, kOn));
+            d.vertical = checked(destination_id(i, kVertical));
+            // The typed server belongs to the service it was typed for.
+            if (rec::app::typed_server(d.service)) d.server = narrow(text_of(get(destination_id(i, kServer))));
+            const std::string service = kServices[at(destination_id(i, kService))].value;
+            if (service != d.service) {
+                d.service = service;
+                d.server.clear();
+            }
+        }
         s.vertical_movie = checked(kVerticalMovie);
         const auto kbps = std::wcstoul(text_of(get(kBitrate)).c_str(), nullptr, 10);
         s.stream_kbps = static_cast<std::uint32_t>(std::clamp<unsigned long>(kbps ? kbps : 6000, 500, 50000));
@@ -1360,17 +1411,15 @@ private:
             if (code == CBN_SELCHANGE) place_camera();
             return;
         case kShowLast: show_last(); return;
-        case kService: case kService2:
-            if (code == CBN_SELCHANGE) {
-                // TikTok is watched on phones; its stream starts out vertical.
-                const bool second = id == kService2;
-                const auto at = [this](int list) { return static_cast<std::size_t>(std::max(0, selected(list))); };
-                const char* chosen = second ? kSecondServices[at(kService2)].value : kServices[at(kService)].value;
-                if (std::string(chosen) == "tiktok") set_check(second ? kVertical2 : kVertical, true);
+        case kAddDestination:
+            if (code == BN_CLICKED) {
+                auto keys = stream_keys();
                 read_settings();
-                if (id == kService) show_server();
-                else show_second_server();
-                refresh();
+                if (rec::app::add_destination(settings_)) {
+                    show_destinations(keys);
+                    rec::app::save_settings(settings_path_, settings_);
+                    SetFocus(get(destination_id(settings_.destinations.size() - 1, kService)));
+                }
             }
             return;
         case kSource:
@@ -1388,18 +1437,6 @@ private:
                 choose_region();
             }
             return;
-        case kServer:
-            if (code == EN_KILLFOCUS && rec::app::typed_server(settings_.destination)) {
-                read_settings();
-                SetWindowTextW(get(kKey), wide(load_key(rec::app::server_url(settings_))).c_str());
-            }
-            return;
-        case kServer2:
-            if (code == EN_KILLFOCUS && rec::app::typed_server(settings_.destination2)) {
-                read_settings();
-                SetWindowTextW(get(kKey2), wide(load_key(rec::app::second_server_url(settings_))).c_str());
-            }
-            return;
         case kCamera: case kImage:
             if (code == BN_CLICKED) {
                 read_settings();
@@ -1411,7 +1448,7 @@ private:
         case kShowPreview:
             if (code == BN_CLICKED) remember();
             return;
-        case kVertical: case kVertical2: case kVerticalMovie:
+        case kVerticalMovie:
             if (code == BN_CLICKED) {
                 read_settings();
                 remember();
@@ -1432,7 +1469,9 @@ private:
             change_volume(id == kMenuMuteSystem ? rec::AudioInput::system : rec::AudioInput::microphone, true);
             return;
         default:
-            if (id >= kMenuScene && id < kMenuScene + static_cast<int>(kMaxMenuScenes)) {
+            if (id >= kDestination && id < destination_id(kMaxDestinations, kOn)) {
+                destination_command(static_cast<std::size_t>((id - kDestination) / 10), static_cast<DestinationField>((id - kDestination) % 10), code);
+            } else if (id >= kMenuScene && id < kMenuScene + static_cast<int>(kMaxMenuScenes)) {
                 change_scene(static_cast<std::size_t>(id - kMenuScene));
             } else if (id >= kMenuAddDisplay && id < kMenuAddDisplay + static_cast<int>(kMaxMenuDisplays)) {
                 rec::app::Layer layer;
@@ -1451,22 +1490,60 @@ private:
         }
     }
 
+    void destination_command(std::size_t i, DestinationField field, int code) {
+        if (i >= settings_.destinations.size()) return;
+        switch (field) {
+        case kService:
+            if (code == CBN_SELCHANGE) {
+                // TikTok is watched on phones; its stream starts out vertical.
+                if (std::string(kServices[static_cast<std::size_t>(std::max(0, selected(destination_id(i, kService))))].value) == "tiktok")
+                    set_check(destination_id(i, kVertical), true);
+                auto keys = stream_keys();
+                keys[i].clear();  // Another service: the key kept for it.
+                remember();
+                show_destinations(keys);
+            }
+            return;
+        case kServer:
+            // A pasted server finds the key kept for it.
+            if (code == EN_KILLFOCUS && rec::app::typed_server(settings_.destinations[i].service)) {
+                remember();
+                if (const auto key = load_key(rec::app::key_name(settings_, i)); !key.empty())
+                    SetWindowTextW(get(destination_id(i, kKey)), wide(key).c_str());
+            }
+            return;
+        case kKey:
+            if (code == EN_KILLFOCUS) keep_key(i);
+            return;
+        case kOn: case kVertical:
+            if (code == BN_CLICKED) remember();
+            return;
+        case kRemove:
+            if (code == BN_CLICKED) {
+                auto keys = stream_keys();
+                read_settings();
+                if (settings_.destinations.size() > 1) keys.erase(keys.begin() + static_cast<std::ptrdiff_t>(i));
+                rec::app::remove_destination(settings_, i);
+                show_destinations(keys);
+                rec::app::save_settings(settings_path_, settings_);
+                SetFocus(get(kAddDestination));
+            }
+            return;
+        }
+    }
+
     void toggle_record() {
         const auto state = session_.status().state;
         if (state == State::recording || state == State::paused) {
             session_.stop();
         } else if (state == State::idle) {
             remember();
-            const auto key = narrow(text_of(get(kKey)));
-            const auto key2 = narrow(text_of(get(kKey2)));
-            if (auto started = session_.start(settings_, key, key2, test_pattern_); !started) {
+            if (auto started = session_.start(settings_, stream_keys(), test_pattern_); !started) {
                 MessageBoxW(window_, wide(started.error).c_str(), L"Rec could not start recording", MB_ICONWARNING);
                 return;
             }
-            if (settings_.stream) {
-                store_key(rec::app::server_url(settings_), key);
-                store_key(rec::app::second_server_url(settings_), key2);
-            }
+            for (std::size_t i = 0; i < settings_.destinations.size(); ++i)
+                if (settings_.stream && settings_.destinations[i].on) keep_key(i);
         }
         refresh();
     }
@@ -1899,8 +1976,12 @@ private:
         EnableWindow(get(kSaveReplay), active && s.replay);
         const bool editable = s.state == State::idle;
         for (int id : {kSource, kSystemAudio, kMicrophone, kCursor, kClicks, kResolution, kFps, kCodec, kFormat, kStream,
-                       kService, kKey, kBitrate, kService2, kReplay, kReplayLength, kChangeFolder})
+                       kBitrate, kReplay, kReplayLength, kChangeFolder, kAddDestination})
             EnableWindow(get(id), editable);
+        for (std::size_t i = 0; i < kMaxDestinations; ++i) {
+            for (auto field : {kOn, kService, kVertical, kServer, kKey}) EnableWindow(get(destination_id(i, field)), editable);
+            EnableWindow(get(destination_id(i, kRemove)), editable && settings_.destinations.size() > 1);
+        }
         EnableWindow(get(kMicDevice), editable && checked(kMicrophone));
         // Volume and mute change during a recording that has the source.
         for (int id : {kSystemVolume, kSystemMute}) EnableWindow(get(id), editable ? checked(kSystemAudio) : active && s.system_audio);
@@ -1915,9 +1996,7 @@ private:
         EnableWindow(get(kCorner), arranging && settings_.camera);
         // A dragged camera is sized by its corners.
         EnableWindow(get(kCameraSize), arranging && settings_.camera && selected(kCorner) != choice_index(kCorners, "custom"));
-        EnableWindow(get(kServer), editable);
-        for (int id : {kServer2, kKey2, kVertical2}) EnableWindow(get(id), editable && settings_.destination2 != "none");
-        for (int id : {kVertical, kVerticalMovie}) EnableWindow(get(id), editable);
+        EnableWindow(get(kVerticalMovie), editable);
         // The vertical video's layout changes with the scene, also while recording.
         const bool vertical = active ? s.vertical : rec::app::uses_vertical(settings_);
         EnableWindow(get(kVerticalLayout), arranging && vertical);
