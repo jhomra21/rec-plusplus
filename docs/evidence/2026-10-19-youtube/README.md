@@ -18,16 +18,16 @@ The Live Control Room's Stream health tab (checked by the account owner) showed 
 
 ## macOS
 
-At commit `801fa17` on a Mac (Mac15,7, macOS 27.0.1), reported by the Mac test session. The key was read from the login keychain at run time and replaced with `****` in the log; a scan of every saved file found no key. The stream was set to Private.
+At commit `801fa17` on a Mac (Mac15,7, macOS 27.0.1), reported by the Mac test session (the app run's files stayed on the Mac in `/tmp/yt-mac2`). The key was read from the login keychain at run time and replaced with `****` in the log; a scan of every saved file found no key. The stream was set to Private.
 
 | Run | Content | Sent | Local movie |
 | --- | --- | --- | --- |
 | CLI (10:39 CDT) | test pattern + tone, 720p30, 60 s, hardware H.264 (VideoToolbox), 6000 kb/s target | 1800/1800 frames, 0 skipped, 44.8 MB (5.98 Mb/s: VideoToolbox holds the constant rate even on the simple pattern) | 1800 frames, 60 pairs, mean and worst 0.2 ms |
+| Rec.app (10:48 CDT) | YouTube preset, test pattern + tone, 1080p60, 31 s, 6000 kb/s | LIVE badge at 10, 20 and 30 s, 6.1 Mb/s each time; no "Stream stopped early" | 1874 frames, 31.23 s, 3 AAC tracks, 32 sync events, worst 0.15 ms |
 
-It exited with status 0. Rec.app's YouTube preset was not run: the key had been added with the `security` tool, so Rec was not on the item's access list, and macOS asked for the login keychain password, which the test session declined.
+The CLI run exited with status 0. The first Rec.app attempt (10:42) did not go live: the key had been added with the `security` tool, so Rec was not on the item's access list, macOS asked for the login keychain password, and the test session declined. In the second attempt the account owner approved that prompt. It was the only one: Rec read the key again at Start Recording without asking. The app showed the preset's server URL, saved the movie and stopped cleanly, and its settings file changed only in `last_recording`, with no key in it; the keychain item was still present afterwards. The owner saw the stream live on YouTube while it ran.
 
 ## Not covered
 
 - YouTube's view of the 6 Mb/s runs (health, received bitrate) and sync of what YouTube received.
-- Rec.app's YouTube preset on macOS.
 - RTMP (unencrypted) to YouTube; the presets use RTMPS.
