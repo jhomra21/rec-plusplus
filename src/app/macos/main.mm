@@ -1051,21 +1051,26 @@ struct PreviewHit {
     _imageFile.toolTip = path.empty() ? nil : ns(path);
 }
 
-// Presets show their fixed server; a custom server is typed in.
+// Presets show their fixed server; X, TikTok and custom servers are pasted in, with a hint
+// where to find them.
 - (void)showServer {
-    const bool custom = _settings.destination == "custom";
-    _server.stringValue = ns(custom ? _settings.server : rec::app::server_url(_settings));
-    _server.editable = custom;
-    _server.selectable = YES;
-    [self loadKey:NO];
+    [self showServer:NO];
 }
 
 - (void)showSecondServer {
-    const bool custom = _settings.destination2 == "custom";
-    _server2.stringValue = ns(custom ? _settings.server2 : rec::app::second_server_url(_settings));
-    _server2.editable = custom;
-    _server2.selectable = YES;
-    [self loadKey:YES];
+    [self showServer:YES];
+}
+
+- (void)showServer:(BOOL)second {
+    const auto& destination = second ? _settings.destination2 : _settings.destination;
+    const bool typed = rec::app::typed_server(destination);
+    NSTextField* server = second ? _server2 : _server;
+    server.stringValue = ns(typed ? rec::app::typed_server_of(_settings, second)
+                                  : second ? rec::app::second_server_url(_settings) : rec::app::server_url(_settings));
+    server.editable = typed;
+    server.selectable = YES;
+    server.placeholderString = ns(rec::app::server_hint(destination));
+    [self loadKey:second];
 }
 
 // Off the main thread: a keychain prompt (a rebuilt app no longer matches the item's access
@@ -1116,10 +1121,11 @@ struct PreviewHit {
     s.codec = kCodecs[at(_codec)].value;
     s.format = kFormats[at(_format)].value;
     s.stream = _stream.state == NSControlStateValueOn;
+    // A destination's typed server is read before switching to another.
+    if (rec::app::typed_server(s.destination)) rec::app::set_typed_server(s, false, utf8(_server.stringValue));
+    if (rec::app::typed_server(s.destination2)) rec::app::set_typed_server(s, true, utf8(_server2.stringValue));
     s.destination = kServices[at(_service)].value;
-    if (s.destination == "custom") s.server = utf8(_server.stringValue);
     s.destination2 = kSecondServices[at(_service2)].value;
-    if (s.destination2 == "custom") s.server2 = utf8(_server2.stringValue);
     s.replay = _replay.state == NSControlStateValueOn;
     s.replay_seconds = rec::app::kReplayLengths[std::min(at(_replayLength), rec::app::kReplayLengths.size() - 1)];
     s.camera = _camera.state == NSControlStateValueOn;
@@ -1388,11 +1394,11 @@ struct PreviewHit {
 
 - (void)controlTextDidEndEditing:(NSNotification*)notification {
     if (notification.object == _sceneName) rec::app::save_settings(_settingsPath, _settings);
-    if (notification.object == _server && _settings.destination == "custom") {
+    if (notification.object == _server && rec::app::typed_server(_settings.destination)) {
         [self readSettings];
         [self loadKey:NO];
     }
-    if (notification.object == _server2 && _settings.destination2 == "custom") {
+    if (notification.object == _server2 && rec::app::typed_server(_settings.destination2)) {
         [self readSettings];
         [self loadKey:YES];
     }

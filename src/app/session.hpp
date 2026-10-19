@@ -73,11 +73,12 @@ struct Settings {
     int system_volume = 0, mic_volume = 0;
     bool system_muted = false, mic_muted = false;
     bool stream = false;              // Go live while recording.
-    std::string destination = "twitch"; // twitch, youtube, custom.
+    std::string destination = "twitch"; // twitch, youtube, x, tiktok, custom.
     std::string server;               // Custom destination: rtmp[s]://host[:port]/app.
-    // A second server sent the same stream: none, twitch, youtube, custom.
+    // A second server sent the same stream: none, or one of the destinations.
     std::string destination2 = "none";
     std::string server2;              // Custom second destination.
+    std::string x_server, tiktok_server;  // Pasted from X Media Studio and TikTok LIVE Center.
     std::uint32_t stream_kbps = 6000;
     bool replay = false;              // Keep the last replay_seconds for Save Replay.
     std::uint32_t replay_seconds = 30;
@@ -115,16 +116,28 @@ inline constexpr std::array<std::uint32_t, 5> kReplayLengths{15, 30, 60, 120, 30
 inline constexpr int kVolumeMin = -40, kVolumeMax = 20;
 // Preview frames are made this wide at most: sharp in a half-window view on a 2x display.
 inline constexpr std::uint32_t kPreviewWidth = 960;
-inline constexpr std::array<Choice, 3> kServices{
-    {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
-inline constexpr std::array<Choice, 4> kSecondServices{
-    {{"none", "None"}, {"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
+// Custom stays last; the self-test picks it by position.
+inline constexpr std::array<Choice, 5> kServices{
+    {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"x", "X (Twitter)"}, {"tiktok", "TikTok"}, {"custom", "Custom RTMP server"}}};
+inline constexpr std::array<Choice, 6> kSecondServices{{{"none", "None"},
+                                                        {"twitch", "Twitch"},
+                                                        {"youtube", "YouTube"},
+                                                        {"x", "X (Twitter)"},
+                                                        {"tiktok", "TikTok"},
+                                                        {"custom", "Custom RTMP server"}}};
 inline constexpr std::array<Choice, 5> kCorners{{{"bottom-right", "Bottom right"},
                                                 {"bottom-left", "Bottom left"},
                                                 {"top-right", "Top right"},
                                                 {"top-left", "Top left"},
                                                 {"custom", "Custom"}}};
 inline constexpr std::array<Choice, 3> kCameraSizes{{{"small", "Small"}, {"medium", "Medium"}, {"large", "Large"}}};
+
+template <std::size_t N>
+bool is_choice(const std::array<Choice, N>& choices, const std::string& value) {
+    for (const auto& choice : choices)
+        if (value == choice.value) return true;
+    return false;
+}
 
 // The position of value in choices, or 0.
 template <std::size_t N>
@@ -208,7 +221,15 @@ std::string server_url(const Settings& settings);
 // The same for the second destination; empty when there is none.
 std::string second_server_url(const Settings& settings);
 std::string server_url(const std::string& destination, const std::string& server);
-
+// X and TikTok give each account (TikTok each LIVE) its own server, so it is pasted like a
+// custom one. These destinations take a typed server URL.
+bool typed_server(const std::string& destination);
+// The typed server of the first or second destination: each custom destination has its own,
+// and both share the X and the TikTok server.
+std::string typed_server_of(const Settings& settings, bool second);
+void set_typed_server(Settings& settings, bool second, const std::string& server);
+// Where to find the server URL and key for a destination, as a placeholder; empty for presets.
+const char* server_hint(const std::string& destination);
 enum class State { idle, starting, recording, paused, finishing };
 
 struct Status {

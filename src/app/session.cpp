@@ -145,10 +145,12 @@ Settings load_settings(const std::string& path) {
         else if (key == "system_muted") s.system_muted = yes;
         else if (key == "mic_muted") s.mic_muted = yes;
         else if (key == "stream") s.stream = yes;
-        else if (key == "destination" && (value == "twitch" || value == "youtube" || value == "custom")) s.destination = value;
+        else if (key == "destination" && is_choice(kServices, value)) s.destination = value;
         else if (key == "server") s.server = value;
-        else if (key == "destination2" && (value == "none" || value == "twitch" || value == "youtube" || value == "custom")) s.destination2 = value;
+        else if (key == "destination2" && is_choice(kSecondServices, value)) s.destination2 = value;
         else if (key == "server2") s.server2 = value;
+        else if (key == "x_server") s.x_server = value;
+        else if (key == "tiktok_server") s.tiktok_server = value;
         else if (key == "stream_kbps") s.stream_kbps = std::clamp(number(value, 6000), 500u, 50000u);
         else if (key == "replay") s.replay = yes;
         else if (key == "replay_seconds") {
@@ -244,7 +246,8 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nsystem_volume=" << s.system_volume << "\nmic_volume=" << s.mic_volume
             << "\nsystem_muted=" << s.system_muted << "\nmic_muted=" << s.mic_muted
             << "\nstream=" << s.stream << "\ndestination=" << s.destination << "\nserver=" << s.server
-            << "\ndestination2=" << s.destination2 << "\nserver2=" << s.server2
+            << "\ndestination2=" << s.destination2 << "\nserver2=" << s.server2 << "\nx_server=" << s.x_server
+        << "\ntiktok_server=" << s.tiktok_server
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
             << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
@@ -307,12 +310,36 @@ std::optional<Window> find_window(const std::string& app, const std::string& tit
 
 std::optional<Window> find_window(const Settings& s) { return find_window(s.window_app, s.window_title); }
 
-std::string server_url(const Settings& s) { return server_url(s.destination, s.server); }
+std::string server_url(const Settings& s) { return server_url(s.destination, typed_server_of(s, false)); }
 
 std::string second_server_url(const Settings& s) {
-    return s.destination2 == "none" ? std::string() : server_url(s.destination2, s.server2);
+    return s.destination2 == "none" ? std::string() : server_url(s.destination2, typed_server_of(s, true));
 }
 
+bool typed_server(const std::string& destination) {
+    return destination == "custom" || destination == "x" || destination == "tiktok";
+}
+
+std::string typed_server_of(const Settings& s, bool second) {
+    const auto& destination = second ? s.destination2 : s.destination;
+    if (destination == "x") return s.x_server;
+    if (destination == "tiktok") return s.tiktok_server;
+    return second ? s.server2 : s.server;
+}
+
+void set_typed_server(Settings& s, bool second, const std::string& server) {
+    const auto& destination = second ? s.destination2 : s.destination;
+    if (destination == "x") s.x_server = server;
+    else if (destination == "tiktok") s.tiktok_server = server;
+    else if (destination == "custom") (second ? s.server2 : s.server) = server;
+}
+
+const char* server_hint(const std::string& destination) {
+    if (destination == "x") return "From X Media Studio, Producer: rtmps://…";
+    if (destination == "tiktok") return "From TikTok LIVE Center; it changes each LIVE";
+    if (destination == "custom") return "rtmp://host/app or rtmps://host:443/app";
+    return "";
+}
 std::string server_url(const std::string& destination, const std::string& server) {
     if (destination == "twitch") return "rtmps://live.twitch.tv:443/app";
     if (destination == "youtube") return "rtmps://a.rtmps.youtube.com:443/live2";

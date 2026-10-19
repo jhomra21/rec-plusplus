@@ -1189,19 +1189,19 @@ private:
         remember();
     }
 
-    // Presets show their fixed server; a custom server is typed in.
-    void show_server() {
-        const bool custom = settings_.destination == "custom";
-        SetWindowTextW(get(kServer), wide(custom ? settings_.server : rec::app::server_url(settings_)).c_str());
-        SendMessageW(get(kServer), EM_SETREADONLY, !custom, 0);
-        SetWindowTextW(get(kKey), wide(load_key(rec::app::server_url(settings_))).c_str());
-    }
-
-    void show_second_server() {
-        const bool custom2 = settings_.destination2 == "custom";
-        SetWindowTextW(get(kServer2), wide(custom2 ? settings_.server2 : rec::app::second_server_url(settings_)).c_str());
-        SendMessageW(get(kServer2), EM_SETREADONLY, !custom2, 0);
-        SetWindowTextW(get(kKey2), wide(load_key(rec::app::second_server_url(settings_))).c_str());
+    // Presets show their fixed server; X, TikTok and custom servers are pasted in, with a
+    // hint where to find them.
+    void show_server() { show_server(false); }
+    void show_second_server() { show_server(true); }
+    void show_server(bool second) {
+        const auto& destination = second ? settings_.destination2 : settings_.destination;
+        const bool typed = rec::app::typed_server(destination);
+        const auto url = second ? rec::app::second_server_url(settings_) : rec::app::server_url(settings_);
+        HWND server = get(second ? kServer2 : kServer);
+        SetWindowTextW(server, wide(typed ? rec::app::typed_server_of(settings_, second) : url).c_str());
+        SendMessageW(server, EM_SETREADONLY, !typed, 0);
+        SendMessageW(server, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(wide(rec::app::server_hint(destination)).c_str()));
+        SetWindowTextW(get(second ? kKey2 : kKey), wide(load_key(url)).c_str());
     }
 
     void read_settings() {
@@ -1236,10 +1236,11 @@ private:
         s.camera_device = cameras_[std::min(at(kCameraDevice), cameras_.size() - 1)].id;
         s.image = checked(kImage);
         s.preview = checked(kShowPreview);
+        // A destination's typed server is read before switching to another.
+        if (rec::app::typed_server(s.destination)) rec::app::set_typed_server(s, false, narrow(text_of(get(kServer))));
+        if (rec::app::typed_server(s.destination2)) rec::app::set_typed_server(s, true, narrow(text_of(get(kServer2))));
         s.destination = kServices[at(kService)].value;
-        if (s.destination == "custom") s.server = narrow(text_of(get(kServer)));
         s.destination2 = kSecondServices[at(kService2)].value;
-        if (s.destination2 == "custom") s.server2 = narrow(text_of(get(kServer2)));
         const auto kbps = std::wcstoul(text_of(get(kBitrate)).c_str(), nullptr, 10);
         s.stream_kbps = static_cast<std::uint32_t>(std::clamp<unsigned long>(kbps ? kbps : 6000, 500, 50000));
     }
@@ -1340,13 +1341,13 @@ private:
             }
             return;
         case kServer:
-            if (code == EN_KILLFOCUS && settings_.destination == "custom") {
+            if (code == EN_KILLFOCUS && rec::app::typed_server(settings_.destination)) {
                 read_settings();
                 SetWindowTextW(get(kKey), wide(load_key(rec::app::server_url(settings_))).c_str());
             }
             return;
         case kServer2:
-            if (code == EN_KILLFOCUS && settings_.destination2 == "custom") {
+            if (code == EN_KILLFOCUS && rec::app::typed_server(settings_.destination2)) {
                 read_settings();
                 SetWindowTextW(get(kKey2), wide(load_key(rec::app::second_server_url(settings_))).c_str());
             }
