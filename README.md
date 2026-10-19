@@ -26,13 +26,15 @@ cmake --build build --config Release --parallel
 .\build\Release\rec.exe record -r 1080p -f 60 -t 10 --system-audio --mic default -o demo.mp4
 ```
 
-Windows uses Windows.Graphics.Capture for the display, a Direct3D 11 video processor to scale and convert to NV12 on the GPU, WASAPI for system audio (loopback) and the microphone, and the Media Foundation sink writer with the hardware encoder of the GPU that drives the display. Frames stay on the GPU from capture to encoder. Windows writes ISO MP4 structure for both `.mp4` and `.mov`. If Windows blocks the microphone, turn on "Let desktop apps access your microphone" in Settings > Privacy & security > Microphone.
+Windows uses Windows.Graphics.Capture for the display, a Lanczos-3 pixel shader to scale and a Direct3D 11 video processor to convert to NV12 on the GPU, WASAPI for system audio (loopback) and the microphone, and the Media Foundation sink writer with the hardware encoder of the GPU that drives the display. Frames stay on the GPU from capture to encoder. Windows writes ISO MP4 structure for both `.mp4` and `.mov`. If Windows blocks the microphone, turn on "Let desktop apps access your microphone" in Settings > Privacy & security > Microphone.
 
 ### macOS permissions
 
 macOS may prompt for Screen Recording permission on the first attempt. Allow access to the app that starts the CLI in System Settings > Privacy & Security > Screen & System Audio Recording, then retry.
 
 `-r native` selects the display's native pixel size. The other resolution presets bound the output dimensions without stretching or upscaling. If a recording already exists at the output path, rec refuses to overwrite it.
+
+Below native size, rec captures at the native size and shrinks each frame on the GPU with a Lanczos-3 filter, so fine detail such as thin lines and small text averages out instead of shimmering (aliasing). On macOS, Core Image does this in the compositor; on Windows, a two-pass shader. `--scaler fast` lets the capture service scale instead (ScreenCaptureKit, or the Direct3D 11 video processor): less GPU work, but fine patterns turn into moiré. `rec probe --sample` reports the luma spread of a rectangle, which the smoke tests use to compare the two.
 
 ### Windows and regions
 
@@ -236,7 +238,6 @@ The live mean moved from about −12 ms on the first day to about −24 ms the n
 - The output latency is read once, when recording starts. Switching output devices mid-recording keeps the old offset.
 - A microphone that is not 48 kHz is resampled linearly per buffer for the mix. Its stem is converted by AVFoundation.
 - The file writer retries transient encoder backpressure for up to 500 ms per timestamp. Overload beyond that deadline may drop frames; drops are counted and must be evaluated under stress.
-- ScreenCaptureKit performs scaling for non-native output. GPU Lanczos quality is future work.
 - Capturing and encoding with macOS cannot be verified on a Linux host. See the CI workflow for the macOS and Windows build and smoke gates. GPU-less CI runners may lack an HEVC encoder; the Windows smoke reports that case as skipped.
 - There are no credible CPU, RAM, binary-size or quality comparisons with rec-rs yet.
 

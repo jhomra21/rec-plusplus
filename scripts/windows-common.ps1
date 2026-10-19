@@ -127,6 +127,35 @@ Add-Type -Name Dpi -Namespace Native -MemberDefinition '[DllImport("user32.dll")
     Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     throw "the $title window did not open"
 }
+# A borderless window of vertical black and white stripes, each $stripe pixels wide.
+function Show-StripeWindow([string]$title, [int]$x, [int]$y, [int]$width, [int]$height, [int]$stripe, [string]$dir) {
+    $script = Join-Path $dir "$title.ps1"
+    Set-Content -Path $script -Value @"
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+Add-Type -Name Dpi -Namespace Native -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
+[Native.Dpi]::SetProcessDPIAware() | Out-Null
+`$tile = New-Object Drawing.Bitmap ($stripe * 2), 1
+`$colors = @([Drawing.Color]::Black, [Drawing.Color]::White)
+for (`$i = 0; `$i -lt $stripe * 2; `$i++) { `$tile.SetPixel(`$i, 0, `$colors[[int][math]::Floor(`$i / $stripe)]) }
+`$form = New-Object Windows.Forms.Form
+`$form.Text = '$title'
+`$form.FormBorderStyle = 'None'
+`$form.StartPosition = 'Manual'
+`$form.Bounds = New-Object Drawing.Rectangle $x, $y, $width, $height
+`$form.TopMost = `$true
+`$form.BackgroundImage = `$tile
+`$form.BackgroundImageLayout = 'Tile'
+[Windows.Forms.Application]::Run(`$form)
+"@
+    $process = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script) -PassThru -WindowStyle Hidden
+    for ($i = 0; $i -lt 100; $i++) {
+        $process.Refresh()
+        if ($process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq $title) { Start-Sleep -Milliseconds 300; return $process }
+        Start-Sleep -Milliseconds 100
+    }
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    throw "the $title window did not open"
+}
 function Expect-Text([string]$text, [string]$expected) {
     if (-not $text.Contains($expected)) { throw "expected '$expected' in: $text" }
 }

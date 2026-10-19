@@ -32,6 +32,7 @@ try {
     if (-not (Invoke-Rec $rec @('--help')).Text.Contains('native screen recorder')) { throw 'help text' }
     Expect-Failure 'fps must be' @('record', '--fps', 'invalid')
     Expect-Failure 'resolution must be' @('record', '--resolution', 'gigantic')
+    Expect-Failure 'scaler must be' @('record', '--scaler', 'bicubic')
     Expect-Failure 'requires --test-pattern' @('record', '--test-tone')
     Expect-Failure 'requires --test-pattern' @('record', '--test-mic')
     Expect-Failure 'needs a real screen' @('record', '--test-pattern', '--system-audio')
@@ -227,7 +228,33 @@ try {
     Expect-Color $left 'sample_8' 'white'
     Expect-Color $right 'sample_2' 'white'
     Expect-Color $right 'sample_6' 'light blue'
-    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
+    # Scaling quality: 1-pixel stripes beside 8-pixel stripes, a 1920x1080 region recorded at
+    # 720p. Lanczos must turn the fine stripes into flat gray (no moire) and keep the coarse
+    # ones sharp; the fast scaler's numbers are kept for comparison.
+    if ($screenW -ge 1920 -and $screenH -ge 1080) {
+        $fine = Show-StripeWindow 'rec-stripes-fine' 0 0 960 1080 1 $tmp
+        $coarse = Show-StripeWindow 'rec-stripes-coarse' 960 0 960 1080 8 $tmp
+        $spreads = @{}
+        try {
+            foreach ($scaler in 'lanczos', 'fast') {
+                $scaled = Record "scaler-$scaler" "scaler-$scaler.mp4" @('--region', '0,0,1920,1080', '-r', '720p', '-f', '30', '-t', '2',
+                    '--no-cursor', '--scaler', $scaler)
+                if ($scaled.Probe.width -ne '1280' -or $scaled.Probe.height -ne '720') { throw "scaler-$scaler is $($scaled.Probe.width)x$($scaled.Probe.height)" }
+                $finePath = Join-Path $artifacts "scaler-$scaler.mp4"
+                $spreads["$scaler-fine"] = [double](Get-Probe $rec $finePath (Join-Path $artifacts "scaler-$scaler-fine.probe") @('--sample', '100,100,440,520'))['sample_1_spread']
+                $spreads["$scaler-coarse"] = [double](Get-Probe $rec $finePath (Join-Path $artifacts "scaler-$scaler-coarse.probe") @('--sample', '740,100,440,520'))['sample_1_spread']
+            }
+        } finally {
+            Stop-Process -Id $fine.Id, $coarse.Id -Force -ErrorAction SilentlyContinue
+        }
+        $summary = ($spreads.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$([Math]::Round($_.Value, 1))" }) -join ' '
+        Set-Content -Path (Join-Path $artifacts 'scaler.txt') -Value $summary
+        Write-Host "Luma spread (fine stripes should be flat, coarse ones sharp): $summary"
+        if ($spreads['lanczos-fine'] -gt 10) { throw "Lanczos left moire in the fine stripes: $summary" }
+        if ($spreads['lanczos-coarse'] -lt 90) { throw "Lanczos blurred the coarse stripes: $summary" }
+    } else {
+        Write-Host "Skipping the scaling-quality check: display 1 is ${screenW}x${screenH}, it needs 1920x1080"
+    }    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
     # is unmuted 3.5 s in: no beep with the first flash. Mixed with the mic, the tone is turned
     # down 6 dB, then muted 2.5 s in: the mix has no beeps after that.
     $unmutePath = Join-Path $artifacts 'unmute.mp4'

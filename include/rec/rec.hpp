@@ -22,6 +22,12 @@ enum class AudioTracks {
 
 enum class AudioInput { system, microphone };
 
+// How the capture is scaled to the output size. lanczos: rec captures at the source's native
+// size and scales on the GPU with a Lanczos-3 filter, sharp and without aliasing. fast: the
+// capture service scales (ScreenCaptureKit, or the Direct3D 11 video processor), with less GPU
+// work and softer or aliased fine detail.
+enum class Scaler { lanczos, fast };
+
 // A rectangle of a display in its pixels, from the display's top-left corner.
 struct Region {
     std::int32_t x = 0;
@@ -65,6 +71,7 @@ struct Options {
     std::uint32_t fps = 60;
     std::uint32_t bitrate_mbps = 0; // 0 = selected from resolution
     Codec codec = Codec::automatic;
+    Scaler scaler = Scaler::lanczos;
     bool cursor = true;
     // Mark mouse presses on the main capture: a circle at the pointer, yellow for the left
     // button and blue for the right, that fades out after release.
@@ -189,7 +196,10 @@ struct Probe {
     double av_offset_ms = 0; // Mean audio minus video; positive means audio is late.
     double av_offset_max_ms = 0; // Largest absolute offset.
     std::vector<double> flashes, beeps;  // Every detected flash and beep, in seconds.
-    struct Color { std::uint8_t r = 0, g = 0, b = 0; };
+    struct Color {
+        std::uint8_t r = 0, g = 0, b = 0;
+        double spread = 0; // Standard deviation of full-range luma (0 to 255) across the rectangle.
+    };
     // With a sample rectangle: its mean color in the first frame of each second.
     std::vector<Color> samples;
 };

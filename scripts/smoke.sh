@@ -45,6 +45,7 @@ color() {
 "$rec" --help | grep -q 'native screen recorder'
 expect_failure 'fps must be' record --fps invalid
 expect_failure 'resolution must be' record --resolution gigantic
+expect_failure 'scaler must be' record --scaler bicubic
 expect_failure 'requires --test-pattern' record --test-tone
 expect_failure 'requires --test-pattern' record --test-mic
 expect_failure 'needs a real screen' record --test-pattern --system-audio
@@ -62,6 +63,7 @@ if [[ "$(uname -s)" != Darwin ]]; then
 else
   # The live A/V sync stimulus must at least compile.
   swiftc -typecheck "$root/scripts/flash-beep.swift"
+  swiftc -typecheck "$root/scripts/stripes.swift"
 
   # Hardware encode and AVFoundation decode without screen permissions. A fresh CI VM's first
   # VideoToolbox session can stall long enough to drop frames, so an unmeasured recording warms it.
@@ -387,6 +389,31 @@ else
     grep -qx 'height=360' "$artifacts/region.probe"
     grep -qx 'frames=90' "$artifacts/region.probe"
     expect_failure 'does not fit display 1' record --display 1 --region 0,0,99999,100 -t 1 -o "$tmp/too-big.mov"
-  fi
+    # Scaling quality: 1-pixel stripes beside 8-pixel stripes, a 1920x1080 region recorded at
+    # 720p. Lanczos must turn the fine stripes into flat gray (no moire) and keep the coarse
+    # ones sharp; the fast scaler's numbers are kept for comparison.
+    swiftc -O -o "$tmp/stripes" "$root/scripts/stripes.swift"
+    "$tmp/stripes" 0 200 1920 1080 >"$artifacts/stripes.log" &
+    stripes=$!
+    for _ in $(seq 50); do grep -qE '^(shown|small)$' "$artifacts/stripes.log" && break; sleep 0.1; done
+    if grep -qx small "$artifacts/stripes.log"; then
+      echo "scaling quality: not checked, display 1 is too small ($(value pixels "$artifacts/stripes.log"))"
+    else
+      for scaler in lanczos fast; do
+        "$rec" record --display 1 --region 0,200,1920,1080 -r 720p -f 30 -t 2 --no-cursor --scaler "$scaler" \
+          -o "$artifacts/scaler-$scaler.mov" | tee "$artifacts/scaler-$scaler.record.log"
+        "$rec" probe "$artifacts/scaler-$scaler.mov" --sample 100,100,440,520 | tee "$artifacts/scaler-$scaler-fine.probe"
+        "$rec" probe "$artifacts/scaler-$scaler.mov" --sample 740,100,440,520 | tee "$artifacts/scaler-$scaler-coarse.probe"
+        grep -qx 'width=1280' "$artifacts/scaler-$scaler-fine.probe"
+      done
+      kill "$stripes" 2>/dev/null || true
+      for scaler in lanczos fast; do
+        echo "$scaler-fine=$(value sample_1_spread "$artifacts/scaler-$scaler-fine.probe")" \
+          "$scaler-coarse=$(value sample_1_spread "$artifacts/scaler-$scaler-coarse.probe")"
+      done | tee "$artifacts/scaler.txt"
+      within "$(value sample_1_spread "$artifacts/scaler-lanczos-fine.probe")" 0 10
+      within "$(value sample_1_spread "$artifacts/scaler-lanczos-coarse.probe")" 90 128
+    fi
+    kill "$stripes" 2>/dev/null || true  fi
 fi
 echo 'smoke passed'

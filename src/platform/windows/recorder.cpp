@@ -38,6 +38,7 @@
 #include "core/sync.hpp"
 #include "platform/windows/displays.hpp"
 #include "platform/windows/overlay.hpp"
+#include "platform/windows/scaler.hpp"
 #include "platform/windows/stream.hpp"
 
 #include <algorithm>
@@ -833,6 +834,9 @@ public:
         for (auto& buffer : pattern_) buffer.Reset();
         input_view_.Reset();
         intermediate_.Reset();
+        scaled_view_.Reset();
+        scaled_ = nullptr;
+        lanczos_.reset();
         processor_.Reset();
         processor_enum_.Reset();
         video_context_.Reset();
@@ -1154,7 +1158,32 @@ private:
                 hr = video_device_->CreateVideoProcessorOutputView(slot.texture.Get(), processor_enum_.Get(), &view, &slot.view);
             if (FAILED(hr)) return {failed("could not allocate video frames", hr)};
         }
+        if (options_.scaler == Scaler::lanczos) {
+            lanczos_ = std::make_unique<win::LanczosScaler>();
+            if (auto ready = lanczos_->start(device_.Get()); !ready) return ready;
+        }
         return {};
+    }
+
+    // Shrinks the source rectangle of intermediate_ to width x height with the Lanczos scaler
+    // and returns an input view of the result, or null.
+    ID3D11VideoProcessorInputView* lanczos(const RECT& source, UINT width, UINT height) {
+        ComPtr<ID3D11Multithread> multithread;
+        context_.As(&multithread);
+        if (multithread) multithread->Enter();
+        ID3D11Texture2D* scaled = lanczos_->scale(context_.Get(), intermediate_.Get(), source, width, height);
+        if (multithread) multithread->Leave();
+        if (!scaled) return nullptr;
+        if (scaled != scaled_) {
+            scaled_view_.Reset();
+            scaled_ = nullptr;
+            D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC view{};
+            view.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+            if (FAILED(video_device_->CreateVideoProcessorInputView(scaled, processor_enum_.Get(), &view, &scaled_view_)))
+                return nullptr;
+            scaled_ = scaled;
+        }
+        return scaled_view_.Get();
     }
 
     // Scales and converts one captured BGRA surface into an NV12 slot on the GPU.
@@ -1190,12 +1219,21 @@ private:
                       std::min(source.bottom, static_cast<LONG>(r.y + static_cast<LONG>(r.height)))};
         }
         if (source.right - source.left < 2 || source.bottom - source.top < 2) return false;
-        video_context_->VideoProcessorSetStreamSourceRect(processor_.Get(), 0, TRUE, &source);
         const RECT dest = fit(source.right - source.left, source.bottom - source.top, size_.width, size_.height);
+        const auto dest_width = static_cast<UINT>(dest.right - dest.left), dest_height = static_cast<UINT>(dest.bottom - dest.top);
+        ID3D11VideoProcessorInputView* input = input_view_.Get();
+        // The video processor then only converts to NV12; it still enlarges a shrunken window.
+        if (lanczos_ && (dest_width < static_cast<UINT>(source.right - source.left) ||
+                         dest_height < static_cast<UINT>(source.bottom - source.top))) {
+            input = lanczos(source, dest_width, dest_height);
+            if (!input) return false;
+            source = {0, 0, static_cast<LONG>(dest_width), static_cast<LONG>(dest_height)};
+        }
+        video_context_->VideoProcessorSetStreamSourceRect(processor_.Get(), 0, TRUE, &source);
         video_context_->VideoProcessorSetStreamDestRect(processor_.Get(), 0, TRUE, &dest);
         D3D11_VIDEO_PROCESSOR_STREAM stream{};
         stream.Enable = TRUE;
-        stream.pInputSurface = input_view_.Get();
+        stream.pInputSurface = input;
         return SUCCEEDED(video_context_->VideoProcessorBlt(processor_.Get(), slots_[slot].view.Get(), 0, 1, &stream));
     }
 
@@ -1627,6 +1665,9 @@ private:
     ComPtr<ID3D11Texture2D> intermediate_;
     ComPtr<ID3D11VideoProcessorInputView> input_view_;
     Size intermediate_size_{};
+    std::unique_ptr<win::LanczosScaler> lanczos_;  // With Scaler::lanczos.
+    ID3D11Texture2D* scaled_ = nullptr;       // The scaler's output that scaled_view_ reads.
+    ComPtr<ID3D11VideoProcessorInputView> scaled_view_;
     ComPtr<IMFDXGIDeviceManager> manager_;
     UINT reset_token_ = 0;
     wgdx::Direct3D11::IDirect3DDevice winrt_device_{nullptr};
@@ -1785,10 +1826,14 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
                 if (sample && time >= next_sample) {
                     const auto& r = *sample;
                     const BYTE* chroma = scan + static_cast<std::ptrdiff_t>(coded_height) * pitch;
-                    double y_sum = 0, u_sum = 0, v_sum = 0;
+                    double y_sum = 0, y_squares = 0, u_sum = 0, v_sum = 0;
                     for (UINT32 y = 0; y < r.height; ++y)
-                        for (UINT32 x = 0; x < r.width; ++x)
-                            y_sum += scan[static_cast<std::ptrdiff_t>(r.y + y) * pitch + r.x + x];
+                        for (UINT32 x = 0; x < r.width; ++x) {
+                            const double luma = scan[static_cast<std::ptrdiff_t>(r.y + y) * pitch + r.x + x];
+                            y_sum += luma;
+                            y_squares += luma * luma;
+                        }
+                    const double pixels = static_cast<double>(r.width) * r.height;
                     const UINT32 cw = r.width / 2, ch = r.height / 2;
                     for (UINT32 y = 0; y < ch; ++y)
                         for (UINT32 x = 0; x < cw; ++x) {
@@ -1796,8 +1841,9 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
                             u_sum += uv[0];
                             v_sum += uv[1];
                         }
-                    probe.samples.push_back(core::studio_rgb(y_sum / (static_cast<double>(r.width) * r.height),
-                                                             u_sum / std::max(1u, cw * ch), v_sum / std::max(1u, cw * ch)));
+                    probe.samples.push_back(core::studio_rgb(y_sum / pixels, u_sum / std::max(1u, cw * ch), v_sum / std::max(1u, cw * ch)));
+                    const double mean = y_sum / pixels;
+                    probe.samples.back().spread = std::sqrt(std::max(0.0, y_squares / pixels - mean * mean)) * 255.0 / 219.0;
                     next_sample = (time / kTicks + 1) * kTicks;
                 }
                 planar->Unlock2D();

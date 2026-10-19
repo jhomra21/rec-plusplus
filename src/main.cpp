@@ -224,6 +224,7 @@ void usage() {
                  "  -t, --duration SECONDS         Recorded length, excluding pauses (0 = until stopped)\n"
                  "  --codec NAME                   auto, h264, hevc, or prores (ProRes 422: macOS, .mov)\n"
                  "  --bitrate MBPS                 Target megabits/second (0 = automatic)\n"
+                 "  --scaler NAME                  lanczos (GPU Lanczos-3 from native size, default) or fast (capture service)\n"
                  "  --no-cursor                    Do not record the cursor\n"
                  "  --clicks                       Mark mouse presses: yellow left, blue right\n"
                  "  --system-audio                 Record system audio\n"
@@ -255,7 +256,8 @@ void usage() {
                  "audio, q or Ctrl-C to stop.\n"
                  "With stdin piped, send lines: pause, resume, toggle, save, show N|screen, hide N|screen,\n"
                  "move N|screen X,Y,W,H, mute system|mic, unmute system|mic, volume system|mic DB, stop.\n"
-                 "rec probe --sample reports the mean color of a rectangle (video pixels) once a second.\n";
+                 "rec probe --sample reports the mean color of a rectangle (video pixels) once a second, and the spread\n"
+                 "(standard deviation) of its luma, which shows detail and aliasing.\n";
 }
 
 bool integer(std::string_view s, std::uint32_t& out) {
@@ -379,6 +381,10 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
             else if (value == "hevc") o.codec = rec::Codec::hevc;
             else if (value == "prores") o.codec = rec::Codec::prores;
             else { error = "codec must be auto, h264, hevc, or prores"; return false; }
+        } else if (arg == "--scaler") {
+            if (value == "lanczos") o.scaler = rec::Scaler::lanczos;
+            else if (value == "fast") o.scaler = rec::Scaler::fast;
+            else { error = "scaler must be lanczos or fast"; return false; }
         } else if (arg == "--bitrate") {
             if (!integer(value, o.bitrate_mbps) || o.bitrate_mbps > 300) { error = "bitrate must be between 0 and 300 Mb/s"; return false; }
         } else if (arg == "--stream") {
@@ -588,7 +594,8 @@ int main(int argc, char** argv) {
                   << "\nav_offset_ms=" << probe.av_offset_ms
                   << "\nav_offset_max_ms=" << probe.av_offset_max_ms << '\n';
         for (std::size_t i = 0; i < probe.samples.size(); ++i)
-            std::cout << "sample_" << i << '=' << +probe.samples[i].r << ',' << +probe.samples[i].g << ',' << +probe.samples[i].b << '\n';
+            std::cout << "sample_" << i << '=' << +probe.samples[i].r << ',' << +probe.samples[i].g << ',' << +probe.samples[i].b
+                      << "\nsample_" << i << "_spread=" << probe.samples[i].spread << '\n';
         const auto times = [](const char* key, const std::vector<double>& values) {
             std::cout << key << '=';
             for (std::size_t i = 0; i < values.size(); ++i) {

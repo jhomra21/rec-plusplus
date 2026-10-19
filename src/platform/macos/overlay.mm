@@ -463,14 +463,16 @@ public:
             if (screen_visible) mark_count = clicks_->marks(now, click_area(), width_, height_, screen_area, marks);
         }
         const bool whole = screen_visible && screen_area.x <= 0 && screen_area.y <= 0 && screen_area.width >= 1 && screen_area.height >= 1;
-        if (whole && !count && !mark_count) return CVPixelBufferRetain(base);
+        // A capture at its native size (Scaler::lanczos) is shrunk here.
+        const bool fits = CVPixelBufferGetWidth(base) == width_ && CVPixelBufferGetHeight(base) == height_;
+        if (whole && fits && !count && !mark_count) return CVPixelBufferRetain(base);
         @autoreleasepool {
             CVPixelBufferRef out = nullptr;
             if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool_, &out) != kCVReturnSuccess) return nullptr;
             CVBufferPropagateAttachments(base, out);
             const CGRect frame = CGRectMake(0, 0, width_, height_);
             CIImage* result = nil;
-            if (whole) {
+            if (whole && fits) {
                 result = [CIImage imageWithCVPixelBuffer:base];
             } else {
                 result = [[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0]] imageByCroppingToRect:frame];
@@ -610,12 +612,22 @@ private:
         const CGRect shown = CGRectMake(extent.origin.x + p.u0 * pw, extent.origin.y + (1 - p.v1) * ph,
                                         (p.u1 - p.u0) * pw, (p.v1 - p.v0) * ph);
         const CGRect target = CGRectMake(p.left, height_ - p.bottom, p.right - p.left, p.bottom - p.top);
+        const double sx = target.size.width / shown.size.width, sy = target.size.height / shown.size.height;
+        CIImage* cropped = [picture imageByCroppingToRect:shown];
+        if (sx < 1 || sy < 1) {
+            // Lanczos-3, widened by the scale factor, so fine detail averages out instead of
+            // aliasing. Repeating the edge pixels keeps the border from fading to transparent.
+            CIImage* source = [[cropped imageByClampingToExtent]
+                imageByApplyingTransform:CGAffineTransformMakeTranslation(-shown.origin.x, -shown.origin.y)];
+            CIImage* scaled = [source imageByApplyingFilter:@"CILanczosScaleTransform"
+                                         withInputParameters:@{kCIInputScaleKey: @(sy), kCIInputAspectRatioKey: @(sx / sy)}];
+            return [[scaled imageByApplyingTransform:CGAffineTransformMakeTranslation(target.origin.x, target.origin.y)]
+                imageByCroppingToRect:target];
+        }
         CGAffineTransform move = CGAffineTransformMakeTranslation(-shown.origin.x, -shown.origin.y);
-        move = CGAffineTransformConcat(move, CGAffineTransformMakeScale(target.size.width / shown.size.width,
-                                                                        target.size.height / shown.size.height));
+        move = CGAffineTransformConcat(move, CGAffineTransformMakeScale(sx, sy));
         move = CGAffineTransformConcat(move, CGAffineTransformMakeTranslation(target.origin.x, target.origin.y));
-        return [[[picture imageByCroppingToRect:shown] imageByApplyingTransform:move highQualityDownsample:YES]
-            imageByCroppingToRect:target];
+        return [[cropped imageByApplyingTransform:move highQualityDownsample:YES] imageByCroppingToRect:target];
     }
 
     std::uint32_t width_ = 0, height_ = 0;

@@ -661,7 +661,11 @@ public:
             overlays_ = std::make_unique<mac::Overlays>();
             if (auto started = overlays_->start(size_.width, size_.height, options_, click_source_); !started) {
                 overlays_.reset();
-                if (layered()) { stop(); return started; }
+                // Frames captured larger than the output cannot be encoded as they are.
+                if (layered() || capture_size_.width != size_.width || capture_size_.height != size_.height) {
+                    stop();
+                    return started;
+                }
             }
             if (options_.preview_width) {
                 const auto size = core::preview_size(size_.width, size_.height, options_.preview_width);
@@ -922,6 +926,7 @@ private:
         if (!content) return {error};
         SCContentFilter* filter = nil;
         CGRect source = CGRectNull;
+        Size native{};
         if (options_.window) {
             SCWindow* window = nil;
             for (SCWindow* candidate in content.windows)
@@ -929,8 +934,9 @@ private:
             if (!window) return {"window not found; run `rec windows`"};
             if (!window.onScreen) return {"the window is not on screen; show it (not minimized, on this Space), then retry"};
             const double scale = pixels_per_point(content, window.frame);
-            size_ = output_size(options_, static_cast<std::uint32_t>(std::lround(window.frame.size.width * scale)),
-                                static_cast<std::uint32_t>(std::lround(window.frame.size.height * scale)));
+            native = {static_cast<std::uint32_t>(std::lround(window.frame.size.width * scale)),
+                      static_cast<std::uint32_t>(std::lround(window.frame.size.height * scale))};
+            size_ = output_size(options_, native.width, native.height);
             filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:window];
             click_source_.window = window.windowID;
         } else {
@@ -938,6 +944,7 @@ private:
                 return {"display index not found; run `rec devices`"};
             SCDisplay* display = content.displays[options_.display - 1];
             size_ = output_size(options_, display);
+            native = {native_size(display).width, native_size(display).height};
             if (options_.region) {
                 const auto& r = *options_.region;
                 const auto native = native_size(display);
@@ -950,15 +957,20 @@ private:
                 const double scale = display.width > 0 ? static_cast<double>(native.width) / display.width : 1.0;
                 source = CGRectMake(r.x / scale, r.y / scale, r.width / scale, r.height / scale);
                 size_ = output_size(options_, r.width, r.height);
+                native = {r.width, r.height};
             }
             filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
             click_source_ = {display.displayID, 0, options_.region};
         }
         if (size_.width < 2 || size_.height < 2) return {"the capture has no usable pixel dimensions"};
+        // With Lanczos, frames arrive at the source's native size and the compositor shrinks them.
+        capture_size_ = size_;
+        if (options_.scaler == Scaler::lanczos && (native.width > size_.width + 1 || native.height > size_.height + 1))
+            capture_size_ = {native.width & ~1u, native.height & ~1u};
         SCStreamConfiguration* config = [[SCStreamConfiguration alloc] init];
         if (!CGRectIsNull(source)) config.sourceRect = source;
-        config.width = size_.width;
-        config.height = size_.height;
+        config.width = capture_size_.width;
+        config.height = capture_size_.height;
         config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
         config.minimumFrameInterval = CMTimeMake(9, static_cast<int32_t>(options_.fps * 10));
         // Up to three pending frames plus the current one and the encoder's in-flight surfaces;
@@ -1423,6 +1435,7 @@ private:
 
     Options options_;
     Size size_{};
+    Size capture_size_{};  // What ScreenCaptureKit delivers: size_, or the native size to scale from.
     mutable std::mutex mutex_;
     std::condition_variable frames_ready_;
     FrameRing pending_;                 // Guarded by mutex_.
@@ -1496,13 +1509,20 @@ Probe::Color mean_color(CVPixelBufferRef pixel, const Region& r) {
     const auto* base = static_cast<const std::uint8_t*>(CVPixelBufferGetBaseAddress(pixel));
     const auto stride = CVPixelBufferGetBytesPerRow(pixel);
     const auto width = CVPixelBufferGetWidth(pixel), height = CVPixelBufferGetHeight(pixel);
-    double sum[3]{};
+    double sum[3]{}, luma_sum = 0, luma_squares = 0;
     std::uint64_t count = 0;
     for (std::size_t y = static_cast<std::size_t>(r.y); base && y < height && y < r.y + r.height; ++y)
-        for (std::size_t x = static_cast<std::size_t>(r.x); x < width && x < r.x + r.width; ++x, ++count)
-            for (int c = 0; c < 3; ++c) sum[c] += base[y * stride + x * 4 + c];
+        for (std::size_t x = static_cast<std::size_t>(r.x); x < width && x < r.x + r.width; ++x, ++count) {
+            const std::uint8_t* p = base + y * stride + x * 4;
+            for (int c = 0; c < 3; ++c) sum[c] += p[c];
+            const double luma = 0.0722 * p[0] + 0.7152 * p[1] + 0.2126 * p[2];
+            luma_sum += luma;
+            luma_squares += luma * luma;
+        }
     CVPixelBufferUnlockBaseAddress(pixel, kCVPixelBufferLock_ReadOnly);
     if (count) {
+        const double mean = luma_sum / count;
+        color.spread = std::sqrt(std::max(0.0, luma_squares / count - mean * mean));
         color.b = static_cast<std::uint8_t>(std::lround(sum[0] / count));
         color.g = static_cast<std::uint8_t>(std::lround(sum[1] / count));
         color.r = static_cast<std::uint8_t>(std::lround(sum[2] / count));
