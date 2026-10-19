@@ -41,6 +41,8 @@
 #include "platform/windows/scaler.hpp"
 #include "platform/windows/stream.hpp"
 
+#include <opus.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -2130,7 +2132,8 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
                 planar->Unlock2D();
             }
             flashes.feed(static_cast<double>(time) / kTicks, brightness);
-        }        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
+        }
+        if (flags & MF_SOURCE_READERF_ENDOFSTREAM) break;
     }
     if (!probe.frames) return {"no decoded frames"};
     probe.duration_seconds = static_cast<double>(end) / kTicks;
@@ -2147,11 +2150,24 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
         pcm->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio);
         pcm->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_Float);
         hr = audio_reader->SetCurrentMediaType(static_cast<DWORD>(audio), nullptr, pcm.Get());
-        if (FAILED(hr)) return {failed("could not decode audio", hr)};
+        // Windows Server has no Opus decoder; libopus (built in for WHIP) decodes the packets then.
+        ::OpusDecoder* opus = nullptr;
+        std::vector<float> opus_pcm;
+        if (FAILED(hr) && probe.audio_codec == "opus") {
+            int error = OPUS_OK;
+            opus = opus_decoder_create(48000, 2, &error);
+            if (error != OPUS_OK) opus = nullptr;
+            else opus_pcm.resize(5760 * 2);
+        }
+        struct OpusDone {
+            ::OpusDecoder*& decoder;
+            ~OpusDone() { if (decoder) opus_decoder_destroy(decoder); }
+        } opus_done{opus};
+        if (FAILED(hr) && !opus) return {failed("could not decode audio", hr)};
         ComPtr<IMFMediaType> actual;
         audio_reader->GetCurrentMediaType(static_cast<DWORD>(audio), &actual);
-        const UINT32 channels = std::max<UINT32>(1, MFGetAttributeUINT32(actual.Get(), MF_MT_AUDIO_NUM_CHANNELS, 2));
-        const UINT32 rate = std::max<UINT32>(1, MFGetAttributeUINT32(actual.Get(), MF_MT_AUDIO_SAMPLES_PER_SECOND, kMixRate));
+        const UINT32 channels = opus ? 2 : std::max<UINT32>(1, MFGetAttributeUINT32(actual.Get(), MF_MT_AUDIO_NUM_CHANNELS, 2));
+        const UINT32 rate = opus ? 48000 : std::max<UINT32>(1, MFGetAttributeUINT32(actual.Get(), MF_MT_AUDIO_SAMPLES_PER_SECOND, kMixRate));
         LONGLONG audio_end = 0;
         for (;;) {
             DWORD stream = 0, flags = 0;
@@ -2160,16 +2176,21 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
             hr = audio_reader->ReadSample(static_cast<DWORD>(audio), 0, &stream, &flags, &time, &sample);
             if (FAILED(hr)) return {failed("audio decode failed", hr)};
             if (sample) {
-                ++probe.audio_buffers;
                 ComPtr<IMFMediaBuffer> buffer;
                 BYTE* data = nullptr;
                 DWORD length = 0;
                 if (SUCCEEDED(sample->ConvertToContiguousBuffer(&buffer)) &&
                     SUCCEEDED(buffer->Lock(&data, nullptr, &length))) {
-                    const auto* samples = reinterpret_cast<const float*>(data);
-                    const std::size_t frames = length / sizeof(float) / channels;
-                    for (std::size_t frame = 0; frame < frames; ++frame) {
-                        float peak = 0;
+                    const float* samples = reinterpret_cast<const float*>(data);
+                    std::size_t frames = length / sizeof(float) / channels;
+                    if (opus) {
+                        const int decoded = opus_decode_float(opus, data, static_cast<opus_int32>(length), opus_pcm.data(),
+                                                              static_cast<int>(opus_pcm.size() / 2), 0);
+                        samples = opus_pcm.data();
+                        frames = decoded > 0 ? static_cast<std::size_t>(decoded) : 0;
+                    }
+                    if (frames) ++probe.audio_buffers;
+                    for (std::size_t frame = 0; frame < frames; ++frame) {                        float peak = 0;
                         for (UINT32 c = 0; c < channels; ++c) peak = std::max(peak, std::fabs(samples[frame * channels + c]));
                         beeps.feed(static_cast<double>(time) / kTicks + static_cast<double>(frame) / rate, peak);
                     }
