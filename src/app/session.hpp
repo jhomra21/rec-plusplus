@@ -40,7 +40,11 @@ struct Scene {
     std::string name;
     SceneItem screen, camera, image;
     std::vector<SceneItem> layers;    // One per Settings::layers, in order.
+    std::string vertical = "fit";     // How the vertical video shows it: one of kVerticalLayouts.
 };
+
+// The vertical video's size: 9:16 for TikTok, YouTube Shorts and Reels.
+inline constexpr std::uint32_t kVerticalWidth = 1080, kVerticalHeight = 1920;
 
 // With the camera and the image, the engine's 15 overlays.
 inline constexpr std::size_t kMaxLayers = 13;
@@ -79,6 +83,9 @@ struct Settings {
     std::string destination2 = "none";
     std::string server2;              // Custom second destination.
     std::string x_server, tiktok_server;  // Pasted from X Media Studio and TikTok LIVE Center.
+    // Send the vertical video instead of the landscape one to each destination.
+    bool destination_vertical = false, destination2_vertical = false;
+    bool vertical_movie = false;      // Also save the vertical video, as NAME-vertical.mp4.
     std::uint32_t stream_kbps = 6000;
     bool replay = false;              // Keep the last replay_seconds for Save Replay.
     std::uint32_t replay_seconds = 30;
@@ -131,6 +138,10 @@ inline constexpr std::array<Choice, 5> kCorners{{{"bottom-right", "Bottom right"
                                                 {"top-left", "Top left"},
                                                 {"custom", "Custom"}}};
 inline constexpr std::array<Choice, 3> kCameraSizes{{{"small", "Small"}, {"medium", "Medium"}, {"large", "Large"}}};
+// Fit: the whole landscape picture in the middle. Fill: its middle fills the frame and the
+// camera sits below. Split: the middle on top, the camera filling the bottom half.
+inline constexpr std::array<Choice, 3> kVerticalLayouts{
+    {{"fit", "Whole picture"}, {"fill", "Fill, sides cropped"}, {"split", "Screen above camera"}}};
 
 template <std::size_t N>
 bool is_choice(const std::array<Choice, N>& choices, const std::string& value) {
@@ -215,6 +226,14 @@ AreaDrag grab_area(const Area& area, double x, double y, double handle_x, double
 // margins.
 Area drag_area(const AreaDrag& drag, double x, double y);
 
+// Whether a recording composes the vertical video: saved, or sent to a destination.
+bool uses_vertical(const Settings& settings);
+// Where the vertical video shows a source of scene (kVerticalLayouts), for a landscape
+// picture aspect (width / height): the part of the landscape picture the layout keeps, mapped
+// into the vertical frame. camera says whether the capture has a camera; without one shown,
+// "split" fills the frame like "fill".
+Layout vertical_layout(const Scene& scene, const SourceRef& source, double aspect, bool camera);
+
 // rtmp:// or rtmps://host/app for the destination; the stream key is appended as the last
 // segment. The Twitch and YouTube presets use RTMPS.
 std::string server_url(const Settings& settings);
@@ -240,6 +259,7 @@ struct Status {
     bool system_audio = false, microphone = false;  // Sources in this recording.
     bool streaming = false;          // A stream was requested for this recording.
     bool live = false;               // Connected and sending.
+    bool vertical = false;           // This recording also makes the vertical video.
     bool reconnecting = false;       // Lost the server and trying again.
     std::uint32_t reconnects = 0;
     std::uint64_t stream_dropped = 0;
@@ -256,12 +276,15 @@ struct Status {
     std::string preview_error;       // Why it cannot.
     std::string error;               // Why the last recording failed or ended early.
     std::string saved;               // Movie the last recording saved; empty while one runs.
+    std::string saved_vertical;      // Its vertical video, when it saved one.
 };
 
 // Each source's overlay index in one capture.
 struct SourceIndices {
     std::optional<std::size_t> camera, image;
     std::vector<std::size_t> layers;
+    bool vertical = false;        // The capture composes the vertical video.
+    double aspect = 16.0 / 9;     // Of its landscape picture, for vertical_layout().
 };
 
 // One recording at a time, hosted by the background engine (cli/engine_client.hpp) so it
@@ -301,8 +324,9 @@ public:
     Result show_scene(const Settings& settings);
     // Changes a source's volume and mute at once; the source must be in this recording.
     Result set_volume(AudioInput input, int volume, bool muted);
-    // Copies the recording's newest preview frame when it is newer than frame.number.
-    bool preview(PreviewFrame& frame);
+    // Copies the recording's newest preview frame when it is newer than frame.number: the
+    // landscape picture, or the vertical video's with kSecondCanvas.
+    bool preview(PreviewFrame& frame, std::size_t canvas = kMainCanvas);
     // Whether the interface shows the preview; frames are made only while it does.
     void show_preview(bool on);
     // Shows the scene before recording: while idle, a capture of settings for preview() only
@@ -328,7 +352,7 @@ private:
     bool detach_requested_ = false;
     bool paused_on_attach_ = false;
     std::thread worker_;
-    std::string error_, stream_error_, saved_;
+    std::string error_, stream_error_, saved_, saved_vertical_;
     bool streaming_ = false, replay_ = false;
     bool preview_shown_ = true;
     SourceIndices indices_;              // This recording's.
@@ -350,7 +374,7 @@ private:
     bool idle_alive_ = false;           // A capture exists, starting, running or stopping.
     bool closing_ = false;
     SourceIndices idle_indices_;
-    const void* preview_source_ = nullptr;  // Whose frames preview() copied last.
+    const void* preview_source_[2] = {};  // Whose frames preview() copied last, per canvas.
 };
 
 // <prefix>-YYYY-MM-DD-HHMMSS.<format> in folder, with -2, -3 ... if that file exists.

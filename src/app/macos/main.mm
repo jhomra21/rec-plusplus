@@ -272,6 +272,8 @@ struct PreviewHit {
     NSButton *_record, *_pause, *_saveReplay, *_replay, *_systemAudio, *_microphone, *_cursor, *_clicks, *_stream, *_changeFolder, *_openFolder, *_showLast;
     NSButton *_camera, *_image, *_chooseImage, *_showPreview;
     NSButton *_newScene, *_deleteScene, *_sourceShown, *_addDisplay, *_addWindow, *_removeSource;
+    NSButton *_vertical, *_vertical2, *_verticalMovie;  // Which outputs get the vertical video.
+    NSPopUpButton* _verticalLayout;
     NSTextField* _sceneName;
     NSTableView* _sourcesTable;
     rec::app::SourceRef _selected;   // The source the Sources list selects.
@@ -292,6 +294,9 @@ struct PreviewHit {
     std::optional<rec::app::SourceRef> _hoverSource;
     State _shownState;
     rec::PreviewFrame _frame;
+    NSView* _preview2;               // The vertical video's, beside the other.
+    rec::PreviewFrame _frame2;
+    bool _verticalShown;
     NSTimer* _previewTimer;
     bool _previewing;
 }
@@ -794,6 +799,18 @@ struct PreviewHit {
         [_previewHint.centerYAnchor constraintEqualToAnchor:_preview.centerYAnchor],
         [_preview.heightAnchor constraintEqualToConstant:440 * 9.0 / 16],
     ]];
+    _preview2 = [[NSView alloc] init];
+    _preview2.wantsLayer = YES;
+    _preview2.layer.backgroundColor = [NSColor colorWithWhite:0.11 alpha:1].CGColor;
+    _preview2.layer.contentsGravity = kCAGravityResizeAspect;
+    _preview2.accessibilityElement = YES;
+    _preview2.accessibilityRole = NSAccessibilityImageRole;
+    _preview2.accessibilityLabel = @"Vertical video preview";
+    _preview2.hidden = YES;
+    [NSLayoutConstraint activateConstraints:@[
+        [_preview2.heightAnchor constraintEqualToConstant:440 * 9.0 / 16],
+        [_preview2.widthAnchor constraintEqualToConstant:440 * 9.0 / 16 * 9 / 16],
+    ]];
 
     _record = [self button:@"Start Recording" action:@selector(toggleRecord:)];
     _record.controlSize = NSControlSizeLarge;
@@ -837,9 +854,20 @@ struct PreviewHit {
     for (const auto& choice : kSecondServices) [_service2 addItemWithTitle:ns(choice.label)];
     _server2 = [self field:@"Second server URL" secure:NO];
     _key2 = (NSSecureTextField*)[self field:@"Second stream key" secure:YES];
-    NSGridView* live = [self grid:@[@[_stream], @[label(@"Service"), _service], @[label(@"Server URL"), _server],
+    // Each destination gets the landscape video or, ticked, the vertical one.
+    _vertical = [self check:@"Vertical"];
+    _vertical.accessibilityLabel = @"Stream the vertical video";
+    _vertical2 = [self check:@"Vertical"];
+    _vertical2.accessibilityLabel = @"Stream the vertical video to the second server";
+    const auto serviceRow = ^NSStackView*(NSPopUpButton* service, NSButton* vertical) {
+        NSStackView* row = [NSStackView stackViewWithViews:@[service, vertical]];
+        row.distribution = NSStackViewDistributionFill;
+        [vertical setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+        return row;
+    };
+    NSGridView* live = [self grid:@[@[_stream], @[label(@"Service"), serviceRow(_service, _vertical)], @[label(@"Server URL"), _server],
                                     @[label(@"Stream key"), _key], @[label(@"Bitrate (kb/s)"), _bitrate],
-                                    @[label(@"Also stream to"), _service2], @[label(@"Server URL"), _server2],
+                                    @[label(@"Also stream to"), serviceRow(_service2, _vertical2)], @[label(@"Server URL"), _server2],
                                     @[label(@"Stream key"), _key2]]];
 
     _replay = [self check:@"Keep the last"];
@@ -875,7 +903,10 @@ struct PreviewHit {
     NSStackView* sceneButtons = [NSStackView stackViewWithViews:@[_newScene, _deleteScene]];
     sceneButtons.distribution = NSStackViewDistributionFillEqually;
     _sceneName = [self field:@"Scene name" secure:NO];
-    NSGridView* scenes = [self grid:@[@[label(@"Scene"), _scene], @[sceneButtons], @[label(@"Name"), _sceneName]]];
+    _verticalLayout = [self popup:@"Vertical video layout"];
+    for (const auto& choice : rec::app::kVerticalLayouts) [_verticalLayout addItemWithTitle:ns(choice.label)];
+    NSGridView* scenes = [self grid:@[@[label(@"Scene"), _scene], @[sceneButtons], @[label(@"Name"), _sceneName],
+                                      @[label(@"Vertical"), _verticalLayout]]];
     [scenes columnAtIndex:0].width = 50;
     _sourcesTable = [[NSTableView alloc] init];
     NSTableColumn* sourceColumn = [[NSTableColumn alloc] initWithIdentifier:@"source"];
@@ -908,12 +939,14 @@ struct PreviewHit {
     _showLast = [self button:@"Show Last Recording" action:@selector(showLast:)];
     NSStackView* folderButtons = [NSStackView stackViewWithViews:@[_changeFolder, _openFolder, _showLast]];
     folderButtons.distribution = NSStackViewDistributionFillEqually;
+    _verticalMovie = [self check:@"Also save a vertical video (9:16, MP4)"];
 
     // Status and preview side by side over two columns: what and how to record on the left,
     // where it goes on the right, and the scenes in a narrower third column. One column would
     // be taller than a 13-inch screen.
     NSArray<NSView*>* status = @[_status, _detail, _live, meters, buttons];
-    NSArray<NSView*>* left = @[header(@"Capture"), capture, header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons];
+    NSArray<NSView*>* left = @[header(@"Capture"), capture, header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons,
+                               _verticalMovie];
     NSArray<NSView*>* right = @[header(@"Live stream"), live, header(@"Replay"), replay];
     NSArray<NSView*>* third = @[header(@"Scenes"), scenes, label(@"Sources"), sourcesScroll, _sourceShown, sourceButtons,
                                 header(@"Camera and image"), camera];
@@ -929,7 +962,11 @@ struct PreviewHit {
     };
     NSStackView* statusColumn = column(status, 440);
     _showPreview = [self check:@"Show preview"];
-    NSStackView* top = [NSStackView stackViewWithViews:@[statusColumn, column(@[_preview, _showPreview], 440)]];
+    // With the vertical video, its preview stands beside the landscape one.
+    NSStackView* previews = [NSStackView stackViewWithViews:@[_preview, _preview2]];
+    previews.distribution = NSStackViewDistributionFill;
+    previews.spacing = 8;
+    NSStackView* top = [NSStackView stackViewWithViews:@[statusColumn, column(@[previews, _showPreview], 440)]];
     top.alignment = NSLayoutAttributeTop;
     top.spacing = 30;
     NSStackView* leftColumn = column(left, 440);
@@ -980,6 +1017,9 @@ struct PreviewHit {
     _stream.state = s.stream ? NSControlStateValueOn : NSControlStateValueOff;
     [_service selectItemAtIndex:choice_index(kServices, s.destination)];
     [_service2 selectItemAtIndex:choice_index(kSecondServices, s.destination2)];
+    _vertical.state = s.destination_vertical ? NSControlStateValueOn : NSControlStateValueOff;
+    _vertical2.state = s.destination2_vertical ? NSControlStateValueOn : NSControlStateValueOff;
+    _verticalMovie.state = s.vertical_movie ? NSControlStateValueOn : NSControlStateValueOff;
     _bitrate.stringValue = [NSString stringWithFormat:@"%u", s.stream_kbps];
     _replay.state = s.replay ? NSControlStateValueOn : NSControlStateValueOff;
     const auto length = std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds);
@@ -1126,6 +1166,9 @@ struct PreviewHit {
     if (rec::app::typed_server(s.destination2)) rec::app::set_typed_server(s, true, utf8(_server2.stringValue));
     s.destination = kServices[at(_service)].value;
     s.destination2 = kSecondServices[at(_service2)].value;
+    s.destination_vertical = _vertical.state == NSControlStateValueOn;
+    s.destination2_vertical = _vertical2.state == NSControlStateValueOn;
+    s.vertical_movie = _verticalMovie.state == NSControlStateValueOn;
     s.replay = _replay.state == NSControlStateValueOn;
     s.replay_seconds = rec::app::kReplayLengths[std::min(at(_replayLength), rec::app::kReplayLengths.size() - 1)];
     s.camera = _camera.state == NSControlStateValueOn;
@@ -1153,6 +1196,12 @@ struct PreviewHit {
         }
         [self readSettings];
     }
+    // TikTok is watched on phones; its stream starts out vertical.
+    if (sender == _service && std::string(kServices[static_cast<std::size_t>(std::max<NSInteger>(0, _service.indexOfSelectedItem))].value) == "tiktok")
+        _vertical.state = NSControlStateValueOn;
+    if (sender == _service2 &&
+        std::string(kSecondServices[static_cast<std::size_t>(std::max<NSInteger>(0, _service2.indexOfSelectedItem))].value) == "tiktok")
+        _vertical2.state = NSControlStateValueOn;
     if (sender == _service) {
         [self readSettings];
         [self showServer];
@@ -1160,6 +1209,13 @@ struct PreviewHit {
     if (sender == _service2) {
         [self readSettings];
         [self showSecondServer];
+    }
+    if (sender == _vertical || sender == _vertical2 || sender == _verticalMovie) [self remember];
+    if (sender == _verticalLayout) {
+        rec::app::current_scene(_settings).vertical =
+            rec::app::kVerticalLayouts[static_cast<std::size_t>(std::max<NSInteger>(0, _verticalLayout.indexOfSelectedItem))].value;
+        [self applyScene];
+        return;
     }
     if (sender == _systemMute || sender == _micMute) {
         [self changeVolume:sender == _systemMute ? rec::AudioInput::system : rec::AudioInput::microphone];
@@ -1222,6 +1278,7 @@ struct PreviewHit {
     const auto& scene = rec::app::current_scene(_settings);
     [_scene selectItemAtIndex:static_cast<NSInteger>(_settings.scene)];
     if (![_sceneName.stringValue isEqualToString:ns(scene.name)]) _sceneName.stringValue = ns(scene.name);
+    [_verticalLayout selectItemAtIndex:choice_index(rec::app::kVerticalLayouts, scene.vertical)];
     [self showSceneSources];
     [self showCameraPlace];
 }
@@ -1584,15 +1641,21 @@ struct PreviewHit {
 - (void)tick:(NSTimer*)timer { [self refresh]; }
 
 - (void)showPreview:(NSTimer*)timer {
-    if (!_session->preview(_frame)) return;
-    NSData* data = [NSData dataWithBytes:_frame.pixels.data() length:_frame.pixels.size()];
+    if (_session->preview(_frame)) {
+        [self draw:_frame in:_preview];
+        _previewHint.hidden = YES;
+    }
+    if (_verticalShown && _session->preview(_frame2, rec::kSecondCanvas)) [self draw:_frame2 in:_preview2];
+}
+
+- (void)draw:(const rec::PreviewFrame&)frame in:(NSView*)view {
+    NSData* data = [NSData dataWithBytes:frame.pixels.data() length:frame.pixels.size()];
     CGDataProviderRef provider = CGDataProviderCreateWithCFData((__bridge CFDataRef)data);
     CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    CGImageRef image = CGImageCreate(_frame.width, _frame.height, 8, 32, _frame.width * 4, space,
+    CGImageRef image = CGImageCreate(frame.width, frame.height, 8, 32, frame.width * 4, space,
                                      kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst, provider, nullptr, false,
                                      kCGRenderingIntentDefault);
-    _preview.layer.contents = (__bridge id)image;
-    _previewHint.hidden = YES;
+    view.layer.contents = (__bridge id)image;
     CGImageRelease(image);
     CGColorSpaceRelease(space);
     CGDataProviderRelease(provider);
@@ -1725,7 +1788,8 @@ struct PreviewHit {
         if (!s.error.empty()) { detail = [@"Recording failed: " stringByAppendingString:ns(s.error)]; _attention = true; }
         else if (!s.stream_error.empty()) { detail = [@"Stream stopped early: " stringByAppendingString:ns(s.stream_error)]; _attention = true; }
         else if (!s.saved.empty())
-            detail = [(s.window_closed ? @"The window closed. Saved " : @"Saved ") stringByAppendingString:ns(s.saved).lastPathComponent];
+            detail = [[(s.window_closed ? @"The window closed. Saved " : @"Saved ") stringByAppendingString:ns(s.saved).lastPathComponent]
+                stringByAppendingString:s.saved_vertical.empty() ? @"" : @" and its vertical video"];
         else detail = _hotkey ? @"⇧⌘R starts and stops recording from anywhere." : @"⇧⌘R is used by another app.";
         break;
     case State::starting: status = @"Starting…"; break;
@@ -1776,7 +1840,8 @@ struct PreviewHit {
     for (NSControl* control in @[_source, _systemAudio, _microphone, _cursor, _clicks, _resolution, _fps, _codec, _format,
                                  _stream, _service, _server, _key, _bitrate, _service2, _replay, _replayLength, _changeFolder])
         control.enabled = editable;
-    for (NSControl* control in @[_server2, _key2]) control.enabled = editable && _settings.destination2 != "none";
+    for (NSControl* control in @[_server2, _key2, _vertical2]) control.enabled = editable && _settings.destination2 != "none";
+    for (NSControl* control in @[_vertical, _verticalMovie]) control.enabled = editable;
     _micDevice.enabled = editable && _microphone.state == NSControlStateValueOn;
     // Volume and mute change during a recording that has the source.
     for (NSControl* control in @[_systemVolume, _systemMute])
@@ -1793,6 +1858,15 @@ struct PreviewHit {
     _corner.enabled = arranging && _settings.camera;
     // A dragged camera is sized by its corners.
     _cameraSize.enabled = arranging && _settings.camera && _corner.indexOfSelectedItem != choice_index(kCorners, "custom");
+    // The vertical video's layout changes with the scene, also while recording.
+    const bool vertical = active ? s.vertical : rec::app::uses_vertical(_settings);
+    _verticalLayout.enabled = arranging && vertical;
+    if (vertical != _verticalShown) {
+        _verticalShown = vertical;
+        _frame2 = {};
+        _preview2.layer.contents = nil;
+        _preview2.hidden = !vertical;
+    }
     _shownState = s.state;
     _showLast.enabled = !_settings.last_recording.empty();
 
@@ -1821,9 +1895,11 @@ struct PreviewHit {
         }
         _previewing = previewing;
     }
-    if (!previewing && _frame.number) {
+    if (!previewing && (_frame.number || _frame2.number)) {
         _frame = {};
+        _frame2 = {};
         _preview.layer.contents = nil;
+        _preview2.layer.contents = nil;
         _previewHint.hidden = NO;
     }
     NSString* hint = s.state != State::idle ? @"Starting the preview…"
@@ -1974,6 +2050,7 @@ struct PreviewHit {
                                      self->_micDevice, self->_cursor, self->_clicks, self->_resolution, self->_fps, self->_codec,
                                      self->_format, self->_stream, self->_service, self->_server, self->_key,
                                      self->_service2, self->_server2, self->_key2,
+                                     self->_vertical, self->_vertical2, self->_verticalMovie, self->_verticalLayout,
                                      self->_bitrate, self->_changeFolder, self->_openFolder, self->_showLast,
                                      self->_systemMeter, self->_micMeter, self->_systemVolume, self->_micVolume,
                                      self->_systemMute, self->_micMute]) {
@@ -2102,6 +2179,9 @@ struct PreviewHit {
             self->_server2.stringValue = ns(server2);
             self->_key2.stringValue = @"appkey2";
         });
+        // The second server gets the vertical video, which is also saved beside the movie.
+        set_check(_vertical2, true);
+        set_check(_verticalMovie, true);
         press(_record);
         wait_for(recording, 20);
         bool live = false;
@@ -2121,11 +2201,21 @@ struct PreviewHit {
         if (![scanner scanString:@"● LIVE 2/2" intoString:nil] || ![scanner scanDouble:&rate] || rate <= 0)
             fail([@"no stream rate for both servers in the LIVE badge: " stringByAppendingString:badge]);
         note([@"live=" stringByAppendingString:badge]);
+        __block rec::PreviewFrame vertical;
+        ui(^{ vertical = self->_frame2; });
+        if (!vertical.number || vertical.width >= vertical.height)
+            fail([NSString stringWithFormat:@"no vertical preview (%ux%u)", vertical.width, vertical.height]);
         sleep(1);
         press(_record);
         wait_for(@"Ready to record", 30);
         if ([detail() hasPrefix:@"Stream stopped early"]) fail(detail());
+        if (![detail() hasSuffix:@"and its vertical video"]) fail([@"the vertical video was not reported: " stringByAppendingString:detail()]);
         saved(@"stream");
+        __block NSString* verticalPath;
+        ui(^{ verticalPath = ns(self->_session->status().saved_vertical); });
+        note([@"stream-vertical=" stringByAppendingString:verticalPath]);
+        set_check(_vertical2, false);
+        set_check(_verticalMovie, false);
         const std::string stored = load_key(server), stored2 = load_key(server2);
         delete_key(server);
         delete_key(server2);

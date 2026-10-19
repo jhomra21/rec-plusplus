@@ -43,7 +43,9 @@ public:
     Result set_overlay(std::size_t index, bool visible, std::optional<Area> area = std::nullopt);
     Result set_screen(bool visible, std::optional<Area> area = std::nullopt);
     Result set_volume(AudioInput input, double gain_db, bool muted);
+    Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout);
     bool preview(PreviewFrame& frame) const;
+    bool preview(PreviewFrame& frame, std::size_t canvas) const;
     void show_preview(bool on);
 
 private:
@@ -52,11 +54,11 @@ private:
         std::string text;                // After "ok " or "error ".
         std::vector<std::string> lines;  // Before the final line.
     };
-    EngineRecorder(std::string socket, std::uint64_t id, const std::string& preview);
+    EngineRecorder(std::string socket, std::uint64_t id, const std::string& preview, const std::string& preview2);
     // timeout_ms bounds the wait for the reply; 0 waits as long as the engine is there.
     Reply exchange(const std::string& line, int timeout_ms = 0) const;
     Result simple(const std::string& line) const;
-    void open_preview(const std::string& name);
+    void open_preview(const std::string& name, const std::string& second);
     void read_ending(const Reply& reply);
 
     Options options_;
@@ -64,7 +66,7 @@ private:
     std::vector<std::string> launch_args_;
     std::uint64_t id_ = 0;
     mutable std::mutex mutex_;  // Guards the fields below.
-    SharedFrame preview_;
+    SharedFrame preview_, preview2_;  // The second canvas's in preview2_.
     Stats stats_;
     bool finished_ = false, stopped_ = false;
     std::string failure_, stream_failure_;

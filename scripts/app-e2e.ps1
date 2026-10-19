@@ -7,6 +7,7 @@
 #   1. Record with system audio and microphone, pause, resume, stop: the movie keeps sync.
 #   2. Start and stop with the global hotkey Ctrl+Alt+R.
 #   3. Go live to two paths of a local MediaMTX server at once while recording; both copies decode.
+#      The second gets the vertical video (1080x1920), which is also saved beside the movie.
 #   4. Closing the window while recording keeps recording; the tray menu stops and saves it.
 #   5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
 #   6. A camera and an image are drawn; the scene moves the camera while recording. The
@@ -219,7 +220,7 @@ function Drag-Preview($ui, [double[]]$from, [double[]]$to) {
     [AppWindow]::SendMessage($handle, 0x0202, [IntPtr]::Zero, (& $at $to[0] $to[1])) | Out-Null  # WM_LBUTTONUP
 }
 function Newest-Movie {
-    $file = Get-ChildItem $folder -Filter '*.mp4' | Sort-Object LastWriteTime | Select-Object -Last 1
+    $file = Get-ChildItem $folder -Filter '*.mp4' | Where-Object { $_.Name -notlike '*-vertical.mp4' } | Sort-Object LastWriteTime | Select-Object -Last 1
     if (-not $file) { throw "no recording in $folder" }
     return $file.FullName
 }
@@ -303,6 +304,9 @@ try {
     Choose-Last $ui 'Also stream to'
     Set-Field $ui 'Second server URL' $server2
     Set-Field $ui 'Second stream key' 'appkey2'
+    # The second server gets the vertical video, which is also saved beside the movie.
+    Set-Check $ui 'Stream the vertical video to the second server' $true
+    Set-Check $ui 'Also save a vertical video (9:16, MP4)' $true
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
     $deadline = (Get-Date).AddSeconds(10)
@@ -329,9 +333,26 @@ try {
     $file = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received 'live2\appkey2') | Select-Object -First 1
     if (-not $file) { throw 'MediaMTX recorded nothing from the second destination' }
     $second = Get-Probe $Rec $file.FullName (Join-Path $Artifacts 'app-stream-received-2.probe')
-    Expect-Within $second 'frames' ([int]$got['frames'] - 1) ([int]$got['frames'] + 1)
+    Expect-Field $second 'width' '1080'
+    Expect-Field $second 'height' '1920'
+    Expect-Within $second 'frames' ([int]$got['frames'] - 2) ([int]$got['frames'] + 2)
+    Expect-Within $second 'av_sync_events' 3 6
     Expect-Within $second 'av_offset_max_ms' 0 20
-    Write-Host "3. stream: received $($got['frames']) and $($second['frames']) frames, $($got['av_sync_events']) pairs, worst $($got['av_offset_max_ms']) ms"
+    if ((Text-Of $ui 101) -notmatch 'and its vertical video') { throw "the vertical video was not reported: $(Text-Of $ui 101)" }
+    $main = Newest-Movie
+    $verticalMovie = $main -replace '\.mp4$', '-vertical.mp4'
+    if (-not (Test-Path $verticalMovie)) { throw "no vertical video beside $main" }
+    Copy-Item $verticalMovie (Join-Path $Artifacts 'app-vertical.mp4')
+    $mainProbe = Get-Probe $Rec $main (Join-Path $Artifacts 'app-stream-main.probe')
+    $verticalProbe = Get-Probe $Rec $verticalMovie (Join-Path $Artifacts 'app-vertical.probe')
+    Expect-Field $verticalProbe 'width' '1080'
+    Expect-Field $verticalProbe 'height' '1920'
+    Expect-Within $verticalProbe 'frames' ([int]$mainProbe['frames'] - 2) ([int]$mainProbe['frames'] + 2)
+    Expect-Within $verticalProbe 'av_sync_events' 3 6
+    Expect-Within $verticalProbe 'av_offset_max_ms' 0 20
+    Write-Host "3. stream: received $($got['frames']) and $($second['frames']) frames (the second 1080x1920), $($got['av_sync_events']) pairs, worst $($got['av_offset_max_ms']) ms; vertical movie $($verticalProbe['frames']) of $($mainProbe['frames']) frames"
+    Set-Check $ui 'Stream the vertical video to the second server' $false
+    Set-Check $ui 'Also save a vertical video (9:16, MP4)' $false
     foreach ($url in $server, $server2) {
         $stored = cmdkey "/list:rec/stream/$url" | Out-String
         if ($stored -notmatch [regex]::Escape("rec/stream/$url")) { throw "the stream key for $url was not stored in Credential Manager" }

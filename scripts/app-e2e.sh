@@ -6,7 +6,8 @@
 #   1. every control has an accessible name;
 #   2. record with system audio and microphone, pause, resume, stop: the movie keeps sync;
 #   3. start and stop through the Shift-Command-R hotkey handler;
-#   4. Go Live to a local MediaMTX server: the server's copy decodes, the key is in the keychain;
+#   4. Go Live to two paths of a local MediaMTX server: both copies decode, the keys are in the
+#      keychain; the second gets the vertical video (1080x1920), which is also saved;
 #   5. closing the window keeps recording, and the menu bar item's menu stops it;
 #   6. with the replay buffer on, Save Replay writes the last seconds while recording goes on;
 #   7. a camera and an image are drawn, and the scene moves the camera while recording; the
@@ -134,8 +135,18 @@ file="$(find "$received/live2/appkey2" -name '*.mp4' -print -quit)"
 [[ -n "$file" ]] || { echo 'MediaMTX recorded nothing from the second destination' >&2; exit 1; }
 probe "$file" app-stream-received-2
 frames="$(value frames "$artifacts/app-stream-received.probe")"
-within "$(value frames "$artifacts/app-stream-received-2.probe")" "$((frames - 1))" "$((frames + 1))"
+grep -qx 'width=1080' "$artifacts/app-stream-received-2.probe"
+grep -qx 'height=1920' "$artifacts/app-stream-received-2.probe"
+within "$(value frames "$artifacts/app-stream-received-2.probe")" "$((frames - 2))" "$((frames + 2))"
+within "$(value av_sync_events "$artifacts/app-stream-received-2.probe")" 3 6
 within "$(value av_offset_max_ms "$artifacts/app-stream-received-2.probe")" 0 55
+probe "$(step stream-vertical)" app-vertical
+grep -qx 'width=1080' "$artifacts/app-vertical.probe"
+grep -qx 'height=1920' "$artifacts/app-vertical.probe"
+frames="$(value frames "$artifacts/app-stream-local.probe")"
+within "$(value frames "$artifacts/app-vertical.probe")" "$((frames - 2))" "$((frames + 2))"
+within "$(value av_sync_events "$artifacts/app-vertical.probe")" 3 6
+within "$(value av_offset_max_ms "$artifacts/app-vertical.probe")" 0 20
 
 probe "$(step hidden)" app-hidden
 within "$(value duration "$artifacts/app-hidden.probe")" 1.5 3.5

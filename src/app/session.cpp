@@ -103,7 +103,7 @@ bool indexed(const std::string& key, const char* prefix, std::size_t& index, std
 }
 
 struct LoadedScene {
-    std::optional<std::string> name;
+    std::optional<std::string> name, vertical;
     std::optional<SceneItem> screen, camera, image;
     std::map<std::size_t, SceneItem> layers;
 };
@@ -151,6 +151,9 @@ Settings load_settings(const std::string& path) {
         else if (key == "server2") s.server2 = value;
         else if (key == "x_server") s.x_server = value;
         else if (key == "tiktok_server") s.tiktok_server = value;
+        else if (key == "destination_vertical") s.destination_vertical = yes;
+        else if (key == "destination2_vertical") s.destination2_vertical = yes;
+        else if (key == "vertical_movie") s.vertical_movie = yes;
         else if (key == "stream_kbps") s.stream_kbps = std::clamp(number(value, 6000), 500u, 50000u);
         else if (key == "replay") s.replay = yes;
         else if (key == "replay_seconds") {
@@ -184,6 +187,7 @@ Settings load_settings(const std::string& path) {
             } else if (indexed(key, "scene.", n, field)) {
                 LoadedScene& scene = scenes[n];
                 if (field == "name") scene.name = value;
+            else if (field == "vertical" && is_choice(kVerticalLayouts, value)) scene.vertical = value;
                 else if (field == "screen") scene.screen = parse_item(value);
                 else if (field == "camera") scene.camera = parse_item(value);
                 else if (field == "image") scene.image = parse_item(value);
@@ -209,6 +213,7 @@ Settings load_settings(const std::string& path) {
             scene.screen = from.screen.value_or(SceneItem{});
             scene.camera = from.camera.value_or(SceneItem{true, corner_area("bottom-right", "medium")});
             scene.image = from.image.value_or(SceneItem{});
+            scene.vertical = from.vertical.value_or("fit");
             for (std::size_t j = 0; j < s.layers.size(); ++j)
                 scene.layers.push_back(from.layers.count(j) ? from.layers.at(j) : hidden);
             loaded.push_back(std::move(scene));
@@ -247,7 +252,8 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nsystem_muted=" << s.system_muted << "\nmic_muted=" << s.mic_muted
             << "\nstream=" << s.stream << "\ndestination=" << s.destination << "\nserver=" << s.server
             << "\ndestination2=" << s.destination2 << "\nserver2=" << s.server2 << "\nx_server=" << s.x_server
-        << "\ntiktok_server=" << s.tiktok_server
+            << "\ntiktok_server=" << s.tiktok_server << "\ndestination_vertical=" << s.destination_vertical
+            << "\ndestination2_vertical=" << s.destination2_vertical << "\nvertical_movie=" << s.vertical_movie
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
             << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
@@ -263,7 +269,8 @@ bool save_settings(const std::string& path, const Settings& s) {
         for (std::size_t i = 0; i < s.scenes.size(); ++i) {
             const Scene& scene = s.scenes[i];
             const auto key = "scene." + std::to_string(i) + ".";
-            out << key << "name=" << one_line(scene.name) << '\n' << key << "screen=" << item_text(scene.screen) << '\n'
+            out << key << "name=" << one_line(scene.name) << '\n' << key << "vertical=" << scene.vertical << '\n'
+                << key << "screen=" << item_text(scene.screen) << '\n'
                 << key << "camera=" << item_text(scene.camera) << '\n' << key << "image=" << item_text(scene.image) << '\n';
             for (std::size_t j = 0; j < scene.layers.size(); ++j)
                 out << key << "layer." << j << '=' << item_text(scene.layers[j]) << '\n';
@@ -310,6 +317,51 @@ std::optional<Window> find_window(const std::string& app, const std::string& tit
 
 std::optional<Window> find_window(const Settings& s) { return find_window(s.window_app, s.window_title); }
 
+bool uses_vertical(const Settings& s) {
+    return s.vertical_movie || (s.stream && (s.destination_vertical || (s.destination2 != "none" && s.destination2_vertical)));
+}
+
+Layout vertical_layout(const Scene& scene, const SourceRef& source, double aspect, bool camera) {
+    const SceneItem& item = scene_item(scene, source);
+    if (!(aspect > 0)) aspect = 16.0 / 9;
+    // Without a camera below it, the picture fills the frame instead of its top half.
+    const std::string mode = scene.vertical == "split" && !(camera && scene.camera.visible) ? "fill" : scene.vertical;
+    constexpr double canvas = static_cast<double>(kVerticalWidth) / kVerticalHeight;
+    const auto full = [](const Area& a) { return a.x <= 0.001 && a.y <= 0.001 && a.width >= 0.999 && a.height >= 0.999; };
+    // The part of the landscape picture shown (region) and where it goes (target).
+    Area region, target;
+    if (mode == "fill") {
+        region.width = std::min(1.0, canvas / aspect);
+    } else if (mode == "split") {
+        target.height = 0.5;
+        region.width = std::min(1.0, canvas * 2 / aspect);
+    } else {
+        target.height = std::min(1.0, canvas / aspect);
+        target.y = (1 - target.height) / 2;
+    }
+    region.x = (1 - region.width) / 2;
+    // A camera in a corner would be cropped away; it gets its own place below the picture.
+    if (source.kind == SourceRef::Kind::camera && mode != "fit" && !full(item.area)) {
+        if (mode == "split") return {item.visible, Area{0, 0.5, 1, 0.5}, Area{}};
+        return {item.visible, Area{0.05, 0.7, 0.9, 0.27}, Area{}};
+    }
+    // The source's area cut to the region. The crop assumes the picture fills its area, which
+    // holds for the screen and the camera; a letterboxed window cut by the region is cropped
+    // by its area's fraction instead of its picture's.
+    const Area& a = item.area;
+    const double left = std::max(a.x, region.x), top = std::max(a.y, region.y);
+    const double right = std::min(a.x + a.width, region.x + region.width), bottom = std::min(a.y + a.height, region.y + region.height);
+    if (right - left < 0.001 || bottom - top < 0.001 || a.width <= 0 || a.height <= 0) return {false, Area{}, Area{}};
+    const auto clamp01 = [](double v) { return std::clamp(v, 0.0, 1.0); };
+    Area crop{clamp01((left - a.x) / a.width), clamp01((top - a.y) / a.height), 0, 0};
+    crop.width = std::min(1 - crop.x, (right - left) / a.width);
+    crop.height = std::min(1 - crop.y, (bottom - top) / a.height);
+    Area area{clamp01(target.x + (left - region.x) / region.width * target.width),
+              clamp01(target.y + (top - region.y) / region.height * target.height), 0, 0};
+    area.width = std::min(1 - area.x, (right - left) / region.width * target.width);
+    area.height = std::min(1 - area.y, (bottom - top) / region.height * target.height);
+    return {item.visible, area, crop};
+}
 std::string server_url(const Settings& s) { return server_url(s.destination, typed_server_of(s, false)); }
 
 std::string second_server_url(const Settings& s) {
@@ -433,9 +485,9 @@ std::string size_of(const Area& area) {
 
 std::vector<Scene> default_scenes() {
     const Area corner = corner_area("bottom-right", "medium");
-    Scene both{"Screen and camera", {}, {true, corner}, {}, {}};
-    Scene screen{"Screen only", {}, {false, corner}, {}, {}};
-    Scene camera{"Camera only", {}, {true, Area{}}, {}, {}};
+    Scene both{"Screen and camera", {}, {true, corner}, {}, {}, "split"};
+    Scene screen{"Screen only", {}, {false, corner}, {}, {}, "fit"};
+    Scene camera{"Camera only", {}, {true, Area{}}, {}, {}, "fill"};
     return {both, screen, camera};
 }
 
@@ -697,10 +749,35 @@ Result capture_options(const Settings& s, bool test_pattern, Options& o, SourceI
         i.visible = scene.image.visible;
         o.overlays.push_back(i);
     }
+    if (uses_vertical(s)) {
+        // The landscape picture has the source's shape; the resolution presets only bound it.
+        indices.vertical = true;
+        std::string ignored;
+        const auto ratio = [](double w, double h) { return w > 0 && h > 0 ? w / h : 0.0; };
+        double aspect = 0;
+        if (test_pattern) aspect = ratio(o.width ? o.width : 1920, o.height ? o.height : 1080);
+        else if (o.region) aspect = ratio(o.region->width, o.region->height);
+        else if (o.window) {
+            for (const auto& w : list_windows(ignored))
+                if (w.id == o.window) aspect = ratio(w.width, w.height);
+        } else if (const auto displays = list_displays(ignored); s.display >= 1 && s.display <= displays.size()) {
+            aspect = ratio(displays[s.display - 1].width, displays[s.display - 1].height);
+        }
+        if (aspect > 0) indices.aspect = aspect;
+        o.canvas2.width = kVerticalWidth;
+        o.canvas2.height = kVerticalHeight;
+        const bool camera = indices.camera.has_value();
+        o.canvas2.screen = vertical_layout(scene, {SourceRef::Kind::screen}, indices.aspect, camera);
+        o.canvas2.overlays.resize(o.overlays.size());
+        for (std::size_t i = 0; i < indices.layers.size(); ++i)
+            o.canvas2.overlays[indices.layers[i]] = vertical_layout(scene, {SourceRef::Kind::layer, i}, indices.aspect, camera);
+        if (indices.camera) o.canvas2.overlays[*indices.camera] = vertical_layout(scene, {SourceRef::Kind::camera}, indices.aspect, camera);
+        if (indices.image) o.canvas2.overlays[*indices.image] = vertical_layout(scene, {SourceRef::Kind::image}, indices.aspect, camera);
+    }
     return {};
 }
-
-// Moves, shows and hides every source the capture has to where scene puts it.
+// Moves, shows and hides every source the capture has to where scene puts it, in both
+// pictures when it composes the vertical video.
 template <typename Capture>
 Result show(Capture& recorder, const SourceIndices& indices, const Scene& scene) {
     if (auto set = recorder.set_screen(scene.screen.visible, scene.screen.area); !set) return set;
@@ -711,14 +788,24 @@ Result show(Capture& recorder, const SourceIndices& indices, const Scene& scene)
         if (auto set = recorder.set_overlay(*indices.camera, scene.camera.visible, scene.camera.area); !set) return set;
     if (indices.image)
         if (auto set = recorder.set_overlay(*indices.image, scene.image.visible, scene.image.area); !set) return set;
+    if (!indices.vertical) return {};
+    const auto place = [&](std::size_t layer, const SourceRef& source) {
+        return recorder.set_layout(kSecondCanvas, layer, vertical_layout(scene, source, indices.aspect, indices.camera.has_value()));
+    };
+    if (auto set = place(kScreenLayer, {SourceRef::Kind::screen}); !set) return set;
+    for (std::size_t i = 0; i < indices.layers.size(); ++i)
+        if (auto set = place(indices.layers[i], {SourceRef::Kind::layer, i}); !set) return set;
+    if (indices.camera)
+        if (auto set = place(*indices.camera, {SourceRef::Kind::camera}); !set) return set;
+    if (indices.image)
+        if (auto set = place(*indices.image, {SourceRef::Kind::image}); !set) return set;
     return {};
 }
-
 // What needs a new capture for the idle preview; scenes only move what it has.
 std::string preview_key(const Settings& s, bool test_pattern) {
     std::string key = s.source + '\n' + std::to_string(s.display) + '\n' + s.window_app + '\n' + s.window_title +
                       '\n' + s.region + '\n' + s.resolution + '\n' + (s.cursor ? "1" : "0") + (s.clicks ? "1" : "0") +
-                      (test_pattern ? "1" : "0");
+                      (test_pattern ? "1" : "0") + (uses_vertical(s) ? "v" : "");
     if (s.camera) key += "\ncamera " + s.camera_device;
     if (s.image) key += "\nimage " + s.image_path;
     for (const Layer& layer : s.layers)
@@ -759,14 +846,24 @@ Result Session::start(const Settings& s, const std::string& stream_key, const st
         const auto server = server_url(s);
         if (server.empty()) return {"enter the stream server URL"};
         if (stream_key.empty()) return {"enter the stream key"};
-        o.stream_urls.push_back(server + "/" + stream_key);
+        // Each destination gets the picture it is set to; a vertical one the second canvas.
+        (s.destination_vertical ? o.canvas2.stream_urls : o.stream_urls).push_back(server + "/" + stream_key);
         if (s.destination2 != "none") {
             const auto second = second_server_url(s);
             if (second.empty()) return {"enter the second stream's server URL"};
             if (second_key.empty()) return {"enter the second stream's key"};
             if (second == server && second_key == stream_key) return {"both streams go to the same place; choose another second destination"};
-            o.stream_urls.push_back(second + "/" + second_key);
+            (s.destination2_vertical ? o.canvas2.stream_urls : o.stream_urls).push_back(second + "/" + second_key);
         }
+    }
+    if (s.vertical_movie) {
+        // NAME-vertical.mp4 beside the recording, with -2, -3 ... like next_output() if taken.
+        const auto dot = o.output.rfind('.');
+        const auto stem = o.output.substr(0, dot) + "-vertical";
+        std::error_code ignored;
+        o.canvas2.output = stem + ".mp4";
+        for (int n = 2; std::filesystem::exists(utf8_path(o.canvas2.output), ignored); ++n)
+            o.canvas2.output = stem + "-" + std::to_string(n) + ".mp4";
     }
     o.stream_kbps = s.stream_kbps;
     if (s.replay) o.replay_seconds = s.replay_seconds;
@@ -787,6 +884,7 @@ Result Session::start(const Settings& s, const std::string& stream_key, const st
         error_.clear();
         stream_error_.clear();
         saved_.clear();
+        saved_vertical_.clear();
         last_ = {};
         rate_bytes_ = 0;
         rate_time_ = std::chrono::steady_clock::now();
@@ -815,6 +913,8 @@ bool Session::attach(const Settings& s, std::string& error) {
         else if (kind == Overlay::Kind::image && !indices.image) indices.image = i;
         else if (kind == Overlay::Kind::display || kind == Overlay::Kind::window) indices.layers.push_back(i);
     }
+    indices.vertical = o.canvas2.width > 0;
+    if (o.width && o.height) indices.aspect = static_cast<double>(o.width) / o.height;
     {
         std::lock_guard lock(mutex_);
         idle_settings_.reset();
@@ -824,13 +924,14 @@ bool Session::attach(const Settings& s, std::string& error) {
         options_ = o;
         state_ = State::starting;
         stop_requested_ = detach_requested_ = false;
-        streaming_ = !o.stream_urls.empty();
+        streaming_ = !o.stream_urls.empty() || !o.canvas2.stream_urls.empty();
         replay_ = o.replay_seconds > 0;
         indices_ = indices;
         scene_ = std::min<std::uint32_t>(s.scene, static_cast<std::uint32_t>(s.scenes.size() - 1));
         error_.clear();
         stream_error_.clear();
         saved_.clear();
+        saved_vertical_.clear();
         last_ = {};
         rate_bytes_ = 0;
         rate_time_ = std::chrono::steady_clock::now();
@@ -889,6 +990,8 @@ void Session::run(std::unique_ptr<cli::EngineRecorder> recorder, bool attached) 
         stream_error_ = recorder->stream_failure();
         std::error_code ignored;
         if (std::filesystem::exists(utf8_path(options_.output), ignored)) saved_ = options_.output;
+        if (!options_.canvas2.output.empty() && std::filesystem::exists(utf8_path(options_.canvas2.output), ignored))
+            saved_vertical_ = options_.canvas2.output;
         recorder_ = nullptr;
         state_ = State::idle;
     }
@@ -952,16 +1055,17 @@ Result Session::set_volume(AudioInput input, int volume, bool muted) {
     return recorder_->set_volume(input, std::clamp(volume, kVolumeMin, kVolumeMax), muted);
 }
 
-bool Session::preview(PreviewFrame& frame) {
+bool Session::preview(PreviewFrame& frame, std::size_t canvas) {
     std::lock_guard lock(mutex_);
     const void* source = recorder_ ? static_cast<const void*>(recorder_) : idle_;
     // Each capture numbers its frames from 1.
-    if (source != preview_source_) {
-        preview_source_ = source;
+    auto& last = preview_source_[canvas == kSecondCanvas ? 1 : 0];
+    if (source != last) {
+        last = source;
         frame.number = 0;
     }
-    if (recorder_) return recorder_->preview(frame);
-    return idle_ && idle_->preview(frame);
+    if (recorder_) return recorder_->preview(frame, canvas);
+    return idle_ && idle_->preview(frame, canvas);
 }
 
 void Session::idle_preview(const Settings* settings, bool test_pattern) {
@@ -1086,6 +1190,8 @@ Status Session::status() {
         s.error = error_;
         s.stream_error = stream_error_;
         s.saved = saved_;
+        s.saved_vertical = saved_vertical_;
+        s.vertical = options_.canvas2.width > 0;
         s.streaming = streaming_;
         s.replay = replay_;
         const Stats& st = last_;

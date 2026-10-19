@@ -30,32 +30,33 @@ std::string_view value_of(const std::string& line, std::string_view key) {
 EngineRecorder::EngineRecorder(Options options, std::string socket, std::vector<std::string> launch_args)
     : options_(std::move(options)), socket_(std::move(socket)), launch_args_(std::move(launch_args)) {}
 
-EngineRecorder::EngineRecorder(std::string socket, std::uint64_t id, const std::string& preview)
+EngineRecorder::EngineRecorder(std::string socket, std::uint64_t id, const std::string& preview, const std::string& preview2)
     : socket_(std::move(socket)), id_(id) {
-    open_preview(preview);
+    open_preview(preview, preview2);
 }
 
 std::unique_ptr<EngineRecorder> EngineRecorder::attach(const std::string& socket, Options& options, std::string& error) {
     std::string ignored;
     if (!LocalSocket::connect(socket, ignored).valid()) return nullptr;  // No engine, so no recording.
-    EngineRecorder probe(socket, 0, {});
+    EngineRecorder probe(socket, 0, {}, {});
     const auto reply = probe.exchange("options", 2000);
     if (!reply.ok) {
         if (reply.text != "not recording") error = reply.text;
         return nullptr;
     }
     std::uint64_t id = 0;
-    std::string preview, words;
+    std::string preview, preview2, words;
     for (const auto& line : reply.lines) {
         if (const auto v = value_of(line, "id"); !v.empty()) id = std::strtoull(std::string(v).c_str(), nullptr, 10);
         else if (const auto p = value_of(line, "preview"); !p.empty()) preview = p;
+        else if (const auto p2 = value_of(line, "preview2"); !p2.empty()) preview2 = p2;
         else if (const auto o = value_of(line, "options"); !o.empty()) words = o;
     }
     if (!id || !decode_options(split(words), options, error)) {
         if (error.empty()) error = "the engine's reply was not understood";
         return nullptr;
     }
-    auto recorder = std::unique_ptr<EngineRecorder>(new EngineRecorder(socket, id, preview));
+    auto recorder = std::unique_ptr<EngineRecorder>(new EngineRecorder(socket, id, preview, preview2));
     recorder->options_ = options;
     return recorder;
 }
@@ -95,10 +96,10 @@ Result EngineRecorder::simple(const std::string& line) const {
     return reply.ok ? Result{} : Result{reply.text};
 }
 
-void EngineRecorder::open_preview(const std::string& name) {
-    if (name.empty()) return;
+void EngineRecorder::open_preview(const std::string& name, const std::string& second) {
     std::string ignored;
-    preview_ = SharedFrame::open(name, ignored);
+    if (!name.empty()) preview_ = SharedFrame::open(name, ignored);
+    if (!second.empty()) preview2_ = SharedFrame::open(second, ignored);
 }
 
 Result EngineRecorder::start() {
@@ -115,13 +116,14 @@ Result EngineRecorder::start() {
     // Starting can wait on a permission prompt; there is no deadline.
     const auto reply = exchange("begin " + join(encode_options(options_)));
     if (!reply.ok) return {reply.text == kGone ? std::string("the background engine stopped while starting") : reply.text};
-    std::string preview;
+    std::string preview, preview2;
     for (const auto& line : reply.lines) {
         if (const auto v = value_of(line, "id"); !v.empty()) id_ = std::strtoull(std::string(v).c_str(), nullptr, 10);
         else if (const auto p = value_of(line, "preview"); !p.empty()) preview = p;
+        else if (const auto p2 = value_of(line, "preview2"); !p2.empty()) preview2 = p2;
     }
     std::lock_guard lock(mutex_);
-    open_preview(preview);
+    open_preview(preview, preview2);
     return {};
 }
 
@@ -149,6 +151,7 @@ Result EngineRecorder::stop() {
     stopped_ = finished_ = true;
     if (!reply.ok && failure_.empty()) failure_ = reply.text;
     preview_ = {};
+    preview2_ = {};
     return {};
 }
 
@@ -235,9 +238,17 @@ Result EngineRecorder::set_volume(AudioInput input, double gain_db, bool muted) 
     return simple(std::string("level ") + (input == AudioInput::system ? "system " : "mic ") + text + (muted ? " 1" : " 0"));
 }
 
-bool EngineRecorder::preview(PreviewFrame& frame) const {
+Result EngineRecorder::set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
+    const std::string source = layer == kScreenLayer ? std::string("screen") : std::to_string(layer + 1);
+    return simple(std::string("place ") + (canvas == kSecondCanvas ? "canvas2 " : "") + source + (layout.visible ? " 1 " : " 0 ") +
+                  area_text(layout.area) + ' ' + area_text(layout.crop));
+}
+
+bool EngineRecorder::preview(PreviewFrame& frame) const { return preview(frame, kMainCanvas); }
+
+bool EngineRecorder::preview(PreviewFrame& frame, std::size_t canvas) const {
     std::lock_guard lock(mutex_);
-    return preview_.read(frame);
+    return canvas == kSecondCanvas ? preview2_.read(frame) : preview_.read(frame);
 }
 
 void EngineRecorder::show_preview(bool on) { exchange(on ? "preview on" : "preview off", kStatsTimeoutMs); }

@@ -61,6 +61,7 @@ enum Control : int {
     kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast, kPreview, kShowPreview,
     kScenesHeader, kNewScene, kDeleteScene, kSceneNameLabel, kSceneName, kSourcesLabel, kSceneSources, kSourceShown,
     kAddDisplay, kAddWindow, kRemoveSource,
+    kVertical, kVertical2, kVerticalMovie, kVerticalLayoutLabel, kVerticalLayout, kPreview2,
 };
 
 enum Command : UINT {
@@ -442,16 +443,20 @@ private:
         }
     }
 
+    // The vertical video's preview shows the second canvas; the other the recording's picture.
+    const rec::PreviewFrame& frame_of(HWND window) const { return window == get(kPreview2) ? frame2_ : frame_; }
+
     // Where the frame is drawn in the preview: the output's shape, centered.
     RECT frame_rect(HWND window) const {
         RECT area;
         GetClientRect(window, &area);
-        if (!frame_.number) return {};
+        const auto& frame = frame_of(window);
+        if (!frame.number) return {};
         const int width = area.right, height = area.bottom;
-        int w = width, h = static_cast<int>(static_cast<long long>(width) * frame_.height / frame_.width);
+        int w = width, h = static_cast<int>(static_cast<long long>(width) * frame.height / frame.width);
         if (h > height) {
             h = height;
-            w = static_cast<int>(static_cast<long long>(height) * frame_.width / frame_.height);
+            w = static_cast<int>(static_cast<long long>(height) * frame.width / frame.height);
         }
         const int x = (width - w) / 2, y = (height - h) / 2;
         return {x, y, x + w, y + h};
@@ -473,7 +478,8 @@ private:
         rec::app::AreaDrag drag;
     };
     std::optional<Hit> hit_source(HWND window, LPARAM l) const {
-        if (!frame_.number || (state_ != State::idle && state_ != State::recording && state_ != State::paused))
+        // Sources are arranged in the landscape picture; the vertical one follows its layout.
+        if (window != get(kPreview) || !frame_.number || (state_ != State::idle && state_ != State::recording && state_ != State::paused))
             return std::nullopt;
         const auto p = frame_point(window, l);
         if (!p) return std::nullopt;
@@ -558,6 +564,8 @@ private:
         RECT area;
         GetClientRect(window, &area);
         const int saved = SaveDC(dc);
+        const bool vertical = window == get(kPreview2);
+        const auto& frame_ = frame_of(window);
         if (frame_.number) {
             const RECT frame = frame_rect(window);
             const int x = frame.left, y = frame.top, w = frame.right - frame.left, h = frame.bottom - frame.top;
@@ -573,7 +581,8 @@ private:
             StretchDIBits(dc, x, y, w, h, 0, 0, static_cast<int>(frame_.width), static_cast<int>(frame_.height),
                           frame_.pixels.data(), &info, DIB_RGB_COLORS, SRCCOPY);
             // The outline of the source held or under the pointer.
-            const auto camera = drag_.grab != rec::app::AreaDrag::Grab::none ? std::optional<rec::Area>(outline_)
+            const auto camera = vertical ? std::nullopt
+                              : drag_.grab != rec::app::AreaDrag::Grab::none ? std::optional<rec::Area>(outline_)
                               : hover_ ? std::optional(rec::app::scene_item(rec::app::current_scene(settings_), *hover_).area)
                                        : std::nullopt;
             if (camera) {
@@ -594,7 +603,7 @@ private:
             SetTextColor(dc, RGB(160, 160, 168));
             SelectObject(dc, font_);
             InflateRect(&area, -px(16), 0);
-            DrawTextW(dc, preview_hint_.c_str(), -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            DrawTextW(dc, vertical ? L"9:16" : preview_hint_.c_str(), -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         }
         RestoreDC(dc, saved);
     }
@@ -633,7 +642,10 @@ private:
         }
         case WM_TIMER:
             if (w == kPollTimer) refresh();
-            else if (w == kPreviewTimer && session_.preview(frame_)) InvalidateRect(get(kPreview), nullptr, FALSE);
+            else if (w == kPreviewTimer) {
+                if (session_.preview(frame_)) InvalidateRect(get(kPreview), nullptr, FALSE);
+                if (vertical_shown_ && session_.preview(frame2_, rec::kSecondCanvas)) InvalidateRect(get(kPreview2), nullptr, FALSE);
+            }
             return 0;
         case kSessionChanged:
             refresh();
@@ -750,6 +762,7 @@ private:
         button(kPause, L"&Pause");
         button(kSaveReplay, L"Save Rep&lay");
         add(kPreview, L"RecPreview", L"Preview", 0);
+        add(kPreview2, L"RecPreview", L"Vertical video preview", 0);
         preview_brush_ = CreateSolidBrush(RGB(28, 28, 32));
         check(kShowPreview, L"Show pre&view");
 
@@ -777,11 +790,13 @@ private:
         button(kChangeFolder, L"C&hange Folder...");
         button(kOpenFolder, L"Open Fo&lder");
         button(kShowLast, L"Show Last Recordin&g");
+        check(kVerticalMovie, L"Also save a vertical video (9:16, MP4)");
 
         label(kStreamHeader, L"Live stream");
         check(kStream, L"&Go live while recording");
         label(kServiceLabel, L"Ser&vice");
         HWND service = combo(kService);
+        check(kVertical, L"Ver&tical");
         label(kServerLabel, L"Server &URL");
         edit(kServer);
         label(kKeyLabel, L"Stream &key");
@@ -790,6 +805,7 @@ private:
         edit(kBitrate, ES_NUMBER);
         label(kService2Label, L"Also stream to");
         HWND service2 = combo(kService2);
+        check(kVertical2, L"Vertical");
         label(kServer2Label, L"Second server URL");
         edit(kServer2);
         label(kKey2Label, L"Second stream key");
@@ -806,6 +822,8 @@ private:
         button(kDeleteScene, L"Delete Scene");
         label(kSceneNameLabel, L"Name");
         edit(kSceneName);
+        label(kVerticalLayoutLabel, L"Vertical");
+        HWND vertical_layout = combo(kVerticalLayout);
         label(kSourcesLabel, L"Sources");
         add(kSceneSources, WC_LISTBOXW, L"", LBS_NOTIFY | LBS_NOINTEGRALHEIGHT | WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE);
         check(kSourceShown, L"Show in this scene");
@@ -837,6 +855,7 @@ private:
         fill(service, kServices);
         fill(service2, kSecondServices);
         fill(corner, kCorners);
+        fill(vertical_layout, rec::app::kVerticalLayouts);
         fill(size, kCameraSizes);
         for (const auto& c : cameras_) SendMessageW(camera, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(c.name).c_str()));
         for (auto seconds : rec::app::kReplayLengths)
@@ -853,6 +872,9 @@ private:
         if (SUCCEEDED(CoCreateInstance(CLSID_AccPropServices, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&access_)))) {
             access_->SetHwndPropStr(get(kSystemVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"System audio volume");
             access_->SetHwndPropStr(get(kMicVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Microphone volume");
+            // Both destinations have a Vertical box; say which is which.
+            access_->SetHwndPropStr(get(kVertical), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Stream the vertical video");
+            access_->SetHwndPropStr(get(kVertical2), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Stream the vertical video to the second server");
         }
 
         show_settings();
@@ -922,7 +944,12 @@ private:
         place(kSaveReplay, x + width - button_width, y, button_width, px(40));
         y += px(40);
         const int preview_height = column * 9 / 16;
-        place(kPreview, margin + column + px(30), margin, column, preview_height);
+        // With the vertical video, its preview stands beside the landscape one.
+        const int vertical_width = vertical_shown_ ? preview_height * 9 / 16 : 0;
+        const int landscape_width = vertical_shown_ ? column - vertical_width - gap : column;
+        place(kPreview, margin + column + px(30), margin, landscape_width, preview_height);
+        place(kPreview2, margin + column + px(30) + landscape_width + gap, margin, vertical_width, preview_height);
+        ShowWindow(get(kPreview2), vertical_shown_ ? SW_SHOWNA : SW_HIDE);
         place(kShowPreview, margin + column + px(30), margin + preview_height + gap, column, px(22));
         y = std::max(y, margin + preview_height + gap + px(22)) + gap;
         const int columns_top = y;
@@ -948,18 +975,27 @@ private:
         place(kChangeFolder, x, y, third, px(30));
         place(kOpenFolder, x + third + gap, y, third, px(30));
         place(kShowLast, x + 2 * (third + gap), y, third, px(30));
-        y += px(30);
+        y += px(30) + gap;
+        line(kVerticalMovie, px(22));
         const int left_bottom = y;
 
         x = margin + column + px(30);
         y = columns_top;
         header(kStreamHeader);
         line(kStream, px(22));
-        pair(kServiceLabel, kService, row);
+        // A destination's list leaves room for its Vertical box.
+        const int vertical_box = px(80);
+        const auto service_row = [&](int label_id, int list_id, int box_id) {
+            place(label_id, x, y + px(4), label_width - gap, px(20));
+            place(list_id, x + label_width, y, width - label_width - vertical_box - gap, px(240));
+            place(box_id, x + width - vertical_box, y + px(2), vertical_box, px(22));
+            y += row + gap;
+        };
+        service_row(kServiceLabel, kService, kVertical);
         pair(kServerLabel, kServer, row);
         pair(kKeyLabel, kKey, row);
         pair(kBitrateLabel, kBitrate, row);
-        pair(kService2Label, kService2, row);
+        service_row(kService2Label, kService2, kVertical2);
         pair(kServer2Label, kServer2, row);
         pair(kKey2Label, kKey2, row);
 
@@ -984,6 +1020,7 @@ private:
         place(kDeleteScene, x + half_width + gap, y, width - half_width - gap, row);
         y += row + gap;
         row_of(kSceneNameLabel, kSceneName, false);
+        row_of(kVerticalLayoutLabel, kVerticalLayout, true);
         line(kSourcesLabel, px(20));
         line(kSceneSources, px(124));
         line(kSourceShown, px(22));
@@ -1053,6 +1090,9 @@ private:
         set_check(kStream, s.stream);
         select(kService, choice_index(kServices, s.destination));
         select(kService2, choice_index(kSecondServices, s.destination2));
+        set_check(kVertical, s.destination_vertical);
+        set_check(kVertical2, s.destination2_vertical);
+        set_check(kVerticalMovie, s.vertical_movie);
         SetWindowTextW(get(kBitrate), std::to_wstring(s.stream_kbps).c_str());
         set_check(kReplay, s.replay);
         select(kReplayLength, static_cast<int>(std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds) -
@@ -1241,6 +1281,9 @@ private:
         if (rec::app::typed_server(s.destination2)) rec::app::set_typed_server(s, true, narrow(text_of(get(kServer2))));
         s.destination = kServices[at(kService)].value;
         s.destination2 = kSecondServices[at(kService2)].value;
+        s.destination_vertical = checked(kVertical);
+        s.destination2_vertical = checked(kVertical2);
+        s.vertical_movie = checked(kVerticalMovie);
         const auto kbps = std::wcstoul(text_of(get(kBitrate)).c_str(), nullptr, 10);
         s.stream_kbps = static_cast<std::uint32_t>(std::clamp<unsigned long>(kbps ? kbps : 6000, 500, 50000));
     }
@@ -1319,6 +1362,11 @@ private:
         case kShowLast: show_last(); return;
         case kService: case kService2:
             if (code == CBN_SELCHANGE) {
+                // TikTok is watched on phones; its stream starts out vertical.
+                const bool second = id == kService2;
+                const auto at = [this](int list) { return static_cast<std::size_t>(std::max(0, selected(list))); };
+                const char* chosen = second ? kSecondServices[at(kService2)].value : kServices[at(kService)].value;
+                if (std::string(chosen) == "tiktok") set_check(second ? kVertical2 : kVertical, true);
                 read_settings();
                 if (id == kService) show_server();
                 else show_second_server();
@@ -1362,6 +1410,19 @@ private:
             return;
         case kShowPreview:
             if (code == BN_CLICKED) remember();
+            return;
+        case kVertical: case kVertical2: case kVerticalMovie:
+            if (code == BN_CLICKED) {
+                read_settings();
+                remember();
+            }
+            return;
+        case kVerticalLayout:
+            if (code == CBN_SELCHANGE) {
+                rec::app::current_scene(settings_).vertical =
+                    rec::app::kVerticalLayouts[static_cast<std::size_t>(std::max(0, selected(kVerticalLayout)))].value;
+                apply_scene();
+            }
             return;
         case kSystemMute: case kMicMute:
             if (code == BN_CLICKED) change_volume(id == kSystemMute ? rec::AudioInput::system : rec::AudioInput::microphone, true);
@@ -1516,6 +1577,7 @@ private:
         filling_ = true;
         if (narrow(text_of(get(kSceneName))) != scene.name) SetWindowTextW(get(kSceneName), wide(scene.name).c_str());
         filling_ = false;
+        select(kVerticalLayout, choice_index(rec::app::kVerticalLayouts, scene.vertical));
         show_scene_sources();
         show_camera_place();
     }
@@ -1778,7 +1840,8 @@ private:
             else if (!s.stream_error.empty()) { detail = L"Stream stopped early: " + wide(s.stream_error); attention_ = true; }
             else if (!s.saved.empty()) {
                 detail = (s.window_closed ? L"The window closed. Saved " : L"Saved ") +
-                         wide(s.saved.substr(s.saved.find_last_of("/\\") + 1));
+                         wide(s.saved.substr(s.saved.find_last_of("/\\") + 1)) +
+                         (s.saved_vertical.empty() ? L"" : L" and its vertical video");
             }
             else detail = hotkey_ ? L"Ctrl+Alt+R starts and stops recording from anywhere." : L"Ctrl+Alt+R is used by another app.";
             break;
@@ -1853,7 +1916,16 @@ private:
         // A dragged camera is sized by its corners.
         EnableWindow(get(kCameraSize), arranging && settings_.camera && selected(kCorner) != choice_index(kCorners, "custom"));
         EnableWindow(get(kServer), editable);
-        for (int id : {kServer2, kKey2}) EnableWindow(get(id), editable && settings_.destination2 != "none");
+        for (int id : {kServer2, kKey2, kVertical2}) EnableWindow(get(id), editable && settings_.destination2 != "none");
+        for (int id : {kVertical, kVerticalMovie}) EnableWindow(get(id), editable);
+        // The vertical video's layout changes with the scene, also while recording.
+        const bool vertical = active ? s.vertical : rec::app::uses_vertical(settings_);
+        EnableWindow(get(kVerticalLayout), arranging && vertical);
+        if (vertical != vertical_shown_) {
+            vertical_shown_ = vertical;
+            frame2_ = {};
+            layout();
+        }
         EnableWindow(get(kShowLast), !settings_.last_recording.empty());
 
         // Preview frames are made only while the window is on screen: the recording's, or
@@ -1873,9 +1945,11 @@ private:
             else KillTimer(window_, kPreviewTimer);
             previewing_ = previewing;
         }
-        if (!previewing && frame_.number) {
+        if (!previewing && (frame_.number || frame2_.number)) {
             frame_ = {};
+            frame2_ = {};
             InvalidateRect(get(kPreview), nullptr, FALSE);
+            InvalidateRect(get(kPreview2), nullptr, FALSE);
         }
         const std::wstring hint = active || s.state != State::idle ? L"Starting the preview..."
             : !checked(kShowPreview) ? L"The preview is off"
@@ -1926,6 +2000,8 @@ private:
     bool filling_ = false;                  // The app, not the person, is setting the scene's name.
     std::vector<rec::Window> menu_windows_; // What the Add Window menu offered.
     rec::PreviewFrame frame_;
+    rec::PreviewFrame frame2_;   // The vertical video's.
+    bool vertical_shown_ = false;  // The vertical video's preview is laid out.
     std::wstring preview_hint_;  // Shown while the preview has no frame.
     HBRUSH preview_brush_ = nullptr;
     bool quitting_ = false;
