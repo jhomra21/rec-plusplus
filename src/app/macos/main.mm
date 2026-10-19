@@ -680,7 +680,12 @@ struct PreviewHit {
     [grid columnAtIndex:1].xPlacement = NSGridCellPlacementFill;
     for (NSInteger i = 0; i < grid.numberOfRows; ++i) {
         [grid rowAtIndex:i].yPlacement = NSGridCellPlacementCenter;
-        if (rows[static_cast<NSUInteger>(i)].count == 1) [[grid rowAtIndex:i] mergeCellsInRange:NSMakeRange(0, 2)];
+        if (rows[static_cast<NSUInteger>(i)].count == 1) {
+            [[grid rowAtIndex:i] mergeCellsInRange:NSMakeRange(0, 2)];
+            // A merged cell takes the first column's placement, which would leave a row of
+            // controls at its narrowest.
+            [grid cellAtColumnIndex:0 rowIndex:i].xPlacement = NSGridCellPlacementFill;
+        }
     }
     return grid;
 }
@@ -742,6 +747,7 @@ struct PreviewHit {
         row.distribution = NSStackViewDistributionFill;
         row.spacing = 10;
         [slider setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [slider.widthAnchor constraintGreaterThanOrEqualToConstant:120].active = YES;
         return row;
     };
     NSGridView* meters = [self grid:@[@[label(@"System audio"), _systemMeter], @[volumeRow(_systemVolume, _systemVolumeText, _systemMute)],
@@ -1990,17 +1996,6 @@ struct PreviewHit {
         const auto c = mean_color(f, x, y, w, h);
         if (!is_color(c, want)) fail([NSString stringWithFormat:@"%@: the preview is %ld,%ld,%ld, not %@", name, c[0], c[1], c[2], want]);
     };
-    // Waits up to 15 s for the window's preview to show want there; returns that frame.
-    const auto wait_preview = [&](NSString* name, NSString* want, double x, double y, double w, double h) {
-        for (int i = 0; i < 150; ++i) {
-            __block rec::PreviewFrame shot;
-            ui(^{ shot = self->_frame; });
-            if (shot.number && is_color(mean_color(shot, x, y, w, h), want)) return shot;
-            usleep(100000);
-        }
-        fail([NSString stringWithFormat:@"%@: the preview never showed %@", name, want]);
-        return rec::PreviewFrame{};
-    };
     NSString* artifacts = [reportPath stringByDeletingLastPathComponent];
     const auto save_png = [&](const rec::PreviewFrame& f, NSString* name) {
         NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr pixelsWide:f.width
@@ -2014,6 +2009,21 @@ struct PreviewHit {
         }
         [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
             writeToFile:[artifacts stringByAppendingPathComponent:[name stringByAppendingString:@".png"]] atomically:YES];
+    };
+    // Waits up to 15 s for the window's preview to show want there; returns that frame, or
+    // saves the last one as NAME-failed.png and fails.
+    const auto wait_preview = [&](NSString* name, NSString* want, double x, double y, double w, double h) {
+        for (int i = 0; i < 150; ++i) {
+            __block rec::PreviewFrame shot;
+            ui(^{ shot = self->_frame; });
+            if (shot.number && is_color(mean_color(shot, x, y, w, h), want)) return shot;
+            usleep(100000);
+        }
+        __block rec::PreviewFrame last;
+        ui(^{ last = self->_frame; });
+        if (last.number) save_png(last, [name stringByAppendingString:@"-failed"]);
+        fail([NSString stringWithFormat:@"%@: the preview never showed %@", name, want]);
+        return rec::PreviewFrame{};
     };
     // Steps land at movie times the script checks, however slow the machine is.
     const auto recorded = [&](double seconds) {
