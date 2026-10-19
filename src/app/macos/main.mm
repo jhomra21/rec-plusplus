@@ -31,6 +31,7 @@ using rec::app::kCorners;
 using rec::app::kFormats;
 using rec::app::kFrameRates;
 using rec::app::kResolutions;
+using rec::app::kSecondServices;
 using rec::app::kServices;
 using rec::app::Session;
 using rec::app::Settings;
@@ -273,10 +274,10 @@ struct PreviewHit {
     rec::app::SourceRef _selected;   // The source the Sources list selects.
     bool _filling;                   // The app, not the person, is setting the Sources list.
     std::vector<rec::Window> _menuWindows;  // What the Add Window menu offered.
-    NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service, *_replayLength;
+    NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_service, *_service2, *_replayLength;
     NSPopUpButton *_cameraDevice, *_corner, *_cameraSize, *_scene;
-    NSTextField *_server, *_bitrate, *_imageFile;
-    NSSecureTextField* _key;
+    NSTextField *_server, *_server2, *_bitrate, *_imageFile;
+    NSSecureTextField *_key, *_key2;
     NSStatusItem* _statusItem;
     NSTimer* _timer;
     PreviewView* _preview;
@@ -817,8 +818,14 @@ struct PreviewHit {
     _server = [self field:@"Server URL" secure:NO];
     _key = (NSSecureTextField*)[self field:@"Stream key" secure:YES];
     _bitrate = [self field:@"Bitrate (kb/s)" secure:NO];
+    _service2 = [self popup:@"Also stream to"];
+    for (const auto& choice : kSecondServices) [_service2 addItemWithTitle:ns(choice.label)];
+    _server2 = [self field:@"Second server URL" secure:NO];
+    _key2 = (NSSecureTextField*)[self field:@"Second stream key" secure:YES];
     NSGridView* live = [self grid:@[@[_stream], @[label(@"Service"), _service], @[label(@"Server URL"), _server],
-                                    @[label(@"Stream key"), _key], @[label(@"Bitrate (kb/s)"), _bitrate]]];
+                                    @[label(@"Stream key"), _key], @[label(@"Bitrate (kb/s)"), _bitrate],
+                                    @[label(@"Also stream to"), _service2], @[label(@"Server URL"), _server2],
+                                    @[label(@"Stream key"), _key2]]];
 
     _replay = [self check:@"Keep the last"];
     _replayLength = [self popup:@"Replay length"];
@@ -957,6 +964,7 @@ struct PreviewHit {
     [_format selectItemAtIndex:choice_index(kFormats, s.format)];
     _stream.state = s.stream ? NSControlStateValueOn : NSControlStateValueOff;
     [_service selectItemAtIndex:choice_index(kServices, s.destination)];
+    [_service2 selectItemAtIndex:choice_index(kSecondServices, s.destination2)];
     _bitrate.stringValue = [NSString stringWithFormat:@"%u", s.stream_kbps];
     _replay.state = s.replay ? NSControlStateValueOn : NSControlStateValueOff;
     const auto length = std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds);
@@ -971,6 +979,7 @@ struct PreviewHit {
     _folder.stringValue = ns(s.folder);
     _folder.toolTip = ns(s.folder);
     [self showServer];
+    [self showSecondServer];
     [self showDisplays:_displays windows:_windows microphones:_microphones];
     [self showScenes];
 }
@@ -1033,22 +1042,35 @@ struct PreviewHit {
     _server.stringValue = ns(custom ? _settings.server : rec::app::server_url(_settings));
     _server.editable = custom;
     _server.selectable = YES;
-    [self loadKey];
+    [self loadKey:NO];
+}
+
+- (void)showSecondServer {
+    const bool custom = _settings.destination2 == "custom";
+    _server2.stringValue = ns(custom ? _settings.server2 : rec::app::second_server_url(_settings));
+    _server2.editable = custom;
+    _server2.selectable = YES;
+    [self loadKey:YES];
 }
 
 // Off the main thread: a keychain prompt (a rebuilt app no longer matches the item's access
 // list) would otherwise keep the window from appearing at launch until it is answered.
-- (void)loadKey {
-    const std::string server = rec::app::server_url(_settings);
-    _key.stringValue = @"";
+- (void)loadKey:(BOOL)second {
+    const auto url = [second](const rec::app::Settings& s) {
+        return second ? rec::app::second_server_url(s) : rec::app::server_url(s);
+    };
+    const std::string server = url(_settings);
+    NSSecureTextField* field = second ? _key2 : _key;
+    field.stringValue = @"";
+    if (server.empty()) return;
     __weak RecController* weakSelf = self;
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         NSString* key = ns(load_key(server));
         dispatch_async(dispatch_get_main_queue(), ^{
             RecController* me = weakSelf;
             // A key typed meanwhile, or another server chosen, wins.
-            if (!me || me->_key.stringValue.length || rec::app::server_url(me->_settings) != server) return;
-            me->_key.stringValue = key;
+            if (!me || field.stringValue.length || url(me->_settings) != server) return;
+            field.stringValue = key;
         });
     });
 }
@@ -1081,6 +1103,8 @@ struct PreviewHit {
     s.stream = _stream.state == NSControlStateValueOn;
     s.destination = kServices[at(_service)].value;
     if (s.destination == "custom") s.server = utf8(_server.stringValue);
+    s.destination2 = kSecondServices[at(_service2)].value;
+    if (s.destination2 == "custom") s.server2 = utf8(_server2.stringValue);
     s.replay = _replay.state == NSControlStateValueOn;
     s.replay_seconds = rec::app::kReplayLengths[std::min(at(_replayLength), rec::app::kReplayLengths.size() - 1)];
     s.camera = _camera.state == NSControlStateValueOn;
@@ -1111,6 +1135,10 @@ struct PreviewHit {
     if (sender == _service) {
         [self readSettings];
         [self showServer];
+    }
+    if (sender == _service2) {
+        [self readSettings];
+        [self showSecondServer];
     }
     if (sender == _systemMute || sender == _micMute) {
         [self changeVolume:sender == _systemMute ? rec::AudioInput::system : rec::AudioInput::microphone];
@@ -1347,7 +1375,11 @@ struct PreviewHit {
     if (notification.object == _sceneName) rec::app::save_settings(_settingsPath, _settings);
     if (notification.object == _server && _settings.destination == "custom") {
         [self readSettings];
-        [self loadKey];
+        [self loadKey:NO];
+    }
+    if (notification.object == _server2 && _settings.destination2 == "custom") {
+        [self readSettings];
+        [self loadKey:YES];
     }
 }
 
@@ -1361,12 +1393,15 @@ struct PreviewHit {
             return;
         }
         [self remember];
-        const std::string key = utf8(_key.stringValue);
-        if (auto started = _session->start(_settings, key, _testPattern); !started) {
+        const std::string key = utf8(_key.stringValue), key2 = utf8(_key2.stringValue);
+        if (auto started = _session->start(_settings, key, key2, _testPattern); !started) {
             [self warn:ns(started.error)];
             return;
         }
-        if (_settings.stream) store_key(rec::app::server_url(_settings), key);
+        if (_settings.stream) {
+            store_key(rec::app::server_url(_settings), key);
+            store_key(rec::app::second_server_url(_settings), key2);
+        }
     }
     [self refresh];
 }
@@ -1666,6 +1701,7 @@ struct PreviewHit {
                                                     : NSColor.labelColor;
     _detail.textColor = _attention ? NSColor.systemOrangeColor : NSColor.secondaryLabelColor;
     NSString* live = !active ? @""
+                   : s.live && s.servers > 1 ? [NSString stringWithFormat:@"● LIVE %u/%u  %.1f Mb/s", s.servers_live, s.servers, s.stream_kbps / 1000.0]
                    : s.live ? [NSString stringWithFormat:@"● LIVE  %.1f Mb/s", s.stream_kbps / 1000.0]
                    : s.reconnecting ? @"Reconnecting…" : @"";
     if (![_live.stringValue isEqualToString:live]) _live.stringValue = live;
@@ -1681,8 +1717,9 @@ struct PreviewHit {
     _saveReplay.enabled = active && s.replay;
     const bool editable = s.state == State::idle;
     for (NSControl* control in @[_source, _systemAudio, _microphone, _cursor, _clicks, _resolution, _fps, _codec, _format,
-                                 _stream, _service, _server, _key, _bitrate, _replay, _replayLength, _changeFolder])
+                                 _stream, _service, _server, _key, _bitrate, _service2, _replay, _replayLength, _changeFolder])
         control.enabled = editable;
+    for (NSControl* control in @[_server2, _key2]) control.enabled = editable && _settings.destination2 != "none";
     _micDevice.enabled = editable && _microphone.state == NSControlStateValueOn;
     // Volume and mute change during a recording that has the source.
     for (NSControl* control in @[_systemVolume, _systemMute])
@@ -1829,6 +1866,7 @@ struct PreviewHit {
                                      self->_image, self->_imageFile, self->_chooseImage, self->_source, self->_systemAudio, self->_microphone,
                                      self->_micDevice, self->_cursor, self->_clicks, self->_resolution, self->_fps, self->_codec,
                                      self->_format, self->_stream, self->_service, self->_server, self->_key,
+                                     self->_service2, self->_server2, self->_key2,
                                      self->_bitrate, self->_changeFolder, self->_openFolder, self->_showLast,
                                      self->_systemMeter, self->_micMeter, self->_systemVolume, self->_micVolume,
                                      self->_systemMute, self->_micMute]) {
@@ -1944,12 +1982,18 @@ struct PreviewHit {
     if (!server.empty()) {
         set_check(_microphone, false);
         set_check(_stream, true);
+        // The same stream also goes to a second server with its own key.
+        const std::string server2 = server + "2";
         ui(^{
             [self->_service selectItemAtIndex:static_cast<NSInteger>(kServices.size()) - 1];
             [self->_service sendAction:self->_service.action to:self->_service.target];
             self->_server.stringValue = ns(server);
             self->_key.stringValue = @"appkey";
             self->_bitrate.stringValue = @"3000";
+            [self->_service2 selectItemAtIndex:static_cast<NSInteger>(kSecondServices.size()) - 1];
+            [self->_service2 sendAction:self->_service2.action to:self->_service2.target];
+            self->_server2.stringValue = ns(server2);
+            self->_key2.stringValue = @"appkey2";
         });
         press(_record);
         wait_for(recording, 20);
@@ -1966,18 +2010,19 @@ struct PreviewHit {
         __block NSString* badge;
         ui(^{ badge = self->_live.stringValue; });
         NSScanner* scanner = [NSScanner scannerWithString:badge];
-        [scanner scanUpToCharactersFromSet:NSCharacterSet.decimalDigitCharacterSet intoString:nil];
         double rate = 0;
-        if (![scanner scanDouble:&rate] || rate <= 0) fail([@"no stream rate in the LIVE badge: " stringByAppendingString:badge]);
+        if (![scanner scanString:@"● LIVE 2/2" intoString:nil] || ![scanner scanDouble:&rate] || rate <= 0)
+            fail([@"no stream rate for both servers in the LIVE badge: " stringByAppendingString:badge]);
         note([@"live=" stringByAppendingString:badge]);
         sleep(1);
         press(_record);
         wait_for(@"Ready to record", 30);
         if ([detail() hasPrefix:@"Stream stopped early"]) fail(detail());
         saved(@"stream");
-        const std::string stored = load_key(server);
+        const std::string stored = load_key(server), stored2 = load_key(server2);
         delete_key(server);
-        if (stored != "appkey") fail(@"the stream key was not stored in the keychain");
+        delete_key(server2);
+        if (stored != "appkey" || stored2 != "appkey2") fail(@"the stream keys were not stored in the keychain");
         note(@"keychain=ok");
         set_check(_stream, false);
     }

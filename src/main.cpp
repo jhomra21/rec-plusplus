@@ -222,7 +222,7 @@ void usage() {
                  "  -r, --resolution SIZE          720p, 1080p, 1440p, 4k, or native\n"
                  "  -f, --fps N                    24, 25, 30, 50, 60, or 120\n"
                  "  -t, --duration SECONDS         Recorded length, excluding pauses (0 = until stopped)\n"
-                 "  --codec NAME                   auto, h264, hevc\n"
+                 "  --codec NAME                   auto, h264, hevc, or prores (ProRes 422: macOS, .mov)\n"
                  "  --bitrate MBPS                 Target megabits/second (0 = automatic)\n"
                  "  --no-cursor                    Do not record the cursor\n"
                  "  --clicks                       Mark mouse presses: yellow left, blue right\n"
@@ -234,7 +234,7 @@ void usage() {
                  "  --mute-system, --mute-mic      Start with the source muted (unmute with a or m)\n"
                  "  --system-audio-offset-ms MS    Delay system audio (default: output device latency)\n"
                  "  --mic-offset-ms MS             Delay the microphone (default: 0)\n"
-                 "  --stream URL                   Also stream live: rtmp[s]://host[:port]/app/stream-key\n"
+                 "  --stream URL                   Also stream live: rtmp[s]://host[:port]/app/stream-key; repeat for up to 4 servers\n"
                  "  --stream-bitrate KBPS          Stream video kilobits/second (default: 6000)\n"
                  "  --replay SECONDS               Keep the last 5 to 300 seconds in memory; s saves them as an MP4\n"
                  "  --camera DEVICE[@X,Y,W,H]      Show a camera (default, or an ID or name from devices; test for a\n"
@@ -377,12 +377,14 @@ bool parse(int argc, char** argv, rec::Options& o, std::string& error) {
             if (value == "auto") o.codec = rec::Codec::automatic;
             else if (value == "h264") o.codec = rec::Codec::h264;
             else if (value == "hevc") o.codec = rec::Codec::hevc;
-            else { error = "codec must be auto, h264, or hevc"; return false; }
+            else if (value == "prores") o.codec = rec::Codec::prores;
+            else { error = "codec must be auto, h264, hevc, or prores"; return false; }
         } else if (arg == "--bitrate") {
             if (!integer(value, o.bitrate_mbps) || o.bitrate_mbps > 300) { error = "bitrate must be between 0 and 300 Mb/s"; return false; }
         } else if (arg == "--stream") {
             if (value.empty()) { error = "--stream needs an rtmp:// or rtmps:// URL"; return false; }
-            o.stream_url = value;
+            if (o.stream_urls.size() == rec::kMaxStreams) { error = "at most " + std::to_string(rec::kMaxStreams) + " --stream servers"; return false; }
+            o.stream_urls.emplace_back(value);
         } else if (arg == "--replay") {
             if (!integer(value, o.replay_seconds) || o.replay_seconds < 5 || o.replay_seconds > 300) {
                 error = "replay must be between 5 and 300 seconds"; return false;
@@ -495,7 +497,13 @@ void show_status(const rec::Stats& stats, double recorded, bool audio, bool stre
     if (!muted.empty()) std::cout << "   \033[33m" << muted << " muted\033[0m";
     if (streaming) {
         if (stats.streaming) {
-            std::cout << "   \033[35m\xE2\x97\x8F LIVE\033[0m " << static_cast<int>(stream_kbps) << " kb/s";
+            std::cout << "   \033[35m\xE2\x97\x8F LIVE\033[0m ";
+            if (stats.stream_count > 1) {
+                const auto on = std::count_if(stats.streams.begin(), stats.streams.begin() + stats.stream_count,
+                                              [](const rec::StreamStats& s) { return s.live; });
+                std::cout << on << "/" << stats.stream_count << " ";
+            }
+            std::cout << static_cast<int>(stream_kbps) << " kb/s";
             // Over a second of media waiting means the network is not keeping up.
             if (stats.stream_queued_ms > 1000)
                 std::cout << ", \033[33m" << std::fixed << std::setprecision(1) << stats.stream_queued_ms / 1000.0 << " s behind\033[0m";
@@ -606,7 +614,7 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, on_signal);
     const bool audio = options.system_audio || options.microphone || options.test_tone || options.test_mic;
     const bool live = terminal();
-    const bool streaming = !options.stream_url.empty();
+    const bool streaming = !options.stream_urls.empty();
     std::cout << "Recording to " << options.output
               << (!keyboard() ? " (Ctrl-C to stop)\n"
                   : options.replay_seconds ? " (p: pause/resume, s: save replay, q or Ctrl-C: stop)\n"
@@ -615,15 +623,17 @@ int main(int argc, char** argv) {
         std::cout << "Keeping the last " << options.replay_seconds << " s for replays at " << options.stream_kbps << " kb/s\n";
     if (streaming) {
         const auto stats = recorder.stats();
-        std::cout << "Streaming to " << redact(options.stream_url) << " at " << options.stream_kbps << " kb/s ("
+        std::cout << "Streaming to ";
+        for (std::size_t i = 0; i < options.stream_urls.size(); ++i) std::cout << (i ? ", " : "") << redact(options.stream_urls[i]);
+        std::cout << " at " << options.stream_kbps << " kb/s ("
                   << (stats.stream_hardware ? "hardware" : "software") << " H.264)\n";
     }
     std::cout << std::flush;
     watch_input();
     const auto began = std::chrono::steady_clock::now();
     auto shown = began - std::chrono::seconds(1);
-    bool reconnecting = false;
-    std::uint32_t reconnects = 0;
+    std::array<bool, rec::kMaxStreams> reconnecting{};
+    std::array<std::uint32_t, rec::kMaxStreams> reconnects{};
     auto recorded = [&] {
         const std::chrono::duration<double> wall = std::chrono::steady_clock::now() - began;
         return std::max(0.0, wall.count() - recorder.stats().paused_seconds);
@@ -727,19 +737,22 @@ int main(int argc, char** argv) {
             std::cout << std::flush;
             shown -= std::chrono::seconds(1);
         }
-        // Outages get their own lines, so a log shows when the stream dropped and came back.
+        // Outages get their own lines, so a log shows when a stream dropped and came back.
         if (streaming) {
             const auto stats = recorder.stats();
-            const bool back = stats.stream_reconnects != reconnects;
-            if (back || stats.stream_reconnecting != reconnecting) {
+            for (std::uint32_t i = 0; i < stats.stream_count; ++i) {
+                const auto& s = stats.streams[i];
+                const bool back = s.reconnects != reconnects[i];
+                if (!back && s.reconnecting == reconnecting[i]) continue;
+                const auto name = stats.stream_count > 1 ? "Stream " + redact(options.stream_urls[i]) : std::string("Stream");
                 if (live) std::cout << "\r\033[K";
-                if (back) std::cout << "Stream reconnected at " << clock_text(recorded()) << '\n';
-                else if (!stats.stream_reconnecting) std::cout << "Stream gave up reconnecting at " << clock_text(recorded()) << '\n';
-                if (stats.stream_reconnecting && (back || !reconnecting))
-                    std::cout << "Stream lost at " << clock_text(recorded()) << ", reconnecting\n";
+                if (back) std::cout << name << " reconnected at " << clock_text(recorded()) << '\n';
+                else if (!s.reconnecting) std::cout << name << " gave up reconnecting at " << clock_text(recorded()) << '\n';
+                if (s.reconnecting && (back || !reconnecting[i]))
+                    std::cout << name << " lost at " << clock_text(recorded()) << ", reconnecting\n";
                 std::cout << std::flush;
-                reconnecting = stats.stream_reconnecting;
-                reconnects = stats.stream_reconnects;
+                reconnecting[i] = s.reconnecting;
+                reconnects[i] = s.reconnects;
                 shown -= std::chrono::seconds(1);
             }
         }
@@ -782,6 +795,12 @@ int main(int argc, char** argv) {
                   << static_cast<int>(static_cast<double>(stats.stream_bytes) * 8 / 1000 / std::max(1.0, wall.count()))
                   << " kb/s), skipped " << stats.stream_dropped
                   << (stats.stream_reconnects ? ", reconnected " + std::to_string(stats.stream_reconnects) : std::string()) << '\n';
+    for (std::uint32_t i = 0; stats.stream_count > 1 && i < stats.stream_count; ++i) {
+        const auto& s = stats.streams[i];
+        std::cout << "  " << redact(options.stream_urls[i]) << ": " << s.frames << " frames, " << std::fixed
+                  << std::setprecision(1) << static_cast<double>(s.bytes) / 1e6 << " MB, skipped " << s.dropped
+                  << (s.reconnects ? ", reconnected " + std::to_string(s.reconnects) : std::string()) << '\n';
+    }
     if (!stopped) { std::cerr << stopped.error << '\n'; return 1; }
     if (!recorder.failure().empty()) { std::cerr << recorder.failure() << '\n'; return 1; }
     if (stats.window_closed) std::cout << "The window closed, so the recording stopped.\n";

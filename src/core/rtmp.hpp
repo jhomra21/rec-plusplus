@@ -145,4 +145,40 @@ private:
     std::atomic<std::uint64_t> bytes_{0}, dropped_{0};
 };
 
+// One stream encode sent to several servers. Each server has its own publisher, queue and
+// reconnects, so a slow or lost server holds back only itself.
+class Broadcast {
+public:
+    struct Counters {
+        bool live = false, reconnecting = false;
+        std::uint32_t reconnects = 0, queued_ms = 0;
+        std::uint64_t frames = 0, dropped = 0, bytes = 0;  // frames: video frames queued to send.
+    };
+
+    Broadcast() = default;
+    Broadcast(const Broadcast&) = delete;
+    Broadcast& operator=(const Broadcast&) = delete;
+
+    // Connects to every URL at once. Empty on success. If any server fails, none stays
+    // connected and the error names that server when there are several.
+    std::string open(const std::vector<std::string>& urls, const StreamInfo& info);
+    std::size_t size() const noexcept { return servers_.size(); }
+    void video(std::uint32_t ms, bool key, bool header, Bytes body);
+    void audio(std::uint32_t ms, bool header, Bytes body);
+    // Closes every server at once, each sending what is queued for at most flush_ms. The
+    // counters stay readable afterwards.
+    void close(int flush_ms);
+    Counters counters(std::size_t server) const;
+    // Why servers ended early, each named when there are several; empty when none did.
+    std::string failure() const;
+
+private:
+    struct Server {
+        std::string name;  // Redacted URL.
+        RtmpPublisher publisher;
+        std::atomic<std::uint64_t> frames{0};
+    };
+    std::vector<std::unique_ptr<Server>> servers_;  // Set by open() only.
+};
+
 } // namespace rec::core

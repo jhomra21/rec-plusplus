@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
@@ -8,7 +9,8 @@
 
 namespace rec {
 
-enum class Codec { automatic, h264, hevc };
+// prores: Apple ProRes 422, macOS only, in a .mov file; it ignores bitrate_mbps.
+enum class Codec { automatic, h264, hevc, prores };
 
 // Track layout when both system audio and a microphone are recorded.
 // With a single audio source the movie has a single audio track.
@@ -83,8 +85,9 @@ struct Options {
     std::optional<double> system_audio_offset_ms; // Unset: default output device latency (0 for test tone).
     double mic_offset_ms = 0;
     double duration_seconds = 10.0; // 0 = until stop()
-    // Live stream of the same timeline, encoded separately: rtmp[s]://host[:port]/app/stream-key.
-    std::string stream_url;
+    // Live streams of the same timeline, encoded once beside the file and sent to each server
+    // (at most kMaxStreams): rtmp[s]://host[:port]/app/stream-key.
+    std::vector<std::string> stream_urls;
     std::uint32_t stream_kbps = 6000; // Stream video bitrate; audio is 160 kb/s AAC.
     // Keep the last N seconds (5 to 300) of the stream encode in memory for save_replay();
     // 0 = off. Without stream_url the stream encoders run for the replay alone.
@@ -126,6 +129,19 @@ struct Camera {
     std::string name;
 };
 
+inline constexpr std::size_t kMaxStreams = 4;
+
+// One server of a live stream.
+struct StreamStats {
+    bool live = false;
+    bool reconnecting = false;
+    std::uint32_t reconnects = 0;
+    std::uint64_t frames = 0;  // Video frames queued for this server.
+    std::uint64_t dropped = 0; // Video frames this server skipped to keep up.
+    std::uint64_t bytes = 0;
+    std::uint32_t queued_ms = 0;
+};
+
 struct Stats {
     std::uint64_t captured = 0;
     std::uint64_t written = 0;
@@ -142,15 +158,18 @@ struct Stats {
     bool paused = false;
     double paused_seconds = 0; // Total time paused, excluded from the movie.
     bool window_closed = false; // The recorded window closed; that ended the recording, which was saved.
-    bool streaming = false; // Connected and sending.
-    bool stream_reconnecting = false; // Lost the server and trying to reconnect.
-    std::uint32_t stream_reconnects = 0; // Times the stream reconnected after a loss.
+    // The live stream across its servers; streams has each one, in Options::stream_urls order.
+    bool streaming = false; // Connected and sending to at least one server.
+    bool stream_reconnecting = false; // Lost a server and trying to reconnect.
+    std::uint32_t stream_reconnects = 0; // Times a server reconnected after a loss.
     bool stream_hardware = false; // The stream uses a hardware video encoder.
-    std::uint64_t stream_frames = 0; // Video frames sent to the stream.
-    std::uint64_t stream_dropped = 0; // Video frames the stream skipped to keep up.
-    std::uint64_t stream_bytes = 0;
-    // Media queued for the server and not yet sent; it grows when the network falls behind.
+    std::uint64_t stream_frames = 0; // Video frames sent, to the server that took the most.
+    std::uint64_t stream_dropped = 0; // Video frames skipped: by the encoder plus the most any server skipped.
+    std::uint64_t stream_bytes = 0; // Sent to all servers.
+    // Media queued and not yet sent, at the server furthest behind.
     std::uint32_t stream_queued_ms = 0;
+    std::array<StreamStats, kMaxStreams> streams{};
+    std::uint32_t stream_count = 0;
     double replay_seconds = 0; // Media the replay buffer holds now.
     std::uint64_t camera_frames = 0; // Frames received from camera overlays.
 };
@@ -215,7 +234,8 @@ public:
     bool finished() const noexcept; // Duration reached or capture failed.
     Stats stats() const noexcept;
     std::string failure() const;
-    // Why the stream ended early. The recording continues without it.
+    // Why stream servers ended early, each named when there are several. The recording
+    // continues without them.
     std::string stream_failure() const;
     // Writes the replay buffer to a new MP4 at path while recording continues: the last
     // replay_seconds, from a keyframe, so up to 2 s more. seconds receives the saved length.

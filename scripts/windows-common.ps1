@@ -252,6 +252,53 @@ function Stop-MediaMTX($server) {
     if (-not $server.Process.HasExited) { $server.Process.Kill(); $server.Process.WaitForExit() }
 }
 
+# Forwards 127.0.0.1:$port to 127.0.0.1:$target until Stop(), which also cuts every
+# connection, so a test can lose one server while others keep running.
+function Start-TcpRelay([int]$port, [int]$target) {
+    if (-not ('RecRelay' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Sockets;
+using System.Threading;
+public class RecRelay {
+    readonly TcpListener listener;
+    readonly List<TcpClient> clients = new List<TcpClient>();
+    readonly int target;
+    public RecRelay(int port, int target) {
+        this.target = target;
+        listener = new TcpListener(IPAddress.Loopback, port);
+        listener.Start();
+        new Thread(Accept) { IsBackground = true }.Start();
+    }
+    void Accept() {
+        try {
+            for (;;) {
+                var a = listener.AcceptTcpClient();
+                var b = new TcpClient("127.0.0.1", target);
+                lock (clients) { clients.Add(a); clients.Add(b); }
+                Pump(a, b);
+                Pump(b, a);
+            }
+        } catch (Exception) {}
+    }
+    static void Pump(TcpClient from, TcpClient to) {
+        new Thread(() => {
+            try { from.GetStream().CopyTo(to.GetStream()); } catch (Exception) {}
+            try { to.Client.Shutdown(SocketShutdown.Both); } catch (Exception) {}
+        }) { IsBackground = true }.Start();
+    }
+    public void Stop() {
+        listener.Stop();
+        lock (clients) { foreach (var c in clients) { try { c.Client.Close(); } catch (Exception) {} } }
+    }
+}
+'@
+    }
+    return New-Object RecRelay $port, $target
+}
+
 # The loudest peak (0..1) on the default output device over $seconds, from the endpoint's
 # own meter. Zero when nothing plays.
 function Get-OutputPeak([double]$seconds = 2) {

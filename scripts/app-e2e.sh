@@ -87,7 +87,7 @@ grep -qx 'idle-preview=ok' "$report"
 grep -qx 'preview=ok' "$report"
 grep -qx 'camera-layout=ok' "$report"
 grep -qx 'scene-editor=ok' "$report"
-grep -q '^live=● LIVE' "$report"
+grep -q '^live=● LIVE 2/2' "$report"
 
 probe "$(step pause)" app-pause
 grep -qx 'audio_tracks=3' "$artifacts/app-pause.probe"
@@ -107,6 +107,12 @@ grep -qx 'audio_codec=aac' "$artifacts/app-stream-received.probe"
 within "$(value av_sync_events "$artifacts/app-stream-received.probe")" 3 6
 # AVFoundation trims the AAC priming from MediaMTX's files; see smoke.sh.
 within "$(value av_offset_max_ms "$artifacts/app-stream-received.probe")" 0 55
+file="$(find "$received/live2/appkey2" -name '*.mp4' -print -quit)"
+[[ -n "$file" ]] || { echo 'MediaMTX recorded nothing from the second destination' >&2; exit 1; }
+probe "$file" app-stream-received-2
+frames="$(value frames "$artifacts/app-stream-received.probe")"
+within "$(value frames "$artifacts/app-stream-received-2.probe")" "$((frames - 1))" "$((frames + 1))"
+within "$(value av_offset_max_ms "$artifacts/app-stream-received-2.probe")" 0 55
 
 probe "$(step hidden)" app-hidden
 within "$(value duration "$artifacts/app-hidden.probe")" 1.5 3.5

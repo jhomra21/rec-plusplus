@@ -602,14 +602,15 @@ public:
             if (options_.preview_only) {
                 if (!options_.preview_width) return {"a preview needs a preview width"};
                 options_.system_audio = options_.microphone = options_.test_tone = options_.test_mic = false;
-                options_.stream_url.clear();
+                options_.stream_urls.clear();
                 options_.replay_seconds = 0;
                 options_.duration_seconds = 0;
             }
-            if ((!options_.stream_url.empty() || options_.replay_seconds) && (options_.stream_kbps < 500 || options_.stream_kbps > 50000))
+            if ((!options_.stream_urls.empty() || options_.replay_seconds) && (options_.stream_kbps < 500 || options_.stream_kbps > 50000))
                 return {"stream bitrate must be between 500 and 50000 kb/s"};
             if (options_.replay_seconds && (options_.replay_seconds < 5 || options_.replay_seconds > 300))
                 return {"replay must be between 5 and 300 seconds"};
+            if (options_.stream_urls.size() > kMaxStreams) return {"at most " + std::to_string(kMaxStreams) + " streams"};
             if (options_.fps == 0 || options_.fps > 120) return {"invalid frame rate"};
             if ((options_.test_tone || options_.test_mic) && !options_.test_pattern)
                 return {"synthetic audio needs the test pattern"};
@@ -624,6 +625,8 @@ public:
                 if (!path) return {"invalid output path"};
                 if ([[NSFileManager defaultManager] fileExistsAtPath:path])
                     return {"output file already exists: " + options_.output};
+                if (options_.codec == Codec::prores && [path.pathExtension.lowercaseString isEqualToString:@"mp4"])
+                    return {"ProRes needs a .mov output"};
             }
 
             audio_[kSystem].enabled = options_.system_audio || options_.test_tone;
@@ -672,9 +675,9 @@ public:
                     return {"could not make the preview"};
                 }
             }
-            if (!options_.stream_url.empty() || options_.replay_seconds) {
+            if (!options_.stream_urls.empty() || options_.replay_seconds) {
                 mac::LiveSettings live;
-                live.url = options_.stream_url;
+                live.urls = options_.stream_urls;
                 live.replay_seconds = options_.replay_seconds;
                 live.width = size_.width;
                 live.height = size_.height;
@@ -683,7 +686,7 @@ public:
                 live_ = std::make_unique<mac::LiveStream>();
                 if (auto started = live_->start(live); !started) {
                     stop();
-                    return {(options_.stream_url.empty() ? "replay: " : "stream: ") + started.error};
+                    return {(options_.stream_urls.empty() ? "replay: " : "stream: ") + started.error};
                 }
             }
             if (!options_.preview_only) {
@@ -842,6 +845,8 @@ public:
             stats.stream_dropped = live.dropped;
             stats.stream_bytes = live.bytes;
             stats.stream_queued_ms = live.queued_ms;
+            stats.streams = live.servers;
+            stats.stream_count = live.server_count;
             stats.replay_seconds = live.replay_seconds;
         }
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
@@ -958,7 +963,7 @@ private:
         config.minimumFrameInterval = CMTimeMake(9, static_cast<int32_t>(options_.fps * 10));
         // Up to three pending frames plus the current one and the encoder's in-flight surfaces;
         // a live stream's queue and encoder hold a few more.
-        config.queueDepth = options_.stream_url.empty() && !options_.replay_seconds ? 6 : 8;
+        config.queueDepth = options_.stream_urls.empty() && !options_.replay_seconds ? 6 : 8;
         config.showsCursor = options_.cursor;
         config.capturesAudio = options_.system_audio;
         config.sampleRate = kMixRate;
@@ -1048,7 +1053,11 @@ private:
             (options_.codec == Codec::automatic && size_.height > 1080);
         const std::uint64_t bitrate = static_cast<std::uint64_t>(options_.bitrate_mbps ?
             options_.bitrate_mbps : (size_.height > 1440 ? 50 : size_.height > 1080 ? 30 : 20)) * 1000000;
-        NSDictionary* settings = @{
+        // ProRes is intra-only at a rate set by its profile, so it takes no rate or keyframe keys.
+        NSDictionary* settings = options_.codec == Codec::prores ? @{
+            AVVideoCodecKey: AVVideoCodecTypeAppleProRes422,
+            AVVideoWidthKey: @(size_.width), AVVideoHeightKey: @(size_.height)
+        } : @{
             AVVideoCodecKey: hevc ? AVVideoCodecTypeHEVC : AVVideoCodecTypeH264,
             AVVideoWidthKey: @(size_.width), AVVideoHeightKey: @(size_.height),
             AVVideoCompressionPropertiesKey: @{
@@ -1516,7 +1525,8 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
         CMFormatDescriptionRef format = (__bridge CMFormatDescriptionRef)track.formatDescriptions.firstObject;
         const auto codec = format ? CMFormatDescriptionGetMediaSubType(format) : 0;
         probe.codec = codec == kCMVideoCodecType_H264 ? "h264" :
-                      codec == kCMVideoCodecType_HEVC ? "hevc" : "other";
+                      codec == kCMVideoCodecType_HEVC ? "hevc" :
+                      codec == kCMVideoCodecType_AppleProRes422 ? "prores" : "other";
         if (sample_rect) {
             const auto& r = *sample_rect;
             if (r.x < 0 || r.y < 0 || r.width < 2 || r.height < 2 || r.x + r.width > probe.width || r.y + r.height > probe.height)

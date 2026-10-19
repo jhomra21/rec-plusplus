@@ -132,7 +132,7 @@ Settings load_settings(const std::string& path) {
         else if (key == "fps") {
             const auto fps = number(value, 60);
             if (fps == 24 || fps == 25 || fps == 30 || fps == 50 || fps == 60 || fps == 120) s.fps = fps;
-        } else if (key == "codec" && (value == "auto" || value == "h264" || value == "hevc")) s.codec = value;
+        } else if (key == "codec" && value == kCodecs[choice_index(kCodecs, value)].value) s.codec = value;
         else if (key == "cursor") s.cursor = yes;
         else if (key == "clicks") s.clicks = yes;
         else if (key == "system_audio") s.system_audio = yes;
@@ -145,6 +145,8 @@ Settings load_settings(const std::string& path) {
         else if (key == "stream") s.stream = yes;
         else if (key == "destination" && (value == "twitch" || value == "youtube" || value == "custom")) s.destination = value;
         else if (key == "server") s.server = value;
+        else if (key == "destination2" && (value == "none" || value == "twitch" || value == "youtube" || value == "custom")) s.destination2 = value;
+        else if (key == "server2") s.server2 = value;
         else if (key == "stream_kbps") s.stream_kbps = std::clamp(number(value, 6000), 500u, 50000u);
         else if (key == "replay") s.replay = yes;
         else if (key == "replay_seconds") {
@@ -239,6 +241,7 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nsystem_volume=" << s.system_volume << "\nmic_volume=" << s.mic_volume
             << "\nsystem_muted=" << s.system_muted << "\nmic_muted=" << s.mic_muted
             << "\nstream=" << s.stream << "\ndestination=" << s.destination << "\nserver=" << s.server
+            << "\ndestination2=" << s.destination2 << "\nserver2=" << s.server2
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
             << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
@@ -300,10 +303,16 @@ std::optional<Window> find_window(const std::string& app, const std::string& tit
 
 std::optional<Window> find_window(const Settings& s) { return find_window(s.window_app, s.window_title); }
 
-std::string server_url(const Settings& s) {
-    if (s.destination == "twitch") return "rtmps://live.twitch.tv:443/app";
-    if (s.destination == "youtube") return "rtmps://a.rtmps.youtube.com:443/live2";
-    std::string url = s.server;
+std::string server_url(const Settings& s) { return server_url(s.destination, s.server); }
+
+std::string second_server_url(const Settings& s) {
+    return s.destination2 == "none" ? std::string() : server_url(s.destination2, s.server2);
+}
+
+std::string server_url(const std::string& destination, const std::string& server) {
+    if (destination == "twitch") return "rtmps://live.twitch.tv:443/app";
+    if (destination == "youtube") return "rtmps://a.rtmps.youtube.com:443/live2";
+    std::string url = server;
     while (!url.empty() && (url.back() == '/' || url.back() == ' ')) url.pop_back();
     return url;
 }
@@ -597,7 +606,8 @@ Result capture_options(const Settings& s, bool test_pattern, Options& o, SourceI
     }
     if (!resolution(s.resolution, o)) return {"unknown resolution: " + s.resolution};
     o.fps = s.fps;
-    o.codec = s.codec == "h264" ? Codec::h264 : s.codec == "hevc" ? Codec::hevc : Codec::automatic;
+    o.codec = s.codec == "h264" ? Codec::h264 : s.codec == "hevc" ? Codec::hevc :
+              s.codec == "prores" ? Codec::prores : Codec::automatic;
     o.cursor = s.cursor;
     o.clicks = s.clicks;
     o.system_gain_db = std::clamp(s.system_volume, kVolumeMin, kVolumeMax);
@@ -698,7 +708,8 @@ Session::~Session() {
     if (idle_thread_.joinable()) idle_thread_.join();
 }
 
-Result Session::start(const Settings& s, const std::string& stream_key, bool test_pattern) {
+Result Session::start(const Settings& s, const std::string& stream_key, const std::string& second_key,
+                      bool test_pattern) {
     {
         std::lock_guard lock(mutex_);
         if (state_ != State::idle) return {"a recording is already running"};
@@ -711,12 +722,19 @@ Result Session::start(const Settings& s, const std::string& stream_key, bool tes
     std::error_code error;
     std::filesystem::create_directories(utf8_path(s.folder), error);
     if (error) return {"cannot use the recordings folder: " + error.message()};
-    o.output = next_output(s.folder, s.format);
+    o.output = next_output(s.folder, o.codec == Codec::prores ? "mov" : s.format);
     if (s.stream) {
         const auto server = server_url(s);
         if (server.empty()) return {"enter the stream server URL"};
         if (stream_key.empty()) return {"enter the stream key"};
-        o.stream_url = server + "/" + stream_key;
+        o.stream_urls.push_back(server + "/" + stream_key);
+        if (s.destination2 != "none") {
+            const auto second = second_server_url(s);
+            if (second.empty()) return {"enter the second stream's server URL"};
+            if (second_key.empty()) return {"enter the second stream's key"};
+            if (second == server && second_key == stream_key) return {"both streams go to the same place; choose another second destination"};
+            o.stream_urls.push_back(second + "/" + second_key);
+        }
     }
     o.stream_kbps = s.stream_kbps;
     if (s.replay) o.replay_seconds = s.replay_seconds;
@@ -962,7 +980,8 @@ Status Session::status() {
         const bool active = recorder_ && (state_ == State::recording || state_ == State::paused);
         if (active) {
             last_ = recorder_->stats();
-            if (stream_error_.empty()) stream_error_ = recorder_->stream_failure();
+            // Grows as more servers end early.
+            if (auto failure = recorder_->stream_failure(); !failure.empty()) stream_error_ = std::move(failure);
             const auto now = std::chrono::steady_clock::now();
             if (const std::chrono::duration<double> span = now - rate_time_; span.count() >= 1) {
                 stream_kbps_ = static_cast<double>(last_.stream_bytes - rate_bytes_) * 8 / 1000 / span.count();
@@ -992,6 +1011,9 @@ Status Session::status() {
         s.stream_dropped = st.stream_dropped;
         s.stream_kbps = active && st.streaming ? stream_kbps_ : 0;
         s.stream_queued_ms = active ? st.stream_queued_ms : 0;
+        s.servers = st.stream_count;
+        s.servers_live = 0;
+        for (std::uint32_t i = 0; active && i < st.stream_count; ++i) s.servers_live += st.streams[i].live ? 1 : 0;
         s.replay_seconds = active ? st.replay_seconds : 0;
         s.scene = scene_;
         s.camera_frames = st.camera_frames;

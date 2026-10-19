@@ -58,8 +58,8 @@ public:
             replay_->set_priming(static_cast<std::uint32_t>(leading_));
         }
         core::StreamInfo info{settings_.width, settings_.height, settings_.fps, settings_.video_kbps, settings_.audio_kbps};
-        if (!settings_.url.empty())
-            if (auto error = publisher_.open(settings_.url, info); !error.empty()) { release(); return {error}; }
+        if (!settings_.urls.empty())
+            if (auto error = servers_.open(settings_.urls, info); !error.empty()) { release(); return {error}; }
         thread_ = std::thread([this] { run(); });
         return {};
     }
@@ -119,20 +119,29 @@ public:
         }
         wake_.notify_all();
         if (thread_.joinable()) thread_.join();
-        publisher_.close(0);
+        servers_.close(0);
         release();
     }
 
     LiveCounters counters() const {
         LiveCounters c;
-        c.live = publisher_.live() && !broken_.load();
+        const bool broken = broken_.load();
         c.hardware = hardware_;
-        c.frames = frames_sent_.load();
-        c.dropped = dropped_.load() + publisher_.dropped_frames();
-        c.bytes = publisher_.bytes();
-        c.queued_ms = publisher_.queued_ms();
-        c.reconnecting = publisher_.reconnecting() && !broken_.load();
-        c.reconnects = publisher_.reconnects();
+        std::uint64_t skipped = 0;
+        c.server_count = static_cast<std::uint32_t>(std::min(servers_.size(), kMaxStreams));
+        for (std::uint32_t i = 0; i < c.server_count; ++i) {
+            const auto s = servers_.counters(i);
+            auto& out = c.servers[i];
+            out = {s.live && !broken, s.reconnecting && !broken, s.reconnects, s.frames, s.dropped, s.bytes, s.queued_ms};
+            c.live = c.live || out.live;
+            c.reconnecting = c.reconnecting || out.reconnecting;
+            c.reconnects += out.reconnects;
+            c.frames = std::max(c.frames, out.frames);
+            skipped = std::max(skipped, out.dropped);
+            c.bytes += out.bytes;
+            c.queued_ms = std::max(c.queued_ms, out.queued_ms);
+        }
+        c.dropped = dropped_.load() + skipped;
         c.replay_seconds = replay_ ? replay_->seconds() : 0;
         return c;
     }
@@ -148,7 +157,7 @@ public:
             std::lock_guard lock(mutex_);
             if (!error_.empty()) return error_;
         }
-        return publisher_.failure();
+        return servers_.failure();
     }
 
 private:
@@ -313,7 +322,7 @@ private:
         }
         // Delivers every frame still in the encoder through the output callback.
         if (session_ && !broken_.load()) VTCompressionSessionCompleteFrames(session_, kCMTimeInvalid);
-        publisher_.close(3000);
+        servers_.close(3000);
     }
 
     void encode_video(const Pending& frame) {
@@ -396,12 +405,12 @@ private:
 
     void send_video(std::uint32_t ms, bool key, bool header, core::Bytes body) {
         if (replay_) replay_->video(ms, key, header, body);
-        if (!settings_.url.empty() && publisher_.video(ms, key, header, std::move(body)) && !header) frames_sent_.fetch_add(1);
+        servers_.video(ms, key, header, std::move(body));
     }
 
     void send_audio(std::uint32_t ms, bool header, core::Bytes body) {
         if (replay_) replay_->audio(ms, header, body);
-        if (!settings_.url.empty()) publisher_.audio(ms, header, std::move(body));
+        servers_.audio(ms, header, std::move(body));
     }
 
     static OSStatus supply(AudioConverterRef, UInt32* packets, AudioBufferList* data,
@@ -472,7 +481,7 @@ private:
     }
 
     LiveSettings settings_;
-    core::RtmpPublisher publisher_;
+    core::Broadcast servers_;
     std::unique_ptr<core::ReplayBuffer> replay_;
     VTCompressionSessionRef session_ = nullptr;
     AudioConverterRef converter_ = nullptr;
@@ -507,7 +516,7 @@ private:
     bool started_ = false;
 
     std::atomic_bool broken_{false};
-    std::atomic<std::uint64_t> frames_sent_{0}, dropped_{0};
+    std::atomic<std::uint64_t> dropped_{0};
 };
 
 LiveStream::LiveStream() : impl_(std::make_unique<Impl>()) {}

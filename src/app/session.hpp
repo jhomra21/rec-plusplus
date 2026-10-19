@@ -74,6 +74,9 @@ struct Settings {
     bool stream = false;              // Go live while recording.
     std::string destination = "twitch"; // twitch, youtube, custom.
     std::string server;               // Custom destination: rtmp[s]://host[:port]/app.
+    // A second server sent the same stream: none, twitch, youtube, custom.
+    std::string destination2 = "none";
+    std::string server2;              // Custom second destination.
     std::uint32_t stream_kbps = 6000;
     bool replay = false;              // Keep the last replay_seconds for Save Replay.
     std::uint32_t replay_seconds = 30;
@@ -96,7 +99,13 @@ struct Choice {
 inline constexpr std::array<Choice, 5> kResolutions{
     {{"720p", "720p"}, {"1080p", "1080p"}, {"1440p", "1440p"}, {"4k", "4K"}, {"native", "Native"}}};
 inline constexpr std::array<std::uint32_t, 6> kFrameRates{24, 25, 30, 50, 60, 120};
+#ifdef __APPLE__
+// ProRes always records to .mov, whatever the format setting says.
+inline constexpr std::array<Choice, 4> kCodecs{
+    {{"auto", "Automatic"}, {"h264", "H.264"}, {"hevc", "HEVC"}, {"prores", "ProRes 422 (MOV)"}}};
+#else
 inline constexpr std::array<Choice, 3> kCodecs{{{"auto", "Automatic"}, {"h264", "H.264"}, {"hevc", "HEVC"}}};
+#endif
 inline constexpr std::array<Choice, 2> kFormats{{{"mp4", "MP4"}, {"mov", "MOV"}}};
 inline constexpr std::array<std::uint32_t, 5> kReplayLengths{15, 30, 60, 120, 300};
 inline constexpr int kVolumeMin = -40, kVolumeMax = 20;
@@ -104,6 +113,8 @@ inline constexpr int kVolumeMin = -40, kVolumeMax = 20;
 inline constexpr std::uint32_t kPreviewWidth = 960;
 inline constexpr std::array<Choice, 3> kServices{
     {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
+inline constexpr std::array<Choice, 4> kSecondServices{
+    {{"none", "None"}, {"twitch", "Twitch"}, {"youtube", "YouTube"}, {"custom", "Custom RTMP server"}}};
 inline constexpr std::array<Choice, 5> kCorners{{{"bottom-right", "Bottom right"},
                                                 {"bottom-left", "Bottom left"},
                                                 {"top-right", "Top right"},
@@ -190,6 +201,9 @@ Area drag_area(const AreaDrag& drag, double x, double y);
 // rtmp:// or rtmps://host/app for the destination; the stream key is appended as the last
 // segment. The Twitch and YouTube presets use RTMPS.
 std::string server_url(const Settings& settings);
+// The same for the second destination; empty when there is none.
+std::string second_server_url(const Settings& settings);
+std::string server_url(const std::string& destination, const std::string& server);
 
 enum class State { idle, starting, recording, paused, finishing };
 
@@ -206,6 +220,7 @@ struct Status {
     std::uint64_t stream_dropped = 0;
     double stream_kbps = 0;          // Send rate over about the last second.
     std::uint32_t stream_queued_ms = 0;  // Media waiting to be sent; grows when the network falls behind.
+    std::uint32_t servers = 0, servers_live = 0;  // Stream servers, and those connected and sending.
     std::string stream_error;        // Why the stream ended; the recording continues.
     bool replay = false;             // This recording keeps a replay buffer.
     double replay_seconds = 0;       // Media the replay buffer holds now.
@@ -237,9 +252,11 @@ public:
     Session(const Session&) = delete;
     Session& operator=(const Session&) = delete;
 
-    // stream_key is used only when settings.stream is set. test_pattern records the
-    // synthetic flash/beep sources instead of the screen, for end-to-end checks.
-    Result start(const Settings& settings, const std::string& stream_key, bool test_pattern = false);
+    // The keys are used only when settings.stream is set, second_key only with a second
+    // destination. test_pattern records the synthetic flash/beep sources instead of the
+    // screen, for end-to-end checks.
+    Result start(const Settings& settings, const std::string& stream_key, const std::string& second_key,
+                 bool test_pattern = false);
     void stop();
     Result pause();
     Result resume();

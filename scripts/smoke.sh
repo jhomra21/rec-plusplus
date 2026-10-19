@@ -247,6 +247,21 @@ else
   grep -q 'Streaming to rtmps://127.0.0.1:1936/live/\*\*\*\*' "$artifacts/stream-rtmps.record.log"
   grep -q 'Streamed 120 frames' "$artifacts/stream-rtmps.record.log"
 
+  # Several servers: one encode, sent to each over its own connection. Losing one server is
+  # checked in smoke.ps1; the code that keeps the others going is shared.
+  expect_failure 'at most 4 --stream' record --test-pattern \
+    --stream rtmp://127.0.0.1:1935/live/m1 --stream rtmp://127.0.0.1:1935/live/m2 --stream rtmp://127.0.0.1:1935/live/m3 \
+    --stream rtmp://127.0.0.1:1935/live/m4 --stream rtmp://127.0.0.1:1935/live/m5
+  expect_failure 'rtmp://127.0.0.1:1/live/\*\*\*\*: could not connect' record --test-pattern -t 1 \
+    --stream rtmp://127.0.0.1:1935/live/refusedpair --stream rtmp://127.0.0.1:1/live/key -o "$tmp/refused-pair.mov"
+  REC_TLS_TRUST_CERT="$tmp/tls/cert.pem" "$rec" record --test-pattern --test-tone -r 720p -f 30 -t 4 \
+    --stream rtmp://127.0.0.1:1935/live/smokekey6 --stream rtmps://127.0.0.1:1936/live/smokekey7 \
+    -o "$artifacts/stream-multi-local.mov" | tee "$artifacts/stream-multi.record.log"
+  grep -q 'Streaming to rtmp://127.0.0.1:1935/live/\*\*\*\*, rtmps://127.0.0.1:1936/live/\*\*\*\*' "$artifacts/stream-multi.record.log"
+  grep -q 'rtmp://127.0.0.1:1935/live/\*\*\*\*: 120 frames' "$artifacts/stream-multi.record.log"
+  grep -q 'rtmps://127.0.0.1:1936/live/\*\*\*\*: 120 frames' "$artifacts/stream-multi.record.log"
+  if grep -q smokekey "$artifacts/stream-multi.record.log"; then echo 'a stream key was printed' >&2; exit 1; fi
+
   # A server restart mid-stream: the stream reconnects and resumes at the next keyframe.
   "$rec" record --test-pattern --test-tone -r 720p -f 30 -t 10 --stream rtmp://127.0.0.1:1935/live/smokekey5 \
     -o "$artifacts/stream-reconnect.mov" </dev/null >"$artifacts/stream-reconnect.record.log" 2>&1 &
@@ -308,6 +323,14 @@ else
   within "$(value frames "$artifacts/stream-received-smokekey4.probe")" 119 120
   within "$(value av_sync_events "$artifacts/stream-received-smokekey4.probe")" 4 4
   within "$(value av_offset_max_ms "$artifacts/stream-received-smokekey4.probe")" 0 55
+  for key in smokekey6 smokekey7; do
+    file="$(find "$received/live/$key" -name '*.mp4' -print -quit)"
+    [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
+    "$rec" probe "$file" | tee "$artifacts/stream-received-$key.probe"
+    within "$(value frames "$artifacts/stream-received-$key.probe")" 119 120
+    within "$(value av_sync_events "$artifacts/stream-received-$key.probe")" 4 4
+    within "$(value av_offset_max_ms "$artifacts/stream-received-$key.probe")" 0 55
+  done
   # The newest server recording is the session after the restart. MediaMTX may not have
   # written the 3 s before the kill, and that session cannot reach 100 frames anyway.
   file="$(find "$received/live/smokekey5" -name '*.mp4' | sort | tail -1)"
@@ -323,6 +346,14 @@ else
   grep -qx 'codec=hevc' "$artifacts/hevc.probe"
   grep -qx 'frames=30' "$artifacts/hevc.probe"
   grep -q 'written 30, dropped 0' "$artifacts/hevc.record.log"
+  # ProRes 422 is MOV only and every frame is a keyframe.
+  expect_failure 'ProRes needs a .mov' record --test-pattern -t 1 --codec prores -o "$tmp/prores.mp4"
+  "$rec" record --test-pattern -r 1080p -f 30 -t 2 --codec prores -o "$artifacts/prores.mov" | tee "$artifacts/prores.record.log"
+  "$rec" probe "$artifacts/prores.mov" | tee "$artifacts/prores.probe"
+  grep -qx 'codec=prores' "$artifacts/prores.probe"
+  grep -qx 'frames=60' "$artifacts/prores.probe"
+  grep -q 'written 60, dropped 0' "$artifacts/prores.record.log"
+  ls -l "$artifacts/prores.mov" "$artifacts/h264.mov" | tee "$artifacts/prores.size"
 
   expect_failure 'already exists' record --test-pattern -t 1 -o "$artifacts/h264.mov"
   "$rec" probe "$artifacts/h264.mov" | grep -qx 'frames=60'

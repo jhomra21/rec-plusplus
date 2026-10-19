@@ -657,10 +657,11 @@ public:
         if (options_.preview_only) {
             if (!options_.preview_width) return {"a preview needs a preview width"};
             options_.system_audio = options_.microphone = options_.test_tone = options_.test_mic = false;
-            options_.stream_url.clear();
+            options_.stream_urls.clear();
             options_.replay_seconds = 0;
             options_.duration_seconds = 0;
         }
+        if (options_.stream_urls.size() > kMaxStreams) return {"at most " + std::to_string(kMaxStreams) + " streams"};
         if (options_.fps == 0 || options_.fps > 120) return {"invalid frame rate"};
         if ((options_.test_tone || options_.test_mic) && !options_.test_pattern)
             return {"synthetic audio needs the test pattern"};
@@ -675,6 +676,7 @@ public:
             if (path.empty()) return {"invalid output path"};
             if (GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
                 return {"output file already exists: " + options_.output};
+            if (options_.codec == Codec::prores) return {"ProRes needs macOS; use h264 or hevc"};
         }
         const HRESULT mf = MFStartup(MF_VERSION, MFSTARTUP_LITE);
         if (FAILED(mf)) return {failed("Media Foundation is unavailable", mf)};
@@ -738,7 +740,7 @@ public:
                 return {failed("could not allocate the preview frame", hr)};
             }
         }
-        if (!options_.stream_url.empty() || options_.replay_seconds) {
+        if (!options_.stream_urls.empty() || options_.replay_seconds) {
             if (options_.stream_kbps < 500 || options_.stream_kbps > 50000) {
                 stop();
                 return {"stream bitrate must be between 500 and 50000 kb/s"};
@@ -748,7 +750,7 @@ public:
                 return {"replay must be between 5 and 300 seconds"};
             }
             win::LiveSettings live;
-            live.url = options_.stream_url;
+            live.urls = options_.stream_urls;
             live.replay_seconds = options_.replay_seconds;
             live.width = size_.width;
             live.height = size_.height;
@@ -759,7 +761,7 @@ public:
             live_ = std::make_unique<win::LiveStream>();
             if (auto started = live_->start(live); !started) {
                 stop();
-                return {(options_.stream_url.empty() ? "replay: " : "stream: ") + started.error};
+                return {(options_.stream_urls.empty() ? "replay: " : "stream: ") + started.error};
             }
         }
         active_.store(true);
@@ -876,6 +878,8 @@ public:
             stats.stream_dropped = live.dropped;
             stats.stream_bytes = live.bytes;
             stats.stream_queued_ms = live.queued_ms;
+            stats.streams = live.servers;
+            stats.stream_count = live.server_count;
             stats.replay_seconds = live.replay_seconds;
         }
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;

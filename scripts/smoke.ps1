@@ -307,6 +307,37 @@ try {
         Expect-Text $secure.Log 'Streaming to rtmps://127.0.0.1:1936/live/****'
         Expect-Text $secure.Log 'Streamed 120 frames'
 
+        # Several servers: one encode, sent to each over its own connection.
+        Expect-Failure 'at most 4 --stream' (@('record', '--test-pattern') + (1..5 | ForEach-Object { '--stream'; "rtmp://127.0.0.1:1935/live/many$_" }))
+        Expect-Failure 'rtmp://127.0.0.1:1/live/****: could not connect' @('record', '--test-pattern', '-t', '1',
+            '--stream', 'rtmp://127.0.0.1:1935/live/refusedpair', '--stream', 'rtmp://127.0.0.1:1/live/key', '-o', (Join-Path $tmp 'refused-pair.mp4'))
+        $env:REC_TLS_TRUST_CERT = $tls.Cert
+        try {
+            $multi = Record 'stream-multi' 'stream-multi-local.mp4' @('--test-pattern', '--test-tone', '-r', '720p', '-f', '30', '-t', '4',
+                '--stream', 'rtmp://127.0.0.1:1935/live/smokekey6', '--stream', 'rtmps://127.0.0.1:1936/live/smokekey7')
+        } finally { Remove-Item Env:REC_TLS_TRUST_CERT }
+        Expect-Text $multi.Log 'Streaming to rtmp://127.0.0.1:1935/live/****, rtmps://127.0.0.1:1936/live/****'
+        Expect-Text $multi.Log 'rtmp://127.0.0.1:1935/live/****: 120 frames'
+        Expect-Text $multi.Log 'rtmps://127.0.0.1:1936/live/****: 120 frames'
+        if ($multi.Log.Contains('smokekey')) { throw 'a stream key was printed' }
+
+        # Losing one server ends only its stream.
+        $relay = Start-TcpRelay 1937 1935
+        $onePath = Join-Path $artifacts 'stream-one-lost.mp4'
+        try {
+            $run = Start-RecProcess $rec @('record', '--test-pattern', '--test-tone', '-r', '720p', '-f', '30', '-t', '5',
+                '--stream', 'rtmp://127.0.0.1:1935/live/smokekey8', '--stream', 'rtmp://127.0.0.1:1937/live/smokekey9', '-o', $onePath)
+            Start-Sleep -Seconds 2
+        } finally { $relay.Stop() }
+        $one = Stop-RecProcess $run
+        Set-Content -Path (Join-Path $artifacts 'stream-one-lost.record.log') -Value $one.Text
+        Write-Host $one.Text
+        if ($one.Code -eq 0) { throw 'a lost server was not reported' }
+        Expect-Text $one.Text 'Stream rtmp://127.0.0.1:1937/live/**** lost at 00:0'
+        Expect-Text $one.Text 'rtmp://127.0.0.1:1935/live/****: 150 frames'
+        Expect-Text $one.Text 'Stream stopped early: rtmp://127.0.0.1:1937/live/****: lost the connection'
+        Expect-Text $one.Text 'written 150, dropped 0'
+
         # A server restart mid-stream: the stream reconnects and resumes at the next keyframe.
         $againPath = Join-Path $artifacts 'stream-reconnect.mp4'
         $run = Start-RecProcess $rec @('record', '--test-pattern', '--test-tone', '-r', '720p', '-f', '30', '-t', '10',
@@ -365,6 +396,17 @@ try {
     Expect-Within $tlsGot 'frames' 119 120
     Expect-Within $tlsGot 'av_sync_events' 4 4
     Expect-Within $tlsGot 'av_offset_max_ms' 0 20
+    foreach ($key in 'smokekey6', 'smokekey7') {
+        $file = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received "live\$key") | Select-Object -First 1
+        if (-not $file) { throw "MediaMTX recorded nothing for $key" }
+        $both = Get-Probe $rec $file.FullName (Join-Path $artifacts "stream-received-$key.probe")
+        Expect-Within $both 'frames' 119 120
+        Expect-Within $both 'av_sync_events' 4 4
+        Expect-Within $both 'av_offset_max_ms' 0 20
+    }
+    $file = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received 'live\smokekey8') | Select-Object -First 1
+    if (-not $file) { throw 'MediaMTX recorded nothing for the server that stayed' }
+    Expect-Within (Get-Probe $rec $file.FullName (Join-Path $artifacts 'stream-received-smokekey8.probe')) 'frames' 149 150
     # The newest server recording is the session after the restart. MediaMTX may not have
     # written the 3 s before the kill, and that session cannot reach 100 frames anyway.
     $resumedFile = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received 'live\smokekey5') | Sort-Object Name | Select-Object -Last 1
@@ -391,6 +433,7 @@ try {
         Expect-Text $hevcRun.Text 'written 30, dropped 0'
     }
 
+    Expect-Failure 'ProRes needs macOS' @('record', '--test-pattern', '-t', '1', '--codec', 'prores', '-o', (Join-Path $tmp 'prores.mov'))
     Expect-Failure 'already exists' @('record', '--test-pattern', '-t', '1', '-o', (Join-Path $artifacts 'h264.mp4'))
     Expect-Field (Get-Probe $rec (Join-Path $artifacts 'h264.mp4') (Join-Path $tmp 'recheck.probe')) 'frames' '60'
 

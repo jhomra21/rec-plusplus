@@ -8,11 +8,12 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace rec::mac {
 
 struct LiveSettings {
-    std::string url;  // Empty: encode only for the replay buffer.
+    std::vector<std::string> urls;  // None: encode only for the replay buffer.
     std::uint32_t replay_seconds = 0;
     std::uint32_t width = 0, height = 0, fps = 60;
     std::uint32_t video_kbps = 6000, audio_kbps = 160;
@@ -26,6 +27,8 @@ struct LiveCounters {
     std::uint64_t frames = 0, dropped = 0, bytes = 0;
     std::uint32_t queued_ms = 0;
     double replay_seconds = 0;
+    std::array<StreamStats, kMaxStreams> servers{};
+    std::uint32_t server_count = 0;
 };
 
 // A second, independent encode of the recording timeline for RTMP and the replay buffer:

@@ -51,6 +51,7 @@ enum Control : int {
     kCaptureHeader, kSourceLabel, kSource, kSystemAudio, kMicrophone, kMicDevice, kCursor, kClicks,
     kQualityHeader, kResolutionLabel, kResolution, kFpsLabel, kFps, kCodecLabel, kCodec, kFormatLabel, kFormat,
     kStreamHeader, kStream, kServiceLabel, kService, kServerLabel, kServer, kKeyLabel, kKey, kBitrateLabel, kBitrate,
+    kService2Label, kService2, kServer2Label, kServer2, kKey2Label, kKey2,
     kReplayHeader, kReplay, kReplayLength,
     kCameraHeader, kCamera, kCameraDevice, kPositionLabel, kCorner, kSizeLabel, kCameraSize, kSceneLabel, kScene,
     kImage, kImageFile, kBrowseImage,
@@ -73,6 +74,7 @@ using rec::app::kCorners;
 using rec::app::kFormats;
 using rec::app::kFrameRates;
 using rec::app::kResolutions;
+using rec::app::kSecondServices;
 using rec::app::kServices;
 
 std::wstring wide(const std::string& text) {
@@ -771,6 +773,12 @@ private:
         edit(kKey, ES_PASSWORD);
         label(kBitrateLabel, L"&Bitrate (kb/s)");
         edit(kBitrate, ES_NUMBER);
+        label(kService2Label, L"Also stream to");
+        HWND service2 = combo(kService2);
+        label(kServer2Label, L"Second server URL");
+        edit(kServer2);
+        label(kKey2Label, L"Second stream key");
+        edit(kKey2, ES_PASSWORD);
 
         label(kReplayHeader, L"Replay");
         check(kReplay, L"Keep the las&t");
@@ -812,6 +820,7 @@ private:
         fill(codec, kCodecs);
         fill(format, kFormats);
         fill(service, kServices);
+        fill(service2, kSecondServices);
         fill(corner, kCorners);
         fill(size, kCameraSizes);
         for (const auto& c : cameras_) SendMessageW(camera, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(c.name).c_str()));
@@ -860,7 +869,7 @@ private:
             place(label_id, x, y + px(4), label_width - gap, px(20));
             // A drop-down list's height includes its open list.
             const bool list = control_id == kSource || control_id == kMicDevice || control_id == kResolution ||
-                              control_id == kFps || control_id == kCodec || control_id == kFormat || control_id == kService ||
+                              control_id == kFps || control_id == kCodec || control_id == kFormat || control_id == kService || control_id == kService2 ||
                               control_id == kReplayLength;
             place(control_id, x + label_width, y, width - label_width, list ? px(240) : h);
             y += h + gap;
@@ -935,6 +944,9 @@ private:
         pair(kServerLabel, kServer, row);
         pair(kKeyLabel, kKey, row);
         pair(kBitrateLabel, kBitrate, row);
+        pair(kService2Label, kService2, row);
+        pair(kServer2Label, kServer2, row);
+        pair(kKey2Label, kKey2, row);
 
         header(kReplayHeader);
         beside(kReplay, kReplayLength);
@@ -1025,6 +1037,7 @@ private:
         select(kFormat, choice_index(kFormats, s.format));
         set_check(kStream, s.stream);
         select(kService, choice_index(kServices, s.destination));
+        select(kService2, choice_index(kSecondServices, s.destination2));
         SetWindowTextW(get(kBitrate), std::to_wstring(s.stream_kbps).c_str());
         set_check(kReplay, s.replay);
         select(kReplayLength, static_cast<int>(std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds) -
@@ -1038,6 +1051,7 @@ private:
         set_check(kShowPreview, s.preview);
         show_image();
         show_server();
+        show_second_server();
         SetWindowTextW(get(kFolder), wide(s.folder).c_str());
         show_scenes();
     }
@@ -1168,6 +1182,13 @@ private:
         SetWindowTextW(get(kKey), wide(load_key(rec::app::server_url(settings_))).c_str());
     }
 
+    void show_second_server() {
+        const bool custom2 = settings_.destination2 == "custom";
+        SetWindowTextW(get(kServer2), wide(custom2 ? settings_.server2 : rec::app::second_server_url(settings_)).c_str());
+        SendMessageW(get(kServer2), EM_SETREADONLY, !custom2, 0);
+        SetWindowTextW(get(kKey2), wide(load_key(rec::app::second_server_url(settings_))).c_str());
+    }
+
     void read_settings() {
         auto& s = settings_;
         const int source = selected(kSource);
@@ -1202,6 +1223,8 @@ private:
         s.preview = checked(kShowPreview);
         s.destination = kServices[at(kService)].value;
         if (s.destination == "custom") s.server = narrow(text_of(get(kServer)));
+        s.destination2 = kSecondServices[at(kService2)].value;
+        if (s.destination2 == "custom") s.server2 = narrow(text_of(get(kServer2)));
         const auto kbps = std::wcstoul(text_of(get(kBitrate)).c_str(), nullptr, 10);
         s.stream_kbps = static_cast<std::uint32_t>(std::clamp<unsigned long>(kbps ? kbps : 6000, 500, 50000));
     }
@@ -1274,10 +1297,11 @@ private:
             if (code == CBN_SELCHANGE) place_camera();
             return;
         case kShowLast: show_last(); return;
-        case kService:
+        case kService: case kService2:
             if (code == CBN_SELCHANGE) {
                 read_settings();
-                show_server();
+                if (id == kService) show_server();
+                else show_second_server();
                 refresh();
             }
             return;
@@ -1300,6 +1324,12 @@ private:
             if (code == EN_KILLFOCUS && settings_.destination == "custom") {
                 read_settings();
                 SetWindowTextW(get(kKey), wide(load_key(rec::app::server_url(settings_))).c_str());
+            }
+            return;
+        case kServer2:
+            if (code == EN_KILLFOCUS && settings_.destination2 == "custom") {
+                read_settings();
+                SetWindowTextW(get(kKey2), wide(load_key(rec::app::second_server_url(settings_))).c_str());
             }
             return;
         case kCamera: case kImage:
@@ -1347,11 +1377,15 @@ private:
         } else if (state == State::idle) {
             remember();
             const auto key = narrow(text_of(get(kKey)));
-            if (auto started = session_.start(settings_, key, test_pattern_); !started) {
+            const auto key2 = narrow(text_of(get(kKey2)));
+            if (auto started = session_.start(settings_, key, key2, test_pattern_); !started) {
                 MessageBoxW(window_, wide(started.error).c_str(), L"Rec could not start recording", MB_ICONWARNING);
                 return;
             }
-            if (settings_.stream) store_key(rec::app::server_url(settings_), key);
+            if (settings_.stream) {
+                store_key(rec::app::server_url(settings_), key);
+                store_key(rec::app::second_server_url(settings_), key2);
+            }
         }
         refresh();
     }
@@ -1719,7 +1753,10 @@ private:
         std::wstring live;
         if (active && s.live) {
             wchar_t rate[48];
-            std::swprintf(rate, 48, L"\u25CF LIVE  %.1f Mb/s", s.stream_kbps / 1000.0);
+            if (s.servers > 1)
+                std::swprintf(rate, 48, L"\u25CF LIVE %u/%u  %.1f Mb/s", s.servers_live, s.servers, s.stream_kbps / 1000.0);
+            else
+                std::swprintf(rate, 48, L"\u25CF LIVE  %.1f Mb/s", s.stream_kbps / 1000.0);
             live = rate;
         } else if (active && s.reconnecting) {
             live = L"Reconnecting...";
@@ -1741,7 +1778,7 @@ private:
         EnableWindow(get(kSaveReplay), active && s.replay);
         const bool editable = s.state == State::idle;
         for (int id : {kSource, kSystemAudio, kMicrophone, kCursor, kClicks, kResolution, kFps, kCodec, kFormat, kStream,
-                       kService, kKey, kBitrate, kReplay, kReplayLength, kChangeFolder})
+                       kService, kKey, kBitrate, kService2, kReplay, kReplayLength, kChangeFolder})
             EnableWindow(get(id), editable);
         EnableWindow(get(kMicDevice), editable && checked(kMicrophone));
         // Volume and mute change during a recording that has the source.
@@ -1758,6 +1795,7 @@ private:
         // A dragged camera is sized by its corners.
         EnableWindow(get(kCameraSize), arranging && settings_.camera && selected(kCorner) != choice_index(kCorners, "custom"));
         EnableWindow(get(kServer), editable);
+        for (int id : {kServer2, kKey2}) EnableWindow(get(id), editable && settings_.destination2 != "none");
         EnableWindow(get(kShowLast), !settings_.last_recording.empty());
 
         // Preview frames are made only while the window is on screen: the recording's, or

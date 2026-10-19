@@ -6,7 +6,7 @@
 # so it needs no screen, speakers or saved settings:
 #   1. Record with system audio and microphone, pause, resume, stop: the movie keeps sync.
 #   2. Start and stop with the global hotkey Ctrl+Alt+R.
-#   3. Go live to a local MediaMTX server while recording; the server's copy decodes.
+#   3. Go live to two paths of a local MediaMTX server at once while recording; both copies decode.
 #   4. Closing the window while recording keeps recording; the next stop saves the movie.
 #   5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
 #   6. A camera and an image are drawn; the scene moves the camera while recording. The
@@ -56,7 +56,8 @@ $PushButton = 43; $CheckButton = 44; $Text = 42; $ComboBox = 46; $Slider = 51; $
 $appHome = Join-Path $Artifacts 'app-home'
 $folder = Join-Path $appHome 'recordings'
 $server = 'rtmp://127.0.0.1:1935/live'
-cmdkey "/delete:rec/stream/$server" 2>&1 | Out-Null
+$server2 = 'rtmp://127.0.0.1:1935/live2'
+foreach ($url in $server, $server2) { cmdkey "/delete:rec/stream/$url" 2>&1 | Out-Null }
 if (Get-Process rec-app -ErrorAction SilentlyContinue) { throw 'quit Rec before running the app E2E' }
 
 # A step that fails with the app still running may be a hang: every thread's stack goes to
@@ -284,6 +285,10 @@ try {
     Set-Field $ui 'Server URL' $server
     Set-Field $ui 'Stream key' 'appkey'
     Set-Field $ui 'Bitrate (kb/s)' '3000'
+    # The same stream to a second server, with its own key.
+    Choose-Last $ui 'Also stream to'
+    Set-Field $ui 'Second server URL' $server2
+    Set-Field $ui 'Second stream key' 'appkey2'
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
     $deadline = (Get-Date).AddSeconds(10)
@@ -294,7 +299,7 @@ try {
     Start-Sleep -Seconds 3
     # The badge shows the measured send rate, here over a second of a 3000 kb/s stream.
     $badge = Text-Of $ui 102
-    if (-not ($badge -match 'LIVE\s+(\d+\.\d) Mb/s') -or [double]$Matches[1] -le 0) { throw "no stream rate in the LIVE badge: '$badge'" }
+    if (-not ($badge -match 'LIVE 2/2\s+(\d+\.\d) Mb/s') -or [double]$Matches[1] -le 0) { throw "no stream rate for both servers in the LIVE badge: '$badge'" }
     Start-Sleep -Seconds 1
     Press $ui 'Stop Recording'
     Wait-Status $ui 'Ready to record' | Out-Null
@@ -307,9 +312,16 @@ try {
     Expect-Field $got 'audio_codec' 'aac'
     Expect-Within $got 'av_sync_events' 3 6
     Expect-Within $got 'av_offset_max_ms' 0 20
-    Write-Host "3. stream: received $($got['frames']) frames, $($got['av_sync_events']) pairs, worst $($got['av_offset_max_ms']) ms"
-    $stored = cmdkey "/list:rec/stream/$server" | Out-String
-    if ($stored -notmatch [regex]::Escape("rec/stream/$server")) { throw 'the stream key was not stored in Credential Manager' }
+    $file = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received 'live2\appkey2') | Select-Object -First 1
+    if (-not $file) { throw 'MediaMTX recorded nothing from the second destination' }
+    $second = Get-Probe $Rec $file.FullName (Join-Path $Artifacts 'app-stream-received-2.probe')
+    Expect-Within $second 'frames' ([int]$got['frames'] - 1) ([int]$got['frames'] + 1)
+    Expect-Within $second 'av_offset_max_ms' 0 20
+    Write-Host "3. stream: received $($got['frames']) and $($second['frames']) frames, $($got['av_sync_events']) pairs, worst $($got['av_offset_max_ms']) ms"
+    foreach ($url in $server, $server2) {
+        $stored = cmdkey "/list:rec/stream/$url" | Out-String
+        if ($stored -notmatch [regex]::Escape("rec/stream/$url")) { throw "the stream key for $url was not stored in Credential Manager" }
+    }
 
     # 4. Close the window mid-recording: it hides and keeps recording.
     Set-Check $ui 'Go live while recording' $false
@@ -526,6 +538,8 @@ try {
     Copy-Item (Join-Path $appHome 'settings.conf') (Join-Path $Artifacts 'app-settings.conf')
     Expect-Text $settings "server=$server"
     Expect-Text $settings 'destination=custom'
+    Expect-Text $settings "server2=$server2"
+    Expect-Text $settings 'destination2=custom'
     Expect-Text $settings 'stream_kbps=3000'
     Expect-Text $settings 'fps=30'
     Expect-Text $settings 'last_recording='
@@ -582,5 +596,5 @@ try {
 } finally {
     if ($ui -and -not $ui.Process.HasExited) { $ui.Process.Kill() }
     Stop-MediaMTX $mediamtx
-    cmdkey "/delete:rec/stream/$server" 2>&1 | Out-Null
+    foreach ($url in $server, $server2) { cmdkey "/delete:rec/stream/$url" 2>&1 | Out-Null }
 }

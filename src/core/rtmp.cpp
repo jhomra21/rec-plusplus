@@ -771,4 +771,74 @@ void RtmpPublisher::close(int flush_ms) {
     live_.store(false);
 }
 
+std::string Broadcast::open(const std::vector<std::string>& urls, const StreamInfo& info) {
+    for (const auto& url : urls) {
+        servers_.push_back(std::make_unique<Server>());
+        servers_.back()->name = RtmpPublisher::redact(url);
+    }
+    std::vector<std::string> errors(urls.size());
+    std::vector<std::thread> connecting;
+    for (std::size_t i = 1; i < urls.size(); ++i)
+        connecting.emplace_back([&, i] { errors[i] = servers_[i]->publisher.open(urls[i], info); });
+    if (!urls.empty()) errors[0] = servers_[0]->publisher.open(urls[0], info);
+    for (auto& t : connecting) t.join();
+    for (std::size_t i = 0; i < errors.size(); ++i) {
+        if (errors[i].empty()) continue;
+        close(0);
+        const auto error = servers_.size() > 1 ? servers_[i]->name + ": " + errors[i] : errors[i];
+        servers_.clear();
+        return error;
+    }
+    return {};
+}
+
+void Broadcast::video(std::uint32_t ms, bool key, bool header, Bytes body) {
+    for (std::size_t i = 0; i < servers_.size(); ++i) {
+        auto& server = *servers_[i];
+        const bool queued = i + 1 < servers_.size() ? server.publisher.video(ms, key, header, body)
+                                                    : server.publisher.video(ms, key, header, std::move(body));
+        if (queued && !header) server.frames.fetch_add(1);
+    }
+}
+
+void Broadcast::audio(std::uint32_t ms, bool header, Bytes body) {
+    for (std::size_t i = 0; i < servers_.size(); ++i) {
+        if (i + 1 < servers_.size()) servers_[i]->publisher.audio(ms, header, body);
+        else servers_[i]->publisher.audio(ms, header, std::move(body));
+    }
+}
+
+void Broadcast::close(int flush_ms) {
+    std::vector<std::thread> closing;
+    for (std::size_t i = 1; i < servers_.size(); ++i)
+        closing.emplace_back([this, i, flush_ms] { servers_[i]->publisher.close(flush_ms); });
+    if (!servers_.empty()) servers_[0]->publisher.close(flush_ms);
+    for (auto& t : closing) t.join();
+}
+
+Broadcast::Counters Broadcast::counters(std::size_t server) const {
+    Counters c;
+    if (server >= servers_.size()) return c;
+    const auto& s = *servers_[server];
+    c.live = s.publisher.live();
+    c.reconnecting = s.publisher.reconnecting();
+    c.reconnects = s.publisher.reconnects();
+    c.queued_ms = s.publisher.queued_ms();
+    c.frames = s.frames.load();
+    c.dropped = s.publisher.dropped_frames();
+    c.bytes = s.publisher.bytes();
+    return c;
+}
+
+std::string Broadcast::failure() const {
+    std::string text;
+    for (const auto& s : servers_) {
+        const auto failure = s->publisher.failure();
+        if (failure.empty()) continue;
+        if (!text.empty()) text += "; ";
+        text += servers_.size() > 1 ? s->name + ": " + failure : failure;
+    }
+    return text;
+}
+
 } // namespace rec::core
