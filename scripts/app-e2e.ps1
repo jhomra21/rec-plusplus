@@ -120,6 +120,16 @@ function Wait-Status($ui, [string]$prefix, [int]$seconds = 20) {
     }
     throw "status is '$(Text-Of $ui 100)' ($(Text-Of $ui 101)), expected '$prefix...'"
 }
+# Waits until the status shows at least this many recorded seconds, so steps land at the movie
+# times the checks expect however slow the machine is.
+function Wait-Recorded($ui, [int]$seconds, [int]$timeout = 60) {
+    $deadline = (Get-Date).AddSeconds($timeout)
+    while ((Get-Date) -lt $deadline) {
+        if ((Text-Of $ui 100) -match '(\d+):(\d\d)$' -and [int]$Matches[1] * 60 + [int]$Matches[2] -ge $seconds) { return }
+        Start-Sleep -Milliseconds 50
+    }
+    throw "the recording did not reach $seconds s: '$(Text-Of $ui 100)'"
+}
 # The preview as the window shows it (the window's composed picture, cropped), saved as a PNG.
 function Snapshot-Preview($ui, [string]$path) {
     $handle = (Find $ui 'Preview' $Client).Handle
@@ -346,21 +356,21 @@ try {
     Wait-PreviewColor $ui $idle @(0.76, 0.75, 0.18, 0.18) 'green'
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
-    Start-Sleep -Milliseconds 2000
+    Wait-Recorded $ui 1
     # The preview: the camera in the bottom-right corner and the image's red block top left.
     $picture = Snapshot-Preview $ui (Join-Path $Artifacts 'app-preview-corner.png')
     Expect-Color (Picture-Color $picture 0.76 0.75 0.18 0.18) 'color' 'green'
     Expect-Color (Picture-Color $picture 0.02 0.03 0.15 0.15) 'color' 'red'
     $picture.Dispose()
-    Start-Sleep -Milliseconds 500
+    Wait-Recorded $ui 2
     Choose-Last $ui 'Scene'  # Camera only
     Start-Sleep -Milliseconds 1500
     $picture = Snapshot-Preview $ui (Join-Path $Artifacts 'app-preview-camera.png')
     Expect-Color (Picture-Color $picture 0.35 0.4 0.3 0.2) 'color' 'green'
     $picture.Dispose()
-    Start-Sleep -Milliseconds 1000
+    Wait-Recorded $ui 5
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]2001, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Screen only"
-    Start-Sleep -Milliseconds 2500
+    Wait-Recorded $ui 7
     Press $ui 'Stop Recording'
     Wait-Status $ui 'Ready to record' | Out-Null
     $movie = Newest-Movie
@@ -434,12 +444,12 @@ try {
         if ($combo.accValue(0) -ne 'Blue corner') { throw "the Scene list shows '$($combo.accValue(0))' after renaming" }
         Press $ui 'Start Recording'
         Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
-        Start-Sleep -Milliseconds 2000
+        Wait-Recorded $ui 2
         $sceneList = (Find $ui 'Scene' $ComboBox).Handle
         [AppWindow]::SendMessage($sceneList, 0x014E, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # CB_SETCURSEL: the first scene
         [AppWindow]::SendMessage($ui.Window, 0x0111, [IntPtr]((1 -shl 16) -bor [AppWindow]::GetDlgCtrlID($sceneList)), $sceneList) | Out-Null
         Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-scene-switched.png') @(0.6, 0.6, 0.3, 0.3) 'blue' -Not
-        Start-Sleep -Milliseconds 3000
+        Wait-Recorded $ui 5
         Press $ui 'Stop Recording'
         Wait-Status $ui 'Ready to record' | Out-Null
     } finally {
@@ -450,7 +460,7 @@ try {
     $quarter = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-scenes-quarter.probe') @('--sample', '1100,650,600,300')
     $last = 0
     while ($quarter.ContainsKey("sample_$($last + 1)")) { $last++ }
-    if ($last -lt 3) { throw "the scenes recording is too short: $($quarter['duration']) s" }
+    if ($last -lt 4) { throw "the scenes recording is too short: $($quarter['duration']) s" }
     Expect-Color $quarter 'sample_1' 'blue'
     Expect-Color $quarter "sample_$last" 'white'
     # Remove the layer, so the later steps capture only the test pattern.
