@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.22)
 project(rec VERSION 0.1.0 LANGUAGES CXX)
 
+if(MSVC)
+    # Release builds keep symbols, so the stacks of a hung app name its functions.
+    add_compile_options($<$<CONFIG:Release>:/Z7>)
+    add_link_options($<$<CONFIG:Release>:/DEBUG> $<$<CONFIG:Release>:/OPT:REF> $<$<CONFIG:Release>:/OPT:ICF>)
+endif()
+
 add_library(rec STATIC)
 target_compile_features(rec PUBLIC cxx_std_20)
 target_include_directories(rec PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>" "$<INSTALL_INTERFACE:include>")

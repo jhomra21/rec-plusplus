@@ -59,8 +59,22 @@ $server = 'rtmp://127.0.0.1:1935/live'
 cmdkey "/delete:rec/stream/$server" 2>&1 | Out-Null
 if (Get-Process rec-app -ErrorAction SilentlyContinue) { throw 'quit Rec before running the app E2E' }
 
-function Start-App {
-    $env:REC_APP_HOME = $appHome
+# A step that fails with the app still running may be a hang: every thread's stack goes to
+# app-stacks.txt when the Windows debugger is installed.
+function Save-Stacks($process) {
+    if (-not $process -or $process.HasExited) { return }
+    $cdb = @("${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe", "$env:ProgramFiles\Windows Kits\10\Debuggers\x64\cdb.exe") |
+        Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $cdb) { Write-Host 'no stacks: cdb.exe is not installed'; return }
+    $out = Join-Path $Artifacts 'app-stacks.txt'
+    $symbols = "$(Split-Path $App);srv*$(Join-Path $env:TEMP 'rec-symbols')*https://msdl.microsoft.com/download/symbols"
+    $run = Start-Process -FilePath $cdb -NoNewWindow -PassThru -RedirectStandardOutput $out `
+        -ArgumentList @('-pv', '-p', $process.Id, '-y', "`"$symbols`"", '-lines', '-c', '"~*kn 40; qd"')
+    if (-not $run.WaitForExit(240000)) { $run.Kill(); Write-Host 'cdb did not finish in 4 minutes' }
+    Get-Content $out | Write-Host
+}
+
+function Start-App {    $env:REC_APP_HOME = $appHome
     $env:REC_APP_TEST_PATTERN = '1'
     $process = Start-Process -FilePath $App -PassThru
     Remove-Item Env:REC_APP_HOME, Env:REC_APP_TEST_PATTERN
@@ -562,6 +576,9 @@ try {
     Expect-Within $ended 'av_offset_max_ms' 0 20
     Write-Host "10. log off while recording: $($ended['frames']) frames"
     Write-Host 'app e2e passed'
+} catch {
+    Save-Stacks $ui.Process
+    throw
 } finally {
     if ($ui -and -not $ui.Process.HasExited) { $ui.Process.Kill() }
     Stop-MediaMTX $mediamtx
