@@ -454,7 +454,7 @@ void remove_destination(Settings& s, std::size_t index) {
 const char* server_hint(const std::string& destination) {
     if (destination == "x") return "From X Media Studio, Producer: rtmps://…";
     if (destination == "tiktok") return "From TikTok LIVE Center; it changes each LIVE";
-    if (destination == "custom") return "rtmp://host/app or rtmps://host:443/app";
+    if (destination == "custom") return "rtmp://host/app, rtmps://host:443/app or a WHIP https:// URL";
     return "";
 }
 std::string server_url(const std::string& destination, const std::string& server) {
@@ -466,6 +466,8 @@ std::string server_url(const std::string& destination, const std::string& server
 }
 
 std::string redact(const std::string& url) {
+    if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0)
+        return url.substr(0, url.find_first_of("/#", url.find("://") + 3)) + "/****";
     const auto last = url.rfind('/');
     return last == std::string::npos ? url : url.substr(0, last + 1) + "****";
 }
@@ -919,8 +921,10 @@ Result Session::start(const Settings& s, const std::vector<std::string>& keys, b
             const auto server = server_url(d);
             const auto key = i < keys.size() ? keys[i] : std::string();
             if (server.empty()) return {name + ": enter the server URL"};
-            if (key.empty()) return {name + ": enter the stream key"};
-            const auto url = server + "/" + key;
+            // A WHIP endpoint is the whole URL; its key, if any, is the bearer token.
+            const bool whip = server.rfind("http://", 0) == 0 || server.rfind("https://", 0) == 0;
+            if (key.empty() && !whip) return {name + ": enter the stream key"};
+            const auto url = whip ? (key.empty() ? server : server + "#" + key) : server + "/" + key;
             if (std::find(urls.begin(), urls.end(), url) != urls.end()) return {name + " goes to the same place as another destination"};
             urls.push_back(url);
             // Each destination gets the picture it is set to; a vertical one the second canvas.

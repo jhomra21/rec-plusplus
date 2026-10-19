@@ -1,4 +1,5 @@
 #include "core/rtmp.hpp"
+#include "core/whip.hpp"
 
 #include <algorithm>
 #include <array>
@@ -141,7 +142,7 @@ std::string parse_url(const std::string& url, Target& t) {
     std::string rest;
     if (url.rfind("rtmps://", 0) == 0) { t.secure = true; t.port = "443"; rest = url.substr(8); }
     else if (url.rfind("rtmp://", 0) == 0) { t.port = "1935"; rest = url.substr(7); }
-    else return "stream URL must start with rtmp:// or rtmps://";
+    else return "stream URL must start with rtmp://, rtmps://, or http(s):// for WHIP";
     const auto slash = rest.find('/');
     if (slash == std::string::npos || slash == 0) return kShape;
     t.authority = rest.substr(0, slash);
@@ -321,6 +322,7 @@ RtmpPublisher::RtmpPublisher() = default;
 RtmpPublisher::~RtmpPublisher() { close(0); }
 
 std::string RtmpPublisher::redact(const std::string& url) {
+    if (WhipPublisher::is_whip(url)) return WhipPublisher::redact(url);
     Target target;
     if (!parse_url(url, target).empty()) return "(invalid stream URL)";
     return (target.secure ? "rtmps://" : "rtmp://") + target.authority + "/" + target.app + "/****";
@@ -783,16 +785,30 @@ void RtmpPublisher::close(int flush_ms) {
     live_.store(false);
 }
 
+Broadcast::Server::Server() = default;
+Broadcast::Server::~Server() = default;
+Broadcast::Broadcast() = default;
+Broadcast::~Broadcast() = default;
+
 std::string Broadcast::open(const std::vector<std::string>& urls, const StreamInfo& info) {
     for (const auto& url : urls) {
         servers_.push_back(std::make_unique<Server>());
-        servers_.back()->name = RtmpPublisher::redact(url);
+        auto& server = *servers_.back();
+        if (WhipPublisher::is_whip(url)) {
+            server.whip = std::make_unique<WhipPublisher>();
+            server.name = WhipPublisher::redact(url);
+        } else {
+            server.name = RtmpPublisher::redact(url);
+        }
     }
     std::vector<std::string> errors(urls.size());
+    auto connect = [&](std::size_t i) {
+        auto& server = *servers_[i];
+        errors[i] = server.whip ? server.whip->open(urls[i], info) : server.publisher.open(urls[i], info);
+    };
     std::vector<std::thread> connecting;
-    for (std::size_t i = 1; i < urls.size(); ++i)
-        connecting.emplace_back([&, i] { errors[i] = servers_[i]->publisher.open(urls[i], info); });
-    if (!urls.empty()) errors[0] = servers_[0]->publisher.open(urls[0], info);
+    for (std::size_t i = 1; i < urls.size(); ++i) connecting.emplace_back(connect, i);
+    if (!urls.empty()) connect(0);
     for (auto& t : connecting) t.join();
     for (std::size_t i = 0; i < errors.size(); ++i) {
         if (errors[i].empty()) continue;
@@ -814,10 +830,20 @@ void Broadcast::video(std::uint32_t ms, bool key, bool header, Bytes body) {
     if (!header) release_audio(ms);
     for (std::size_t i = 0; i < servers_.size(); ++i) {
         auto& server = *servers_[i];
-        const bool queued = i + 1 < servers_.size() ? server.publisher.video(ms, key, header, body)
-                                                    : server.publisher.video(ms, key, header, std::move(body));
+        const bool queued = server.whip               ? server.whip->video(ms, key, header, body)
+                            : i + 1 < servers_.size() ? server.publisher.video(ms, key, header, body)
+                                                      : server.publisher.video(ms, key, header, std::move(body));
         if (queued && !header) server.frames.fetch_add(1);
     }
+}
+
+bool Broadcast::wants_opus() const noexcept {
+    return std::any_of(servers_.begin(), servers_.end(), [](const auto& s) { return s->whip != nullptr; });
+}
+
+void Broadcast::opus(std::int64_t sample, const Bytes& packet) {
+    for (auto& server : servers_)
+        if (server->whip) server->whip->audio(sample, packet);
 }
 
 void Broadcast::audio(std::uint32_t ms, bool header, Bytes body) {
@@ -839,6 +865,7 @@ void Broadcast::release_audio(std::uint32_t upto) {
 
 void Broadcast::send_audio(std::uint32_t ms, bool header, Bytes body) {
     for (std::size_t i = 0; i < servers_.size(); ++i) {
+        if (servers_[i]->whip) continue;
         if (i + 1 < servers_.size()) servers_[i]->publisher.audio(ms, header, body);
         else servers_[i]->publisher.audio(ms, header, std::move(body));
     }
@@ -849,10 +876,14 @@ void Broadcast::close(int flush_ms) {
         std::lock_guard lock(order_);
         release_audio(UINT32_MAX);
     }
+    auto end = [this, flush_ms](std::size_t i) {
+        auto& server = *servers_[i];
+        if (server.whip) server.whip->close(flush_ms);
+        else server.publisher.close(flush_ms);
+    };
     std::vector<std::thread> closing;
-    for (std::size_t i = 1; i < servers_.size(); ++i)
-        closing.emplace_back([this, i, flush_ms] { servers_[i]->publisher.close(flush_ms); });
-    if (!servers_.empty()) servers_[0]->publisher.close(flush_ms);
+    for (std::size_t i = 1; i < servers_.size(); ++i) closing.emplace_back(end, i);
+    if (!servers_.empty()) end(0);
     for (auto& t : closing) t.join();
 }
 
@@ -860,11 +891,20 @@ Broadcast::Counters Broadcast::counters(std::size_t server) const {
     Counters c;
     if (server >= servers_.size()) return c;
     const auto& s = *servers_[server];
+    c.frames = s.frames.load();
+    if (s.whip) {
+        c.live = s.whip->live();
+        c.reconnecting = s.whip->reconnecting();
+        c.reconnects = s.whip->reconnects();
+        c.queued_ms = s.whip->queued_ms();
+        c.dropped = s.whip->dropped_frames();
+        c.bytes = s.whip->bytes();
+        return c;
+    }
     c.live = s.publisher.live();
     c.reconnecting = s.publisher.reconnecting();
     c.reconnects = s.publisher.reconnects();
     c.queued_ms = s.publisher.queued_ms();
-    c.frames = s.frames.load();
     c.dropped = s.publisher.dropped_frames();
     c.bytes = s.publisher.bytes();
     return c;
@@ -873,7 +913,7 @@ Broadcast::Counters Broadcast::counters(std::size_t server) const {
 std::string Broadcast::failure() const {
     std::string text;
     for (const auto& s : servers_) {
-        const auto failure = s->publisher.failure();
+        const auto failure = s->whip ? s->whip->failure() : s->publisher.failure();
         if (failure.empty()) continue;
         if (!text.empty()) text += "; ";
         text += servers_.size() > 1 ? s->name + ": " + failure : failure;

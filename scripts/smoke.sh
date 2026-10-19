@@ -297,7 +297,7 @@ else
   within "$(value av_offset_max_ms "$artifacts/crash.probe")" 0 20
   # Live streaming: a local MediaMTX server receives the RTMP stream and records it. The
   # received file must decode with the frames and A/V sync of the local recording.
-  expect_failure 'must start with rtmp://' record --test-pattern -t 1 --stream http://127.0.0.1/live/key -o "$tmp/bad-url.mov"
+  expect_failure 'must start with rtmp://' record --test-pattern -t 1 --stream ftp://127.0.0.1/live/key -o "$tmp/bad-url.mov"
   expect_failure 'must look like rtmp://' record --test-pattern -t 1 --stream rtmp://127.0.0.1/key -o "$tmp/bad-path.mov"
   expect_failure 'could not connect to 127.0.0.1:1' record --test-pattern -t 1 --stream rtmp://127.0.0.1:1/live/key -o "$tmp/refused.mov"
   received="$artifacts/stream-server"
@@ -326,6 +326,15 @@ else
   grep -q 'Streaming to rtmps://127.0.0.1:1936/live/\*\*\*\*' "$artifacts/stream-rtmps.record.log"
   grep -q 'Streamed 120 frames' "$artifacts/stream-rtmps.record.log"
 
+  # WHIP (WebRTC) beside RTMP from one encode: H.264 over SRTP with Opus audio, and the
+  # bearer token after '#' kept out of the log.
+  expect_failure 'could not connect to 127.0.0.1:1' record --test-pattern -t 1 --stream http://127.0.0.1:1/live/key/whip -o "$tmp/refused-whip.mov"
+  "$rec" record --test-pattern --test-tone -r 720p -f 30 -t 4 --stream rtmp://127.0.0.1:1935/live/smokekey12 \
+    --stream 'http://127.0.0.1:8889/live/smokewhip/whip#smoketoken' -o "$artifacts/stream-whip-local.mov" | tee "$artifacts/stream-whip.record.log"
+  grep -q 'Streaming to rtmp://127.0.0.1:1935/live/\*\*\*\*, http://127.0.0.1:8889/\*\*\*\*' "$artifacts/stream-whip.record.log"
+  grep -q 'http://127.0.0.1:8889/\*\*\*\*: 120 frames' "$artifacts/stream-whip.record.log"
+  grep -q 'rtmp://127.0.0.1:1935/live/\*\*\*\*: 120 frames' "$artifacts/stream-whip.record.log"
+  if grep -Eq 'smokewhip|smoketoken|smokekey12' "$artifacts/stream-whip.record.log"; then echo 'a WHIP path or token was printed' >&2; exit 1; fi
   # Several servers: one encode, sent to each over its own connection. Losing one server is
   # checked in smoke.ps1; the code that keeps the others going is shared.
   expect_failure 'at most 4 --stream' record --test-pattern \
@@ -434,7 +443,18 @@ else
   within "$(value frames "$artifacts/stream-received-smokekey4.probe")" 119 120
   within "$(value av_sync_events "$artifacts/stream-received-smokekey4.probe")" 4 4
   within "$(value av_offset_max_ms "$artifacts/stream-received-smokekey4.probe")" 0 55
-  for key in smokekey6 smokekey7; do
+  for key in smokewhip smokekey12; do
+    file="$(find "$received/live/$key" -name '*.mp4' -print -quit)"
+    [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
+    "$rec" probe "$file" | tee "$artifacts/stream-received-$key.probe"
+    grep -qx 'codec=h264' "$artifacts/stream-received-$key.probe"
+    within "$(value frames "$artifacts/stream-received-$key.probe")" 119 120
+    within "$(value av_sync_events "$artifacts/stream-received-$key.probe")" 4 4
+    # Same AVFoundation priming allowance as above (Opus: a 312-sample pre-skip, 6.5 ms).
+    within "$(value av_offset_max_ms "$artifacts/stream-received-$key.probe")" 0 55
+  done
+  grep -qx 'audio_codec=opus' "$artifacts/stream-received-smokewhip.probe"
+  grep -qx 'audio_codec=aac' "$artifacts/stream-received-smokekey12.probe"  for key in smokekey6 smokekey7; do
     file="$(find "$received/live/$key" -name '*.mp4' -print -quit)"
     [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
     "$rec" probe "$file" | tee "$artifacts/stream-received-$key.probe"

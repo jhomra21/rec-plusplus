@@ -50,8 +50,9 @@ CONFIG
     -keyout "$dir/key.pem" -out "$dir/cert.pem" 2>/dev/null
 }
 
-# start_mediamtx BINARY RECORDINGS WORK [TLS]: serves RTMP only on 127.0.0.1:1935 and records
-# every published stream as fragmented MP4 under RECORDINGS. With TLS, a directory from
+# start_mediamtx BINARY RECORDINGS WORK [TLS]: serves RTMP on 127.0.0.1:1935 and WHIP on
+# http://127.0.0.1:8889/<path>/whip (media over UDP 127.0.0.1:8189), and records every
+# published stream as fragmented MP4 under RECORDINGS. With TLS, a directory from
 # new_test_certificate, it also serves RTMPS on 127.0.0.1:1936.
 start_mediamtx() {
   local binary="$1" recordings="$2" work="$3" tls="${4:-}" attempt secure=""
@@ -73,7 +74,13 @@ rtmp: yes
 rtmpAddress: 127.0.0.1:1935
 $secure
 hls: no
-webrtc: no
+webrtc: yes
+webrtcAddress: 127.0.0.1:8889
+webrtcLocalUDPAddress: 127.0.0.1:8189
+webrtcLocalTCPAddress: ''
+webrtcIPsFromInterfaces: no
+webrtcAdditionalHosts: [127.0.0.1]
+webrtcICEServers2: []
 srt: no
 moq: no
 pathDefaults:

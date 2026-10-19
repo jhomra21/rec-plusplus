@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -37,4 +38,35 @@ std::unique_ptr<Transport> connect_tls(const std::string& host, const std::strin
 // system roots, so tests can stream to a server with a self-signed certificate. Empty if unset.
 std::vector<std::uint8_t> extra_trusted_certificate();
 
+// An IPv4 or IPv6 address and port, in network byte order.
+struct Endpoint {
+    bool v6 = false;
+    std::array<std::uint8_t, 16> address{};  // IPv4 uses the first 4 bytes.
+    std::uint16_t port = 0;
+    bool operator==(const Endpoint&) const = default;
+};
+// A numeric address ("192.0.2.1", "2001:db8::1"). False if it is not one.
+bool parse_endpoint(const std::string& ip, std::uint16_t port, Endpoint& out);
+std::string endpoint_ip(const Endpoint& endpoint);
+
+// A UDP socket for WebRTC media, bound to the local address that routes to a server. One
+// thread sends and receives.
+class UdpSocket {
+public:
+    ~UdpSocket();
+    UdpSocket(const UdpSocket&) = delete;
+    UdpSocket& operator=(const UdpSocket&) = delete;
+    // Resolves host and binds to the interface the system would use to reach it. Empty on error.
+    static std::unique_ptr<UdpSocket> toward(const std::string& host, std::string& error);
+    const Endpoint& local() const noexcept { return local_; }
+    bool send(const Endpoint& to, const std::uint8_t* data, std::size_t size);
+    // Waits up to timeout_ms for one datagram. 0 when none arrived.
+    std::size_t receive(std::uint8_t* data, std::size_t size, int timeout_ms, Endpoint& from);
+
+private:
+    UdpSocket() = default;
+    std::intptr_t socket_ = -1;
+    Endpoint local_;
+    bool winsock_ = false;
+};
 } // namespace rec::core

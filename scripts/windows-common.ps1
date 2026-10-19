@@ -231,9 +231,9 @@ function New-TestCertificate([string]$dir) {
     }
 }
 
-# Starts MediaMTX on 127.0.0.1:1935 with RTMP only, recording every published stream as
-# fragmented MP4 under $recordings. With $tls (from New-TestCertificate) it also serves
-# RTMPS on 127.0.0.1:1936.
+# Starts MediaMTX on 127.0.0.1:1935 with RTMP, and WHIP on http://127.0.0.1:8889/<path>/whip
+# (media over UDP 127.0.0.1:8189), recording every published stream as fragmented MP4 under
+# $recordings. With $tls (from New-TestCertificate) it also serves RTMPS on 127.0.0.1:1936.
 function Start-MediaMTX([string]$exe, [string]$recordings, [string]$work, $tls = $null) {
     New-Item -ItemType Directory -Force $recordings, $work | Out-Null
     $config = Join-Path $work 'mediamtx.yml'
@@ -252,7 +252,13 @@ rtmp: yes
 rtmpAddress: 127.0.0.1:1935
 $secure
 hls: no
-webrtc: no
+webrtc: yes
+webrtcAddress: 127.0.0.1:8889
+webrtcLocalUDPAddress: 127.0.0.1:8189
+webrtcLocalTCPAddress: ''
+webrtcIPsFromInterfaces: no
+webrtcAdditionalHosts: [127.0.0.1]
+webrtcICEServers2: []
 srt: no
 moq: no
 pathDefaults:

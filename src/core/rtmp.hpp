@@ -145,8 +145,11 @@ private:
     std::atomic<std::uint64_t> bytes_{0}, dropped_{0};
 };
 
-// One stream encode sent to several servers. Each server has its own publisher, queue and
-// reconnects, so a slow or lost server holds back only itself.
+class WhipPublisher;
+
+// One stream encode sent to several servers, RTMP(S) or WHIP. Each server has its own
+// publisher, queue and reconnects, so a slow or lost server holds back only itself. WHIP
+// servers get Opus audio (opus()) instead of AAC.
 class Broadcast {
 public:
     struct Counters {
@@ -155,7 +158,8 @@ public:
         std::uint64_t frames = 0, dropped = 0, bytes = 0;  // frames: video frames queued to send.
     };
 
-    Broadcast() = default;
+    Broadcast();
+    ~Broadcast();
     Broadcast(const Broadcast&) = delete;
     Broadcast& operator=(const Broadcast&) = delete;
 
@@ -165,6 +169,10 @@ public:
     std::size_t size() const noexcept { return servers_.size(); }
     void video(std::uint32_t ms, bool key, bool header, Bytes body);
     void audio(std::uint32_t ms, bool header, Bytes body);
+    // True when a WHIP server needs Opus. Set by open().
+    bool wants_opus() const noexcept;
+    // One 20 ms Opus packet starting at a 48 kHz sample index.
+    void opus(std::int64_t sample, const Bytes& packet);
     // Closes every server at once, each sending what is queued for at most flush_ms. The
     // counters stay readable afterwards.
     void close(int flush_ms);
@@ -174,8 +182,11 @@ public:
 
 private:
     struct Server {
+        Server();
+        ~Server();
         std::string name;  // Redacted URL.
         RtmpPublisher publisher;
+        std::unique_ptr<WhipPublisher> whip;  // Set instead for WHIP URLs.
         std::atomic<std::uint64_t> frames{0};
     };
     struct Held {

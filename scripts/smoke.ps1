@@ -433,7 +433,7 @@ try {
     Expect-Within $crash 'av_offset_max_ms' 0 20
     # Live streaming: a local MediaMTX server receives the RTMP stream and records it. The
     # received file must decode with the frames and A/V sync of the local recording.
-    Expect-Failure 'must start with rtmp://' @('record', '--test-pattern', '-t', '1', '--stream', 'http://127.0.0.1/live/key', '-o', (Join-Path $tmp 'bad-url.mp4'))
+    Expect-Failure 'must start with rtmp://' @('record', '--test-pattern', '-t', '1', '--stream', 'ftp://127.0.0.1/live/key', '-o', (Join-Path $tmp 'bad-url.mp4'))
     Expect-Failure 'must look like rtmp://' @('record', '--test-pattern', '-t', '1', '--stream', 'rtmp://127.0.0.1/key', '-o', (Join-Path $tmp 'bad-path.mp4'))
     Expect-Failure 'could not connect to 127.0.0.1:1' @('record', '--test-pattern', '-t', '1', '--stream', 'rtmp://127.0.0.1:1/live/key', '-o', (Join-Path $tmp 'refused.mp4'))
     Expect-Failure 'stream bitrate must be' @('record', '--stream-bitrate', '100')
@@ -467,6 +467,16 @@ try {
         Expect-Text $secure.Log 'Streaming to rtmps://127.0.0.1:1936/live/****'
         Expect-Text $secure.Log 'Streamed 120 frames'
 
+        # WHIP (WebRTC) beside RTMP from one encode: H.264 over SRTP with Opus audio, and the
+        # bearer token after '#' kept out of the log.
+        Expect-Failure 'could not connect to 127.0.0.1:1' @('record', '--test-pattern', '-t', '1', '--stream', 'http://127.0.0.1:1/live/key/whip',
+            '-o', (Join-Path $tmp 'refused-whip.mp4'))
+        $whip = Record 'stream-whip' 'stream-whip-local.mp4' @('--test-pattern', '--test-tone', '-r', '720p', '-f', '30', '-t', '4',
+            '--stream', 'rtmp://127.0.0.1:1935/live/smokekey12', '--stream', 'http://127.0.0.1:8889/live/smokewhip/whip#smoketoken')
+        Expect-Text $whip.Log 'Streaming to rtmp://127.0.0.1:1935/live/****, http://127.0.0.1:8889/****'
+        Expect-Text $whip.Log 'http://127.0.0.1:8889/****: 120 frames'
+        Expect-Text $whip.Log 'rtmp://127.0.0.1:1935/live/****: 120 frames'
+        if ($whip.Log -match 'smokewhip|smoketoken|smokekey12') { throw 'a WHIP path or token was printed' }
         # Several servers: one encode, sent to each over its own connection.
         Expect-Failure 'at most 4 --stream' (@('record', '--test-pattern') + (1..5 | ForEach-Object { '--stream'; "rtmp://127.0.0.1:1935/live/many$_" }))
         Expect-Failure 'rtmp://127.0.0.1:1/live/****: could not connect' @('record', '--test-pattern', '-t', '1',
@@ -565,7 +575,17 @@ try {
     Expect-Within $tlsGot 'frames' 119 120
     Expect-Within $tlsGot 'av_sync_events' 4 4
     Expect-Within $tlsGot 'av_offset_max_ms' 0 20
-    foreach ($key in 'smokekey6', 'smokekey7') {
+    foreach ($key in 'smokewhip', 'smokekey12') {
+        $file = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received "live\$key") | Select-Object -First 1
+        if (-not $file) { throw "MediaMTX recorded nothing for $key" }
+        $got = Get-Probe $rec $file.FullName (Join-Path $artifacts "stream-received-$key.probe")
+        Expect-Field $got 'codec' 'h264'
+        Expect-Field $got 'audio_codec' $(if ($key -eq 'smokewhip') { 'opus' } else { 'aac' })
+        Expect-Within $got 'frames' 119 120
+        Expect-Within $got 'av_sync_events' 4 4
+        # MediaMTX writes no edit list for Opus either: its 312-sample pre-skip reads 6.5 ms late.
+        Expect-Within $got 'av_offset_max_ms' 0 20
+    }    foreach ($key in 'smokekey6', 'smokekey7') {
         $file = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received "live\$key") | Select-Object -First 1
         if (-not $file) { throw "MediaMTX recorded nothing for $key" }
         $both = Get-Probe $rec $file.FullName (Join-Path $artifacts "stream-received-$key.probe")

@@ -133,7 +133,7 @@ inline constexpr int kVolumeMin = -40, kVolumeMax = 20;
 inline constexpr std::uint32_t kPreviewWidth = 960;
 // Custom stays last; the self-test picks it by position.
 inline constexpr std::array<Choice, 5> kServices{
-    {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"x", "X (Twitter)"}, {"tiktok", "TikTok"}, {"custom", "Custom RTMP server"}}};
+    {{"twitch", "Twitch"}, {"youtube", "YouTube"}, {"x", "X (Twitter)"}, {"tiktok", "TikTok"}, {"custom", "Custom server (RTMP or WHIP)"}}};
 inline constexpr std::array<Choice, 5> kCorners{{{"bottom-right", "Bottom right"},
                                                 {"bottom-left", "Bottom left"},
                                                 {"top-right", "Top right"},

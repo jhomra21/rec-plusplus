@@ -1860,7 +1860,7 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
             CMFormatDescriptionRef audio_format =
                 (__bridge CMFormatDescriptionRef)audio.formatDescriptions.firstObject;
             const auto subtype = audio_format ? CMFormatDescriptionGetMediaSubType(audio_format) : 0;
-            probe.audio_codec = subtype == kAudioFormatMPEG4AAC ? "aac" : "other";
+            probe.audio_codec = subtype == kAudioFormatMPEG4AAC ? "aac" : subtype == kAudioFormatOpus ? "opus" : "other";
             probe.audio_duration_seconds = CMTimeGetSeconds(audio.timeRange.duration);
             NSError* audio_error = nil;
             AVAssetReader* audio_reader = [[AVAssetReader alloc] initWithAsset:asset error:&audio_error];

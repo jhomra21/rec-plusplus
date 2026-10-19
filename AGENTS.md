@@ -45,9 +45,9 @@ These are references, not dependencies. Record the upstream revision when copyin
 - `include/rec/`: public C++ API.
 - `src/`: command-line frontend.
 - `src/cli/`: record options and control lines shared by `rec record` and the background engine (`rec serve`), which hosts one recording behind a per-user local socket.
-- `src/core/`: platform-neutral mixer, sync analysis, RTMP client and its TCP transport, shared by the engines.
-- `src/platform/macos/`: Apple capture, timing and encoding adapter, and TLS for RTMPS (Network.framework).
-- `src/platform/windows/`: Windows capture (WGC, WASAPI), timing and Media Foundation encoding adapter, and TLS for RTMPS (Schannel).
+- `src/core/`: platform-neutral mixer, sync analysis, RTMP client and its TCP transport, and the WHIP (WebRTC) publisher with its DTLS client and SRTP, shared by the engines.
+- `src/platform/macos/`: Apple capture, timing and encoding adapter, TLS for RTMPS (Network.framework), and crypto and Opus for WHIP (Security.framework, AudioToolbox).
+- `src/platform/windows/`: Windows capture (WGC, WASAPI), timing and Media Foundation encoding adapter, TLS for RTMPS (Schannel), and crypto and Opus for WHIP (CNG, libopus fetched by CMake).
 - `src/platform/unsupported.cpp`: clear error on other hosts.
 - `src/app/`: the desktop app. `session.{hpp,cpp}` is the shared layer (settings, stream destinations, one recording session hosted by the background engine and followed by a worker thread); `macos/main.mm` (AppKit) and `windows/main.cpp` (Win32 controls) only present it.
 - `support/`: Info.plists and the Windows app manifest.

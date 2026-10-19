@@ -18,6 +18,7 @@
 #include <codecapi.h>
 
 #include "platform/windows/stream.hpp"
+#include "core/opus.hpp"
 #include "core/replay.hpp"
 #include "core/rtmp.hpp"
 
@@ -205,6 +206,10 @@ public:
         core::StreamInfo info{settings_.width, settings_.height, settings_.fps, settings_.video_kbps, settings_.audio_kbps};
         if (!settings_.urls.empty())
             if (auto error = servers_.open(settings_.urls, info); !error.empty()) { release(); return {error}; }
+        if (servers_.wants_opus()) {
+            if (auto error = opus_.open(settings_.audio_kbps); !error.empty()) { servers_.close(0); release(); return {error}; }
+            opus_ready_ = true;
+        }
         thread_ = std::thread([this] { run(); });
         return {};
     }
@@ -569,6 +574,10 @@ private:
             ring_start_ += static_cast<std::int64_t>(frames);
         }
         if (!frames || broken_.load()) return;
+        if (opus_ready_)
+            opus_.encode(start, pcm_.data(), frames, [this](std::int64_t sample, core::OpusEncoder::Packet packet) {
+                servers_.opus(sample, packet);
+            });
         const DWORD bytes = static_cast<DWORD>(frames * 4);
         ComPtr<IMFMediaBuffer> buffer;
         ComPtr<IMFSample> sample;
@@ -630,6 +639,8 @@ private:
 
     LiveSettings settings_;
     core::Broadcast servers_;
+    core::OpusEncoder opus_;  // For WHIP servers; used by the encoding thread only.
+    bool opus_ready_ = false;
     std::unique_ptr<core::ReplayBuffer> replay_;
     std::unique_ptr<core::MovieWriter> movie_;  // Set before the thread starts.
     bool movie_finished_ = false;

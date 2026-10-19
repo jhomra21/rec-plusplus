@@ -197,7 +197,7 @@ bool parse_options(const std::vector<std::string>& args, Options& o, std::string
         } else if (arg == "--bitrate") {
             if (!integer(value, o.bitrate_mbps) || o.bitrate_mbps > 300) { error = "bitrate must be between 0 and 300 Mb/s"; return false; }
         } else if (arg == "--stream") {
-            if (value.empty()) { error = "--stream needs an rtmp:// or rtmps:// URL"; return false; }
+            if (value.empty()) { error = "--stream needs an rtmp://, rtmps:// or WHIP http(s):// URL"; return false; }
             if (o.stream_urls.size() == kMaxStreams) { error = "at most " + std::to_string(kMaxStreams) + " --stream servers"; return false; }
             o.stream_urls.emplace_back(value);
         } else if (arg == "--replay") {
@@ -257,7 +257,7 @@ bool parse_options(const std::vector<std::string>& args, Options& o, std::string
                 error = "--canvas2 must be WIDTHxHEIGHT, for example 1080x1920, or vertical"; return false;
             }
         } else if (arg == "--canvas2-stream") {
-            if (value.empty()) { error = "--canvas2-stream needs an rtmp:// or rtmps:// URL"; return false; }
+            if (value.empty()) { error = "--canvas2-stream needs an rtmp://, rtmps:// or WHIP http(s):// URL"; return false; }
             o.canvas2.stream_urls.emplace_back(value);
         } else if (arg == "--canvas2-output") {
             o.canvas2.output = value;
@@ -536,6 +536,9 @@ std::string clock_text(double seconds) {
 }
 
 std::string redact(const std::string& url) {
+    // WHIP: the path, or the token after '#', can hold the key.
+    if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0)
+        return url.substr(0, url.find_first_of("/#", url.find("://") + 3)) + "/****";
     const auto last = url.rfind('/');
     return last == std::string::npos ? url : url.substr(0, last + 1) + "****";
 }

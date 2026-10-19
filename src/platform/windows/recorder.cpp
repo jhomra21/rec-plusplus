@@ -2040,7 +2040,7 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
             ++probe.audio_tracks;
             if (audio < 0) {
                 audio = static_cast<int>(i);
-                probe.audio_codec = subtype == MFAudioFormat_AAC ? "aac" : "other";
+                probe.audio_codec = subtype == MFAudioFormat_AAC ? "aac" : subtype == MFAudioFormat_Opus ? "opus" : "other";
             }
         }
     }

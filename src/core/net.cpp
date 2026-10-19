@@ -16,6 +16,7 @@
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <arpa/inet.h>
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <sys/socket.h>
@@ -24,6 +25,7 @@
 #endif
 
 #include <algorithm>
+#include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string_view>
@@ -251,6 +253,147 @@ std::unique_ptr<Transport> connect_tcp(const std::string& host, const std::strin
     if (!transport->started()) { error = "could not start Windows networking"; return nullptr; }
     if (!transport->connect(host, port, timeout_ms, error)) return nullptr;
     return transport;
+}
+
+namespace {
+void to_sockaddr(const Endpoint& e, sockaddr_storage& out, int& length) {
+    std::memset(&out, 0, sizeof out);
+    if (e.v6) {
+        auto* a = reinterpret_cast<sockaddr_in6*>(&out);
+        a->sin6_family = AF_INET6;
+        a->sin6_port = htons(e.port);
+        std::memcpy(&a->sin6_addr, e.address.data(), 16);
+        length = sizeof(sockaddr_in6);
+    } else {
+        auto* a = reinterpret_cast<sockaddr_in*>(&out);
+        a->sin_family = AF_INET;
+        a->sin_port = htons(e.port);
+        std::memcpy(&a->sin_addr, e.address.data(), 4);
+        length = sizeof(sockaddr_in);
+    }
+}
+bool from_sockaddr(const sockaddr* s, Endpoint& out) {
+    out = {};
+    if (s->sa_family == AF_INET6) {
+        const auto* a = reinterpret_cast<const sockaddr_in6*>(s);
+        out.v6 = true;
+        std::memcpy(out.address.data(), &a->sin6_addr, 16);
+        out.port = ntohs(a->sin6_port);
+        return true;
+    }
+    if (s->sa_family == AF_INET) {
+        const auto* a = reinterpret_cast<const sockaddr_in*>(s);
+        std::memcpy(out.address.data(), &a->sin_addr, 4);
+        out.port = ntohs(a->sin_port);
+        return true;
+    }
+    return false;
+}
+Socket as_socket(std::intptr_t s) { return static_cast<Socket>(s); }
+} // namespace
+
+bool parse_endpoint(const std::string& ip, std::uint16_t port, Endpoint& out) {
+    out = {};
+    out.port = port;
+    if (inet_pton(AF_INET, ip.c_str(), out.address.data()) == 1) return true;
+    if (inet_pton(AF_INET6, ip.c_str(), out.address.data()) == 1) { out.v6 = true; return true; }
+    return false;
+}
+
+std::string endpoint_ip(const Endpoint& endpoint) {
+    char text[INET6_ADDRSTRLEN] = {};
+    inet_ntop(endpoint.v6 ? AF_INET6 : AF_INET, endpoint.address.data(), text, sizeof text);
+    return text;
+}
+
+UdpSocket::~UdpSocket() {
+    if (socket_ != -1) close_socket(as_socket(socket_));
+#ifdef _WIN32
+    if (winsock_) WSACleanup();
+#endif
+}
+
+std::unique_ptr<UdpSocket> UdpSocket::toward(const std::string& host, std::string& error) {
+    std::unique_ptr<UdpSocket> udp(new UdpSocket);
+#ifdef _WIN32
+    WSADATA data;
+    udp->winsock_ = WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    if (!udp->winsock_) { error = "could not start Windows networking"; return nullptr; }
+#endif
+    addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* found = nullptr;
+    if (getaddrinfo(host.c_str(), "9", &hints, &found) != 0 || !found) { error = "could not resolve " + host; return nullptr; }
+    // Connecting a UDP socket sends nothing; it only picks the route and so the local address.
+    Endpoint local;
+    bool routed = false;
+    for (auto* a = found; a && !routed; a = a->ai_next) {
+        const Socket probe = ::socket(a->ai_family, SOCK_DGRAM, 0);
+        if (probe == kNoSocket) continue;
+        sockaddr_storage name{};
+        socklen_t length = sizeof name;
+        if (::connect(probe, a->ai_addr, static_cast<int>(a->ai_addrlen)) == 0 &&
+            getsockname(probe, reinterpret_cast<sockaddr*>(&name), &length) == 0)
+            routed = from_sockaddr(reinterpret_cast<sockaddr*>(&name), local);
+        close_socket(probe);
+    }
+    freeaddrinfo(found);
+    if (!routed) { error = "no network route to " + host; return nullptr; }
+    local.port = 0;
+    sockaddr_storage bind_to{};
+    int length = 0;
+    to_sockaddr(local, bind_to, length);
+    const Socket s = ::socket(local.v6 ? AF_INET6 : AF_INET, SOCK_DGRAM, 0);
+    if (s == kNoSocket) { error = "could not open a UDP socket"; return nullptr; }
+    udp->socket_ = static_cast<std::intptr_t>(s);
+    if (::bind(s, reinterpret_cast<sockaddr*>(&bind_to), length) != 0) { error = "could not bind a UDP socket"; return nullptr; }
+    sockaddr_storage name{};
+    socklen_t name_length = sizeof name;
+    getsockname(s, reinterpret_cast<sockaddr*>(&name), &name_length);
+    from_sockaddr(reinterpret_cast<sockaddr*>(&name), udp->local_);
+    // Keyframes leave as bursts of a few hundred packets.
+    const int buffer = 4 << 20;
+    setsockopt(s, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&buffer), sizeof buffer);
+    setsockopt(s, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&buffer), sizeof buffer);
+    return udp;
+}
+
+bool UdpSocket::send(const Endpoint& to, const std::uint8_t* data, std::size_t size) {
+    sockaddr_storage address{};
+    int length = 0;
+    to_sockaddr(to, address, length);
+#ifdef _WIN32
+    return ::sendto(as_socket(socket_), reinterpret_cast<const char*>(data), static_cast<int>(size), 0,
+                    reinterpret_cast<sockaddr*>(&address), length) == static_cast<int>(size);
+#else
+    return ::sendto(as_socket(socket_), data, size, 0, reinterpret_cast<sockaddr*>(&address),
+                    static_cast<socklen_t>(length)) == static_cast<ssize_t>(size);
+#endif
+}
+
+std::size_t UdpSocket::receive(std::uint8_t* data, std::size_t size, int timeout_ms, Endpoint& from) {
+    const Socket s = as_socket(socket_);
+#ifdef _WIN32
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(s, &set);
+    timeval wait{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+    if (select(0, &set, nullptr, nullptr, &wait) <= 0) return 0;
+#else
+    pollfd wait{s, POLLIN, 0};
+    if (poll(&wait, 1, timeout_ms) <= 0) return 0;
+#endif
+    sockaddr_storage address{};
+    socklen_t length = sizeof address;
+#ifdef _WIN32
+    const int got = ::recvfrom(s, reinterpret_cast<char*>(data), static_cast<int>(size), 0,
+                               reinterpret_cast<sockaddr*>(&address), &length);
+#else
+    const ssize_t got = ::recvfrom(s, data, size, 0, reinterpret_cast<sockaddr*>(&address), &length);
+#endif
+    if (got <= 0 || !from_sockaddr(reinterpret_cast<sockaddr*>(&address), from)) return 0;
+    return static_cast<std::size_t>(got);
 }
 
 std::vector<std::uint8_t> extra_trusted_certificate() {

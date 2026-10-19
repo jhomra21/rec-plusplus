@@ -1,4 +1,5 @@
 #include "platform/macos/stream.hpp"
+#include "core/opus.hpp"
 #include "core/replay.hpp"
 #include "core/rtmp.hpp"
 
@@ -65,6 +66,10 @@ public:
         core::StreamInfo info{settings_.width, settings_.height, settings_.fps, settings_.video_kbps, settings_.audio_kbps};
         if (!settings_.urls.empty())
             if (auto error = servers_.open(settings_.urls, info); !error.empty()) { release(); return {error}; }
+        if (servers_.wants_opus()) {
+            if (auto error = opus_.open(settings_.audio_kbps); !error.empty()) { servers_.close(0); release(); return {error}; }
+            opus_ready_ = true;
+        }
         thread_ = std::thread([this] { run(); });
         return {};
     }
@@ -452,8 +457,15 @@ private:
     }
 
     void encode_audio() {
+        std::int64_t opus_start = 0;
+        opus_pcm_.clear();
         {
             std::lock_guard lock(mutex_);
+            if (ring_count_ && opus_ready_) {
+                opus_start = ring_start_;
+                for (std::size_t i = 0; i < ring_count_ * 2; ++i)
+                    opus_pcm_.push_back(static_cast<std::int16_t>(std::lround(ring_[((ring_head_ + i / 2) % kAudioFrames) * 2 + i % 2] * 32767.0f)));
+            }
             if (ring_count_) {
                 // A ring overflow skipped audio: move the encoder's timeline past the gap.
                 if (fed_ == INT64_MIN) fed_ = base_ = ring_start_;
@@ -471,6 +483,9 @@ private:
                 ring_count_ = 0;
             }
         }
+        if (!opus_pcm_.empty())
+            opus_.encode(opus_start, opus_pcm_.data(), opus_pcm_.size() / 2,
+                         [this](std::int64_t sample, core::OpusEncoder::Packet packet) { servers_.opus(sample, packet); });
         while (!broken_.load() && staged_.size() / 2 - staged_used_ >= kAacFrames) {
             AudioBufferList out{};
             out.mNumberBuffers = 1;
@@ -501,6 +516,9 @@ private:
 
     LiveSettings settings_;
     core::Broadcast servers_;
+    core::OpusEncoder opus_;  // For WHIP servers; used by the encoding thread only.
+    bool opus_ready_ = false;
+    std::vector<std::int16_t> opus_pcm_;
     std::unique_ptr<core::ReplayBuffer> replay_;
     std::unique_ptr<core::MovieWriter> movie_;  // Set before the thread starts.
     bool movie_finished_ = false;
