@@ -3,6 +3,7 @@
 #include "rec/rec.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -145,11 +146,74 @@ void watch_input() {
     }).detach();
 }
 
+const char* access_text(rec::Access access) {
+    switch (access) {
+    case rec::Access::granted: return "granted";
+    case rec::Access::denied: return "denied";
+    case rec::Access::not_determined: return "not asked yet";
+    case rec::Access::restricted: return "blocked by a device policy";
+    }
+    return "unknown";
+}
+
+int permissions(int argc, char** argv) {
+    using rec::Permission;
+    constexpr std::array<std::pair<const char*, Permission>, 3> all{{
+        {"screen", Permission::screen}, {"microphone", Permission::microphone}, {"camera", Permission::camera}}};
+    constexpr std::array<const char*, 3> labels{"Screen recording", "Microphone", "Camera"};
+    bool request = false;
+    for (int i = 2; i < argc; ++i) {
+        const std::string_view arg(argv[i]);
+        if (arg == "--request") { request = true; continue; }
+        if (arg == "--open" && i + 1 < argc) {
+            const std::string_view name(argv[++i]);
+            const auto found = std::find_if(all.begin(), all.end(), [&](const auto& p) { return name == p.first; });
+            if (found == all.end()) { std::cerr << "--open takes screen, microphone or camera\n"; return 2; }
+            if (auto opened = rec::open_permission_settings(found->second); !opened) {
+                std::cerr << opened.error << '\n';
+                return 1;
+            }
+            return 0;
+        }
+        std::cerr << "usage: rec permissions [--request] [--open screen|microphone|camera]\n";
+        return 2;
+    }
+    if (request) {
+        for (const auto& p : all) rec::request_permission(p.second);
+        // The prompts belong to this process; wait for the answers before exiting.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (std::chrono::steady_clock::now() < deadline &&
+               std::any_of(all.begin(), all.end(), [](const auto& p) {
+                   return p.second != Permission::screen && rec::permission_status(p.second) == rec::Access::not_determined;
+               }))
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+    bool missing = false;
+    for (std::size_t i = 0; i < all.size(); ++i) {
+        const auto access = rec::permission_status(all[i].second);
+        std::cout << labels[i] << ": " << access_text(access);
+        if (access == rec::Access::denied) std::cout << " (turn it on: rec permissions --open " << all[i].first << ')';
+        missing = missing || access != rec::Access::granted;
+        std::cout << '\n';
+    }
+#ifdef __APPLE__
+    if (request && rec::permission_status(Permission::screen) != rec::Access::granted)
+        std::cout << "Turn on rec in System Settings > Privacy & Security > Screen & System Audio Recording, then run it again.\n";
+    if (missing && !request) std::cout << "rec permissions --request asks for what is not decided yet.\n";
+#else
+    (void)missing;
+#endif
+    return 0;
+}
+
 void usage() {
     std::cout << "rec: native screen recorder for macOS and Windows\n\n"
                  "Usage:\n"
                  "  rec devices\n"
                  "  rec windows\n"
+                 "  rec permissions [--request] [--open screen|microphone|camera]\n"
+                 "                                 Show screen, microphone and camera access; --request asks for\n"
+                 "                                 what is undecided, --open shows the settings that grant it\n"
                  "  rec record [options]\n"
                  "  rec probe FILE [--sample X,Y,W,H]\n"
                  "  rec start [options]            Record in the background engine (launched if needed)\n"
@@ -372,6 +436,7 @@ int main(int argc, char** argv) {
                   << rec::default_output_latency_ms() << " ms\n";
         return status;
     }
+    if (command == "permissions") return permissions(argc, argv);
     if (command == "windows") {
         if (argc != 2) { std::cerr << "windows takes no options\n"; return 2; }
         std::string error;
@@ -428,6 +493,7 @@ int main(int argc, char** argv) {
     auto shown = began - std::chrono::seconds(1);
     std::array<bool, rec::kMaxStreams> reconnecting{};
     std::array<std::uint32_t, rec::kMaxStreams> reconnects{};
+    bool system_lost = false, microphone_lost = false, camera_lost = false;
     auto recorded = [&] {
         const std::chrono::duration<double> wall = std::chrono::steady_clock::now() - began;
         return std::max(0.0, wall.count() - recorder.stats().paused_seconds);
@@ -466,6 +532,21 @@ int main(int argc, char** argv) {
                 reconnects[i] = s.reconnects;
                 shown -= std::chrono::seconds(1);
             }
+        }
+        {
+            const auto stats = recorder.stats();
+            const auto report = [&](bool lost, bool& was, const char* name, const char* meanwhile) {
+                if (lost == was) return;
+                was = lost;
+                if (live) std::cout << "\r\033[K";
+                if (lost) std::cout << name << " lost at " << clock_text(recorded()) << "; " << meanwhile << '\n';
+                else std::cout << name << " back at " << clock_text(recorded()) << '\n';
+                std::cout << std::flush;
+                shown -= std::chrono::seconds(1);
+            };
+            report(stats.system_audio_lost, system_lost, "System audio", "its track is silent until it returns");
+            report(stats.microphone_lost, microphone_lost, "Microphone", "its track is silent until it returns");
+            report(stats.camera_lost, camera_lost, "Camera", "it shows its last frame");
         }
         const auto now = std::chrono::steady_clock::now();
         if (streaming && now - rate_since >= std::chrono::seconds(1)) {

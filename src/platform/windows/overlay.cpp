@@ -218,7 +218,7 @@ public:
                 name_ = name;
             }
         }
-        if (!chosen) return {"camera not found: " + wanted + "; run `rec cameras`"};
+        if (!chosen) return {"camera not found: " + wanted + "; run `rec devices`"};
         hr = chosen->ActivateObject(IID_PPV_ARGS(&source_));
         if (hr == E_ACCESSDENIED)
             return {"camera access is off: allow desktop apps in Settings > Privacy & security > Camera"};
@@ -285,6 +285,7 @@ public:
     std::uint32_t width() const { return width_; }
     std::uint32_t height() const { return height_; }
     std::uint64_t frames() const { return frames_.load(); }
+    bool lost() const { return lost_.load(); }
 
     // Copies the newest frame to a mapped texture when it is newer than seen.
     template <class Map> bool upload(std::uint64_t& seen, Map&& map) {
@@ -298,7 +299,16 @@ private:
     void generate() {
         std::vector<std::uint8_t> frame(pixels_.size());
         const auto begin = std::chrono::steady_clock::now();
+        // REC_E2E_LOSE_CAMERA=MS stops the test camera as an unplug would.
+        char* lose = nullptr;
+        std::size_t size = 0;
+        std::uint64_t lose_frame = UINT64_MAX;
+        if (!_dupenv_s(&lose, &size, "REC_E2E_LOSE_CAMERA") && lose) {
+            lose_frame = std::strtoull(lose, nullptr, 10) * core::kTestCameraFps / 1000;
+            std::free(lose);
+        }
         for (std::uint64_t n = 0; !stop_; ++n) {
+            if (n == lose_frame) { lost_.store(true); return; }
             core::test_camera_frame(n, frame.data(), static_cast<std::size_t>(width_) * 4);
             {
                 std::lock_guard lock(mutex_);
@@ -319,7 +329,10 @@ private:
             const HRESULT hr = reader_->ReadSample(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM), 0, &stream,
                                                    &flags, &time, &sample);
             // An unplugged camera ends here; its last frame stays on screen.
-            if (FAILED(hr) || (flags & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM))) break;
+            if (FAILED(hr) || (flags & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM))) {
+                lost_.store(true);
+                break;
+            }
             if (!sample) continue;
             ComPtr<IMFMediaBuffer> buffer;
             if (FAILED(sample->GetBufferByIndex(0, &buffer))) continue;
@@ -356,7 +369,7 @@ private:
     std::mutex mutex_;
     std::vector<std::uint8_t> pixels_;
     std::atomic<std::uint64_t> frames_{0};
-    std::atomic_bool stop_{false};
+    std::atomic_bool stop_{false}, lost_{false};
     std::thread thread_;
 };
 
@@ -792,6 +805,11 @@ public:
         return total;
     }
 
+    bool camera_lost() const {
+        std::lock_guard lock(mutex_);
+        return std::any_of(layers_.begin(), layers_.end(), [](const auto& layer) { return layer.camera && layer.camera->lost(); });
+    }
+
     bool draw(std::size_t canvas, ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame,
               unsigned subresource, std::chrono::steady_clock::time_point at) {
         struct Job { Layer* layer; Layout layout; Style style; };
@@ -1196,6 +1214,7 @@ Result Overlays::set_style(std::size_t index, const Style& style) { return impl_
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }
 Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { return impl_->set_screen(visible, area); }
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }
+bool Overlays::camera_lost() const { return impl_->camera_lost(); }
 void Overlays::stop() { impl_->stop(); }
 
 namespace {

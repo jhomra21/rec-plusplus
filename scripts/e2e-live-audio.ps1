@@ -13,6 +13,9 @@
 # REC_E2E_SOURCE=region records a 1280x720 region of the display.
 # REC_E2E_REPLAY=1 keeps a 5 s replay buffer and saves it when the stimulus ends; the clip
 # must be in sync too.
+# REC_E2E_LOSE_AUDIO=system|mic:AFTER_MS[:HOLD_MS] makes rec drop that device AFTER_MS into
+# the recording, as an unplug would, and reopen it HOLD_MS later: the movie must keep its
+# length, report the outage, and stay in sync after it.
 # Nothing else may play: the beep detector cannot tell other sound from beeps. The script
 # stops if the output device is not silent for 2 s first; REC_E2E_ALLOW_SOUND=1 skips that.
 $ErrorActionPreference = 'Stop'
@@ -110,8 +113,16 @@ if ($source -eq 'window') {
 if ($env:REC_E2E_MIC -eq '1') { Expect-Field $probe 'audio_tracks' '3' }
 if ($source -eq 'region') { Expect-Field $probe 'width' '1280'; Expect-Field $probe 'height' '720' }
 if ($pause) { Expect-Text $result.Text 'not in the movie' }
+# Beeps played while the device was gone are missing, so fewer pairs remain.
+$least = 4
+if ($env:REC_E2E_LOSE_AUDIO) {
+    Expect-Text $result.Text ' lost at '
+    Expect-Text $result.Text ' back at '
+    Expect-Text $result.Text 'Audio devices reopened 1'
+    $least = 3
+}
 $events = [int]$probe['av_sync_events']
-if ($events -lt 4) { throw "only $events flash/beep pairs found" }
+if ($events -lt $least) { throw "only $events flash/beep pairs found" }
 # ITU-R BT.1359 detectability: audio more than 45 ms early or 125 ms late.
 Expect-Within $probe 'av_offset_ms' -45 125
 

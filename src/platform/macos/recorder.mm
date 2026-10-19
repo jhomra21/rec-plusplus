@@ -26,10 +26,12 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -537,7 +539,35 @@ struct AudioSource {
     std::int64_t next_mix = INT64_MIN;   // Keeps consecutive buffers contiguous in the mix.
     std::atomic<std::uint64_t> written{0}, dropped{0};
     mutable std::atomic<float> peak{0};  // Level meter; stats() takes it.
+    CMAudioFormatDescriptionRef format = nullptr;  // The last captured buffer's, for silence; retained.
+    CMTime end = kCMTimeInvalid;          // Recording time the source's audio (or silence) reaches.
+    CMTime padded_until = kCMTimeInvalid; // Silence reaches here; captured audio before it is late.
+    std::atomic_bool silent{false};       // Delivered nothing for over a second; padded with silence.
+    // Host nanoseconds when REC_E2E_LOSE_AUDIO drops this source's buffers, as an unplug would.
+    std::atomic<std::int64_t> lose_from{INT64_MAX}, lose_until{INT64_MAX};
 };
+
+// Zeroed PCM in format, from start for duration. Null for other formats. The caller releases it.
+CMSampleBufferRef silence_buffer(CMAudioFormatDescriptionRef format, CMTime start, CMTime duration) {
+    const auto* asbd = format ? CMAudioFormatDescriptionGetStreamBasicDescription(format) : nullptr;
+    if (!asbd || asbd->mFormatID != kAudioFormatLinearPCM || asbd->mSampleRate <= 0 || !asbd->mBytesPerFrame) return nullptr;
+    const auto frames = static_cast<std::size_t>(std::llround(CMTimeGetSeconds(duration) * asbd->mSampleRate));
+    if (!frames) return nullptr;
+    // Planar buffers hold each channel's frames one after another.
+    const bool planar = (asbd->mFormatFlags & kAudioFormatFlagIsNonInterleaved) != 0;
+    const std::size_t bytes = frames * asbd->mBytesPerFrame * (planar ? asbd->mChannelsPerFrame : 1);
+    CMBlockBufferRef block = nullptr;
+    if (CMBlockBufferCreateWithMemoryBlock(kCFAllocatorDefault, nullptr, bytes, kCFAllocatorDefault, nullptr, 0, bytes,
+                                           kCMBlockBufferAssureMemoryNowFlag, &block) != kCMBlockBufferNoErr)
+        return nullptr;
+    CMBlockBufferFillDataBytes(0, block, 0, bytes);
+    CMSampleTimingInfo timing{CMTimeMake(1, static_cast<int32_t>(asbd->mSampleRate)), start, kCMTimeInvalid};
+    CMSampleBufferRef sample = nullptr;
+    const auto status = CMSampleBufferCreateReady(kCFAllocatorDefault, block, format, static_cast<CMItemCount>(frames), 1,
+                                                  &timing, 0, nullptr, &sample);
+    CFRelease(block);
+    return status == noErr ? sample : nullptr;
+}
 } // namespace
 
 std::vector<Display> list_displays(std::string& error) {
@@ -725,6 +755,7 @@ public:
             origin_ = nanos(host_origin_);
             timeline_.reset(origin_);
             begin_ = std::chrono::steady_clock::now();
+            simulate_loss();
             // Audio has been queueing since capture started. Drain it before drops count:
             // buffers before the origin are skipped, and any an output-latency offset moves
             // past it are kept. Otherwise the full ring evicts pre-roll until the first slot.
@@ -794,7 +825,7 @@ public:
             if (current_.pixel) { CVPixelBufferRelease(current_.pixel); current_ = {}; }
             for (auto& pixel : pattern_)
                 if (pixel) { CVPixelBufferRelease(pixel); pixel = nullptr; }
-            for (auto* format : {&mix_format_, &tone_format_, &mic_tone_format_})
+            for (auto* format : {&mix_format_, &tone_format_, &mic_tone_format_, &audio_[kSystem].format, &audio_[kMic].format})
                 if (*format) { CFRelease(*format); *format = nullptr; }
             active_ = false;
             return result;
@@ -823,6 +854,10 @@ public:
     void on_audio(CMSampleBufferRef sample, bool microphone) {
         auto& source = audio_[microphone ? kMic : kSystem];
         if (!source.enabled || !CMSampleBufferIsValid(sample) || !CMSampleBufferDataIsReady(sample)) return;
+        if (const auto from = source.lose_from.load(std::memory_order_relaxed); from != INT64_MAX) {
+            const auto now = now_nanos();
+            if (now >= from && now < source.lose_until.load(std::memory_order_relaxed)) return;
+        }
         CFRetain(sample);
         std::lock_guard lock(mutex_);
         // Before the origin, overflow only discards pre-roll that would never be written.
@@ -886,6 +921,9 @@ public:
         stats.canvas2_frames = handed - lost;
         stats.canvas2_dropped = canvas2_dropped_.load() + lost;
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
+        stats.camera_lost = overlays_ && overlays_->camera_lost();
+        stats.system_audio_lost = audio_[kSystem].enabled && audio_[kSystem].silent.load();
+        stats.microphone_lost = audio_[kMic].enabled && audio_[kMic].silent.load();
         return stats;
     }
     std::string failure() const { std::lock_guard lock(mutex_); return failure_; }
@@ -1327,7 +1365,17 @@ private:
         const auto ramp = source.fader.next();
         const bool alone = !(audio_[kSystem].enabled && audio_[kMic].enabled);
         bool used = false;
-        if (source.stem && CMTimeCompare(start, kCMTimeZero) >= 0) {
+        // Audio that arrives after silence already covered its time is late; the stem keeps the silence.
+        const bool late = CMTIME_IS_VALID(source.padded_until) && CMTimeCompare(start, source.padded_until) < 0;
+        if (!synthetic) {
+            if (auto* format = CMSampleBufferGetFormatDescription(sample); format && format != source.format) {
+                CFRetain(format);
+                if (source.format) CFRelease(source.format);
+                source.format = static_cast<CMAudioFormatDescriptionRef>(format);
+            }
+            if (!late) source.silent.store(false);
+        }
+        if (source.stem && CMTimeCompare(start, kCMTimeZero) >= 0 && !late) {
             CMSampleBufferRef scaled = alone && !ramp.unity() ? scaled_pcm(sample, ramp, scale_scratch_) : nullptr;
             const bool appended = append_retimed(source.stem, scaled ? scaled : sample, shift);
             if (scaled) CFRelease(scaled);
@@ -1338,6 +1386,10 @@ private:
                 if (writer_.status == AVAssetWriterStatusFailed)
                     fail(message(writer_.error, "audio encoding failed"));
             }
+        }
+        if (!late) {
+            const CMTime end = CMTimeAdd(start, CMSampleBufferGetDuration(sample));
+            if (!CMTIME_IS_VALID(source.end) || CMTimeCompare(end, source.end) > 0) source.end = end;
         }
         const bool pcm = stereo_pcm(sample, pcm_, scratch_);
         if (pcm) {
@@ -1430,7 +1482,66 @@ private:
                 source.held = nullptr;
             }
         }
+        if (!flush) pad_silent_sources();
         emit_mix(flush);
+    }
+
+    // AVAssetWriter interleaves its inputs by time: a source that stops delivering
+    // (unplugged) would stop the video input too. Its stem gets silence up to a second behind
+    // real time instead, and a stream without the mix gets the same silence.
+    void pad_silent_sources() {
+        const auto now = timeline_.to_output(now_nanos()).output;
+        for (auto kind : {kSystem, kMic}) {
+            auto& source = audio_[kind];
+            if (!source.enabled || source.held || !(kind == kSystem ? options_.system_audio : options_.microphone)) continue;
+            const auto behind = kNanos + std::max<std::int64_t>(0, -nanos(source.offset));
+            const CMTime from = CMTIME_IS_VALID(source.end) ? source.end : kCMTimeZero;
+            const CMTime target = CMTimeMake(now - behind, kNanos);
+            if (CMTimeCompare(target, from) <= 0) continue;
+            source.silent.store(true);
+            if (source.stem) {
+                if (!source.stem.readyForMoreMediaData) continue;
+                CMAudioFormatDescriptionRef format = source.format ? source.format : mix_format_;
+                CMAudioFormatDescriptionRef made = nullptr;
+                if (!format) format = made = pcm_format(kind == kSystem ? 2 : 1, true);
+                CMSampleBufferRef quiet = silence_buffer(format, from, CMTimeSubtract(target, from));
+                if (made) CFRelease(made);
+                if (!quiet) continue;
+                const bool appended = [source.stem appendSampleBuffer:quiet];
+                const CMTime end = CMTimeAdd(from, CMSampleBufferGetDuration(quiet));
+                CFRelease(quiet);
+                if (!appended) {
+                    if (writer_.status == AVAssetWriterStatusFailed) fail(message(writer_.error, "audio encoding failed"));
+                    continue;
+                }
+                source.end = end;
+            }
+            if (!mixing_) {
+                const auto first = static_cast<std::int64_t>(std::llround(CMTimeGetSeconds(from) * kMixRate));
+                const auto frames = static_cast<std::size_t>(std::llround(CMTimeGetSeconds(CMTimeSubtract(target, from)) * kMixRate));
+                if (live_) live_->audio(first, nullptr, frames);
+                if (live2_) live2_->audio(first, nullptr, frames);
+                source.next_mix = first + static_cast<std::int64_t>(frames);
+            }
+            if (!source.stem) source.end = target;
+            source.padded_until = source.end;
+        }
+    }
+
+    // REC_E2E_LOSE_AUDIO=system|mic:AFTER_MS[:HOLD_MS] drops that source's buffers for
+    // HOLD_MS, AFTER_MS into the recording.
+    void simulate_loss() {
+        const char* value = std::getenv("REC_E2E_LOSE_AUDIO");
+        if (!value) return;
+        const std::string text(value);
+        for (auto kind : {kSystem, kMic}) {
+            const std::string prefix = kind == kSystem ? "system:" : "mic:";
+            unsigned after = 0, hold = 0;
+            if (text.rfind(prefix, 0) != 0 || std::sscanf(text.c_str() + prefix.size(), "%u:%u", &after, &hold) < 1) continue;
+            const auto from = origin_ + static_cast<std::int64_t>(after) * 1'000'000;
+            audio_[kind].lose_until.store(from + static_cast<std::int64_t>(hold) * 1'000'000);
+            audio_[kind].lose_from.store(from);
+        }
     }
 
     // Takes ownership of sample. Synthetic audio must not be lost, so wait briefly for the input.

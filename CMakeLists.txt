@@ -15,8 +15,9 @@ target_include_directories(rec PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 if(APPLE)
     enable_language(OBJCXX)
     target_sources(rec PRIVATE src/platform/macos/recorder.mm src/platform/macos/overlay.mm src/platform/macos/stream.cpp
-        src/platform/macos/tls.cpp src/core/net.cpp src/core/rtmp.cpp src/core/replay.cpp)
-    set_source_files_properties(src/platform/macos/recorder.mm src/platform/macos/overlay.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        src/platform/macos/permissions.mm src/platform/macos/tls.cpp src/core/net.cpp src/core/rtmp.cpp src/core/replay.cpp)
+    set_source_files_properties(src/platform/macos/recorder.mm src/platform/macos/overlay.mm src/platform/macos/permissions.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_compile_definitions(rec PRIVATE GL_SILENCE_DEPRECATION)
     target_link_libraries(rec PUBLIC
         "-framework Foundation" "-framework ScreenCaptureKit" "-framework AVFoundation"
@@ -25,12 +26,12 @@ if(APPLE)
         "-framework CoreImage" "-framework Metal" "-framework MetalPerformanceShaders" "-framework Network" "-framework Security")
 elseif(WIN32)
     target_sources(rec PRIVATE src/platform/windows/recorder.cpp src/platform/windows/stream.cpp src/platform/windows/tls.cpp
-        src/platform/windows/overlay.cpp src/platform/windows/scaler.cpp
+        src/platform/windows/overlay.cpp src/platform/windows/scaler.cpp src/platform/windows/permissions.cpp
         src/core/mp4.cpp src/core/net.cpp src/core/rtmp.cpp src/core/replay.cpp)
     target_compile_definitions(rec PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
     target_compile_options(rec PRIVATE /permissive- /utf-8 /bigobj /EHsc)
     target_link_libraries(rec PUBLIC d3d11 dxgi d3dcompiler mf mfplat mfreadwrite mfuuid ole32 windowscodecs windowsapp
-        ws2_32 secur32 crypt32 dwmapi)
+        ws2_32 secur32 crypt32 dwmapi advapi32 shell32)
 else()
     target_sources(rec PRIVATE src/platform/unsupported.cpp)
 endif()

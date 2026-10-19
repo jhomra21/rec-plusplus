@@ -56,6 +56,7 @@ public:
     // A camera's shape, border and shadow, in both canvases.
     Result set_style(std::size_t index, const Style& style);
     std::uint64_t camera_frames() const;
+    bool camera_lost() const;  // A camera stopped delivering frames.
     void stop();
 
 private:

@@ -549,6 +549,7 @@ std::string summary(const Options& options, const Stats& stats, double wall_seco
     if (options.microphone || options.test_mic)
         out << "Microphone buffers written " << stats.mic_written << ", dropped " << stats.mic_dropped << '\n';
     if (stats.mix_written) out << "Mix buffers written " << stats.mix_written << '\n';
+    if (stats.audio_reconnects) out << "Audio devices reopened " << stats.audio_reconnects << '\n';
     if (std::any_of(options.overlays.begin(), options.overlays.end(), [](const Overlay& o) { return o.kind == Overlay::Kind::camera; }))
         out << "Camera frames " << stats.camera_frames << '\n';
     if (stats.paused_seconds > 0)

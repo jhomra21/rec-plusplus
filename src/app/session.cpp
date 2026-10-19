@@ -421,6 +421,17 @@ std::string destination_name(const Settings& s, std::size_t index) {
     return same == 1 ? label : label + " " + std::to_string(same);
 }
 
+std::string lost_sources_text(const Status& s) {
+    std::vector<std::string> audio;
+    if (s.system_audio_lost) audio.push_back("System audio");
+    if (s.microphone_lost) audio.push_back("The microphone");
+    std::string text;
+    if (audio.size() == 2) text = "System audio and the microphone stopped; their tracks stay silent until they return.";
+    else if (!audio.empty()) text = audio[0] + " stopped; its track stays silent until it returns.";
+    if (s.camera_lost) text += std::string(text.empty() ? "" : " ") + "The camera stopped; it shows its last frame.";
+    return text;
+}
+
 bool add_destination(Settings& s) {
     if (s.destinations.size() >= kMaxDestinations) return false;
     Destination d;
@@ -1278,6 +1289,9 @@ Status Session::status() {
         s.replay_seconds = active ? st.replay_seconds : 0;
         s.scene = scene_;
         s.camera_frames = st.camera_frames;
+        s.system_audio_lost = active && st.system_audio_lost;
+        s.microphone_lost = active && st.microphone_lost;
+        s.camera_lost = active && st.camera_lost;
         s.window_closed = st.window_closed;
         // A preview capture that ended on its own (its window closed, a device lost) stops.
         if (idle_ && idle_->finished() && idle_settings_) {

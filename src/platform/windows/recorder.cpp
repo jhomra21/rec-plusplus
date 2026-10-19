@@ -49,10 +49,13 @@
 #include <cmath>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <utility>
 #include <thread>
 #include <vector>
 
@@ -227,6 +230,19 @@ ComPtr<IMMDevice> find_microphone(const std::string& query, std::string& error) 
     return by_name;
 }
 
+// REC_E2E_LOSE_AUDIO=system|mic:AFTER_MS[:HOLD_MS] loses that device as an unplug would.
+std::optional<std::pair<std::uint32_t, std::uint32_t>> simulated_loss(const char* kind) {
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, "REC_E2E_LOSE_AUDIO") || !value) return std::nullopt;
+    const std::string text(value);
+    std::free(value);
+    const auto prefix = std::string(kind) + ':';
+    unsigned after = 0, hold = 0;
+    if (text.rfind(prefix, 0) != 0 || sscanf_s(text.c_str() + prefix.size(), "%u:%u", &after, &hold) < 1) return std::nullopt;
+    return std::pair{after, hold};
+}
+
 ComPtr<IDXGIAdapter1> adapter_for(HMONITOR monitor) {
     ComPtr<IDXGIFactory1> factory;
     if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) return {};
@@ -306,7 +322,57 @@ class AudioCapture {
 public:
     ~AudioCapture() { stop(); }
 
-    Result open(IMMDevice* device, bool loopback) {
+    // query finds the device again after a loss: empty for the default output (loopback), else
+    // a microphone query, where "default" follows the default microphone.
+    Result open(IMMDevice* device, bool loopback, std::string query) {
+        query_ = std::move(query);
+        loopback_ = loopback;
+        follow_default_ = loopback || query_.empty() || query_ == "default";
+        device_id_ = endpoint_id(device);
+        return open(device);
+    }
+
+    // Loses the device after_ms into the recording, as an unplug would, and keeps it lost for
+    // hold_ms before trying to reopen it (REC_E2E_LOSE_AUDIO, for the end-to-end checks).
+    void simulate_loss(std::uint32_t after_ms, std::uint32_t hold_ms) {
+        lose_after_ = std::chrono::milliseconds(after_ms);
+        hold_ = std::chrono::milliseconds(hold_ms);
+    }
+
+    Result start() {
+        stop_.store(false);
+        if (auto started = start_streams(); !started) return started;
+        thread_ = std::thread([this] { run(); });
+        return {};
+    }
+
+    void stop() {
+        stop_.store(true);
+        if (thread_.joinable()) thread_.join();
+        if (client_) client_->Stop();
+        if (render_) render_->Stop();
+    }
+
+    bool pop(AudioChunk& out) {
+        std::lock_guard lock(mutex_);
+        if (!count_) return false;
+        out = ring_[head_];
+        head_ = (head_ + 1) % ring_.size();
+        --count_;
+        return true;
+    }
+
+    std::uint64_t overflowed() const noexcept { return overflowed_.load(); }
+    bool lost() const noexcept { return lost_.load(); }
+    std::uint32_t reconnects() const noexcept { return reconnects_.load(); }
+
+private:
+    Result open(IMMDevice* device) {
+        capture_.Reset();
+        client_.Reset();
+        renderer_.Reset();
+        render_.Reset();
+        const bool loopback = loopback_;
         const DWORD mode = loopback ? AUDCLNT_STREAMFLAGS_LOOPBACK : 0;
         WAVEFORMATEXTENSIBLE wanted{};
         wanted.Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
@@ -363,8 +429,7 @@ public:
         return {};
     }
 
-    Result start() {
-        stop_.store(false);
+    Result start_streams() {
         HRESULT hr = S_OK;
         if (render_) {
             feed_silence();
@@ -373,29 +438,40 @@ public:
         }
         hr = client_->Start();
         if (FAILED(hr)) return {failed("could not start audio capture", hr)};
-        thread_ = std::thread([this] { run(); });
         return {};
     }
 
-    void stop() {
-        stop_.store(true);
-        if (thread_.joinable()) thread_.join();
-        if (client_) client_->Stop();
-        if (render_) render_->Stop();
+    ComPtr<IMMDevice> find_device() const {
+        std::string error;
+        if (!loopback_) return find_microphone(query_, error);
+        auto enumerator = device_enumerator();
+        ComPtr<IMMDevice> device;
+        if (enumerator) enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+        return device;
     }
 
-    bool pop(AudioChunk& out) {
-        std::lock_guard lock(mutex_);
-        if (!count_) return false;
-        out = ring_[head_];
-        head_ = (head_ + 1) % ring_.size();
-        --count_;
+    void lose() {
+        if (client_) client_->Stop();
+        if (render_) render_->Stop();
+        capture_.Reset();
+        client_.Reset();
+        renderer_.Reset();
+        render_.Reset();
+        lost_.store(true);
+    }
+
+    // The timeline places the reopened device's packets by their QPC stamps; the gap
+    // stays silent.
+    bool reopen() {
+        auto device = find_device();
+        if (!device || !open(device.Get()) || !start_streams()) { lose(); return false; }
+        device_id_ = endpoint_id(device.Get());
+        resampler_.reset(rate_);
+        lost_.store(false);
+        reconnects_.fetch_add(1);
         return true;
     }
 
-    std::uint64_t overflowed() const noexcept { return overflowed_.load(); }
-
-private:
     bool read_format(const WAVEFORMATEX* format) {
         rate_ = format->nSamplesPerSec;
         channels_ = format->nChannels;
@@ -429,12 +505,15 @@ private:
         std::int32_t v; std::memcpy(&v, p, 4); return v / 2147483648.0f;
     }
 
-    void feed_silence() {
+    HRESULT feed_silence() {
         UINT32 padding = 0;
-        if (FAILED(render_->GetCurrentPadding(&padding)) || padding >= render_frames_) return;
+        HRESULT hr = render_->GetCurrentPadding(&padding);
+        if (FAILED(hr) || padding >= render_frames_) return hr;
         BYTE* data = nullptr;
         const UINT32 free = render_frames_ - padding;
-        if (SUCCEEDED(renderer_->GetBuffer(free, &data))) renderer_->ReleaseBuffer(free, AUDCLNT_BUFFERFLAGS_SILENT);
+        hr = renderer_->GetBuffer(free, &data);
+        if (SUCCEEDED(hr)) renderer_->ReleaseBuffer(free, AUDCLNT_BUFFERFLAGS_SILENT);
+        return hr;
     }
 
     void push(std::int64_t time, const float* stereo, std::size_t frames) {
@@ -459,17 +538,43 @@ private:
 
     void run() {
         ComScope com;
+        using namespace std::chrono;
+        const auto began = steady_clock::now();
+        auto retry = began, checked = began;
         while (!stop_.load()) {
             Sleep(5);
-            if (render_) feed_silence();
+            const auto now = steady_clock::now();
+            if (lose_after_ && now - began >= *lose_after_) {
+                lose_after_.reset();
+                lose();
+                retry = now + hold_;
+            }
+            if (lost_.load()) {
+                if (now >= retry && !reopen()) retry = now + seconds(1);
+                continue;
+            }
+            // A new default device (headphones plugged in) leaves the old endpoint working but
+            // no longer the one in use; follow it.
+            if (follow_default_ && now - checked >= seconds(1)) {
+                checked = now;
+                const auto current = find_device();
+                if (current && endpoint_id(current.Get()) != device_id_) {
+                    lose();
+                    if (!reopen()) retry = now + seconds(1);
+                    continue;
+                }
+            }
+            HRESULT hr = render_ ? feed_silence() : S_OK;
             for (;;) {
                 UINT32 packet = 0;
-                if (FAILED(capture_->GetNextPacketSize(&packet)) || !packet) break;
+                if (FAILED(hr)) break;
+                hr = capture_->GetNextPacketSize(&packet);
+                if (FAILED(hr) || !packet) break;
                 BYTE* data = nullptr;
                 UINT32 frames = 0;
                 DWORD flags = 0;
                 UINT64 position = 0, qpc = 0;
-                const HRESULT hr = capture_->GetBuffer(&data, &frames, &flags, &position, &qpc);
+                hr = capture_->GetBuffer(&data, &frames, &flags, &position, &qpc);
                 if (FAILED(hr) || hr == AUDCLNT_S_BUFFER_EMPTY) break;
                 const std::int64_t time = (flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR) || !qpc
                     ? now_ticks() - static_cast<std::int64_t>(frames) * kTicks / rate_
@@ -489,6 +594,10 @@ private:
                     push(time, resampled_.data(), resampled_.size() / 2);
                 }
             }
+            if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
+                lose();
+                retry = now + seconds(1);
+            }
         }
     }
 
@@ -507,6 +616,12 @@ private:
     std::thread thread_;
     std::atomic_bool stop_{false};
     std::atomic<std::uint64_t> overflowed_{0};
+    std::string query_, device_id_;
+    bool loopback_ = false, follow_default_ = false;
+    std::optional<std::chrono::milliseconds> lose_after_;
+    std::chrono::milliseconds hold_{0};
+    std::atomic_bool lost_{false};
+    std::atomic<std::uint32_t> reconnects_{0};
 };
 
 enum Source : std::size_t { kSystem = 0, kMic = 1 };
@@ -521,6 +636,7 @@ struct AudioSource {
     std::int64_t next = INT64_MIN;      // Next 48 kHz sample index; keeps the source continuous.
     std::atomic<std::uint64_t> written{0}, dropped{0};
     mutable std::atomic<float> peak{0};  // Level meter; stats() takes it.
+    std::atomic_bool silent{false};     // Delivered nothing for over a second; padded with silence.
 };
 
 enum class SlotState { free, filling, pending, current };
@@ -874,7 +990,10 @@ public:
         winrt_device_ = nullptr;
         context_.Reset();
         device_.Reset();
-        for (auto& source : audio_) source.capture.reset();
+        for (auto& source : audio_) {
+            if (source.capture) audio_reconnects_ += source.capture->reconnects();
+            source.capture.reset();
+        }
         if (mf_started_) { MFShutdown(); mf_started_ = false; }
         recording_.store(false);
         active_ = false;
@@ -923,6 +1042,15 @@ public:
         stats.canvas2_frames = handed - lost;
         stats.canvas2_dropped = canvas2_dropped_.load() + lost;
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
+        stats.camera_lost = overlays_ && overlays_->camera_lost();
+        const auto gone = [](const AudioSource& source) {
+            return source.capture && (source.capture->lost() || source.silent.load());
+        };
+        stats.system_audio_lost = gone(audio_[kSystem]);
+        stats.microphone_lost = gone(audio_[kMic]);
+        stats.audio_reconnects = audio_reconnects_;
+        for (const auto& source : audio_)
+            if (source.capture) stats.audio_reconnects += source.capture->reconnects();
         return stats;
     }
     std::string failure() const { std::lock_guard lock(mutex_); return failure_; }
@@ -1061,15 +1189,17 @@ private:
             if (FAILED(enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &output)))
                 return {"no audio output device for system audio"};
             audio_[kSystem].capture = std::make_unique<AudioCapture>();
-            if (auto opened = audio_[kSystem].capture->open(output.Get(), true); !opened)
+            if (auto opened = audio_[kSystem].capture->open(output.Get(), true, {}); !opened)
                 return {"system audio: " + opened.error};
+            if (const auto loss = simulated_loss("system")) audio_[kSystem].capture->simulate_loss(loss->first, loss->second);
         }
         if (options_.microphone) {
             std::string error;
             auto device = find_microphone(options_.microphone_device, error);
             if (!device) return {error};
             audio_[kMic].capture = std::make_unique<AudioCapture>();
-            if (auto opened = audio_[kMic].capture->open(device.Get(), false); !opened) return opened;
+            if (auto opened = audio_[kMic].capture->open(device.Get(), false, options_.microphone_device); !opened) return opened;
+            if (const auto loss = simulated_loss("mic")) audio_[kMic].capture->simulate_loss(loss->first, loss->second);
         }
         return {};
     }
@@ -1618,6 +1748,7 @@ private:
             if (live2_) live2_->audio(start, program, frames);
         }
         source.next = start + static_cast<std::int64_t>(frames);
+        source.silent.store(false);
         if (ok) source.written.fetch_add(1);
         else source.dropped.fetch_add(1);
     }
@@ -1667,6 +1798,7 @@ private:
             for (int chunks = 0; chunks < 64 && source.capture->pop(chunk_); ++chunks)
                 route(kind, chunk_);
         }
+        if (!flush) pad_silent_sources();
         if (flush) {
             // Pad stems to the end of the video so every track spans the recording.
             const auto end = video_end_samples();
@@ -1678,6 +1810,29 @@ private:
             }
         }
         emit_mix(flush);
+    }
+
+    // The sink writer interleaves by time, so a source that stops delivering (unplugged) would
+    // hold all video in memory until the stop. Its track gets silence up to a second behind
+    // real time instead, and the stream gets the same silence.
+    void pad_silent_sources() {
+        const auto now = timeline_.to_output(now_ticks()).output * kMixRate / kTicks;
+        for (auto kind : {kSystem, kMic}) {
+            auto& source = audio_[kind];
+            if (!source.capture) continue;
+            const auto behind = kMixRate + std::max<std::int64_t>(0, -source.offset) * kMixRate / kTicks;
+            const auto target = std::min(now - behind, audio_cap_);
+            const auto from = source.next == INT64_MIN ? 0 : source.next;
+            if (target <= from) continue;
+            source.silent.store(true);
+            const auto frames = static_cast<std::size_t>(target - from);
+            if (source.stream >= 0) write_pcm(source.stream, nullptr, frames, source.stem_channels, from);
+            if (!mixing_) {
+                if (live_) live_->audio(from, nullptr, frames);
+                if (live2_) live2_->audio(from, nullptr, frames);
+            }
+            source.next = target;
+        }
     }
 
     // Synthetic sources follow the written video, so CI gets a deterministic A/V timeline.
@@ -1806,6 +1961,7 @@ private:
     win::ClickSource click_source_;
     std::chrono::steady_clock::time_point shown_at_;  // The host instant of the slot being drawn.
     std::uint64_t camera_frames_ = 0;  // The count when the overlays were released.
+    std::uint32_t audio_reconnects_ = 0;  // Of the captures already released.
     std::unique_ptr<win::FramePreview> previewer_;
     ComPtr<ID3D11Texture2D> composed_;  // The frame as drawn, in preview-only mode.
     core::PreviewBuffer preview_;

@@ -281,6 +281,9 @@ bool add_destination(Settings& settings);
 // Removes one, unless it is the only one.
 void remove_destination(Settings& settings, std::size_t destination);
 enum class State { idle, starting, recording, paused, finishing };
+struct Status;
+// What a lost source means for the recording, for the status line; empty when none is lost.
+std::string lost_sources_text(const Status& status);
 
 struct Status {
     State state = State::idle;
@@ -302,6 +305,8 @@ struct Status {
     double replay_seconds = 0;       // Media the replay buffer holds now.
     std::uint32_t scene = 0;         // The scene shown in this recording.
     std::uint64_t camera_frames = 0;
+    // A source stopped delivering (unplugged); the recording continues without it.
+    bool system_audio_lost = false, microphone_lost = false, camera_lost = false;
     bool window_closed = false;      // The recorded window closed, which ended the recording.
     bool previewing = false;         // The scene shows before recording (idle_preview()).
     std::string preview_error;       // Why it cannot.

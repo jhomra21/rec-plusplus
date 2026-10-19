@@ -67,6 +67,13 @@ else
   swiftc -typecheck "$root/scripts/flash-beep.swift"
   swiftc -typecheck "$root/scripts/stripes.swift"
 
+  # Diagnostics: what macOS allows, one line each, without asking.
+  "$rec" permissions | tee "$artifacts/permissions.txt"
+  for name in 'Screen recording' Microphone Camera; do
+    grep -Eq "^$name: (granted|denied \(turn it on: rec permissions --open [a-z]+\)|not asked yet|blocked by a device policy)$" \
+      "$artifacts/permissions.txt"
+  done
+  expect_failure '--open takes screen, microphone or camera' permissions --open speakers
   # Hardware encode and AVFoundation decode without screen permissions. A fresh CI VM's first
   # VideoToolbox session can stall long enough to drop frames, so an unmeasured recording warms it.
   "$rec" record --test-pattern -r 1080p -f 30 -t 1 --codec h264 -o "$tmp/warmup.mov" >"$artifacts/warmup.record.log"
@@ -129,6 +136,14 @@ else
   within "$(value av_sync_events "$artifacts/pause.probe")" 3 3
   within "$(value av_offset_max_ms "$artifacts/pause.probe")" 0 20
 
+  # A camera that stops mid-recording, as an unplugged one does: the recording goes on with
+  # its last frame, and the outage is reported when it happens.
+  REC_E2E_LOSE_CAMERA=1000 "$rec" record --test-pattern -f 30 -t 3 --camera test -o "$artifacts/camera-lost.mov" \
+    | tee "$artifacts/camera-lost.record.log"
+  grep -Eq 'Camera lost at 00:0[01]\.[0-9]; it shows its last frame' "$artifacts/camera-lost.record.log"
+  grep -q 'Camera frames 30' "$artifacts/camera-lost.record.log"
+  "$rec" probe "$artifacts/camera-lost.mov" | tee "$artifacts/camera-lost.probe"
+  grep -qx 'frames=90' "$artifacts/camera-lost.probe"
   # Overlays: a camera and an image composited into every frame on the GPU; "hide 1" removes
   # the camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
   png="$root/scripts/overlay-test.png"

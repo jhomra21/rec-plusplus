@@ -274,6 +274,39 @@ try {
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
 
+    # 0. Microphone access off for desktop apps: the app names it, offers its settings page,
+    # and does not start. The machine's own switch comes back right after.
+    $consent = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged'
+    $hadKey = Test-Path $consent
+    $consentBefore = (Get-ItemProperty -Path $consent -Name Value -ErrorAction SilentlyContinue).Value
+    $offText = 'Microphone access is off for desktop apps.'
+    try {
+        if (-not $hadKey) { New-Item -Path $consent | Out-Null }
+        Set-ItemProperty -Path $consent -Name Value -Value 'Deny'
+        Set-Check $ui 'Microphone' $true
+        $deadline = (Get-Date).AddSeconds(5)
+        while ($true) {
+            try { $row = Find $ui $offText 41; break } catch {}
+            if ((Get-Date) -gt $deadline) { throw "the app did not say the microphone is off" }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not [AppWindow]::IsWindowVisible($row.Handle)) { throw 'the missing permission is not shown' }
+        $open = Find $ui 'Open privacy settings' $PushButton
+        if (-not [AppWindow]::IsWindowVisible($open.Handle)) { throw 'Open privacy settings is not shown' }
+        Press $ui 'Start Recording'
+        Start-Sleep -Milliseconds 1500
+        if (-not (Text-Of $ui 100).StartsWith('Ready to record')) { throw "it started without microphone access: $(Text-Of $ui 100)" }
+        Expect-Text (Text-Of $ui 101) "$offText Turn it on to record."
+    } finally {
+        if ($null -ne $consentBefore) { Set-ItemProperty -Path $consent -Name Value -Value $consentBefore }
+        elseif ($hadKey) { Remove-ItemProperty -Path $consent -Name Value -ErrorAction SilentlyContinue }
+        else { Remove-Item -Path $consent -ErrorAction SilentlyContinue }
+    }
+    # Turned back on, the row goes once the app looks again (here: the box changes).
+    Set-Check $ui 'Microphone' $false
+    Set-Check $ui 'Microphone' $true
+    if ([AppWindow]::IsWindowVisible($row.Handle)) { throw 'the permission row stayed after access came back' }
+    Write-Host '0. permissions: microphone access off was shown and kept the recording from starting'
     # 1. Record, pause, resume, stop: 2 + 2 s recorded around a 1.5 s pause.
     Set-Check $ui 'System audio' $true
     Set-Check $ui 'Microphone' $true
@@ -362,7 +395,8 @@ try {
     $behind = if ($env:GITHUB_ACTIONS -eq 'true') { 0.25 } else { 0 }
     Expect-Within $second 'frames' ([int]([int]$got['frames'] * (1 - $behind)) - 2) ([int]$got['frames'] + 2)
     Expect-Within $second 'av_sync_events' 3 6
-    Expect-Within $second 'av_offset_max_ms' 0 20
+    # A frame WARP skips moves its flash to the next 33 ms slot.
+    Expect-Within $second 'av_offset_max_ms' 0 $(if ($behind -gt 0) { 35 } else { 20 })
     if ((Text-Of $ui 101) -notmatch 'and its vertical video') { throw "the vertical video was not reported: $(Text-Of $ui 101)" }
     $main = Newest-Movie
     $verticalMovie = $main -replace '\.mp4$', '-vertical.mp4'

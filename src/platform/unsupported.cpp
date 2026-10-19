@@ -17,6 +17,9 @@ std::vector<Camera> list_cameras(std::string& error) {
     error = "camera capture requires macOS 15 or Windows 10 (1903) or newer";
     return {};
 }
+Access permission_status(Permission) noexcept { return Access::restricted; }
+void request_permission(Permission) {}
+Result open_permission_settings(Permission) { return {"capture requires macOS 15 or Windows 10 (1903) or newer"}; }
 double default_output_latency_ms() noexcept { return 0; }
 Result probe_file(const std::string&, Probe&, std::optional<Region>) { return {"probing recordings requires macOS or Windows"}; }
 class Recorder::Impl {};

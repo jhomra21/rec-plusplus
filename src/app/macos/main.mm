@@ -274,6 +274,11 @@ struct PreviewHit {
     NSButton *_camera, *_image, *_chooseImage, *_showPreview;
     NSButton *_newScene, *_deleteScene, *_sourceShown, *_addDisplay, *_addWindow, *_removeSource;
     NSButton* _verticalMovie;
+    // Shown only when a permission the settings need is off.
+    NSStackView* _permissionRow;
+    NSTextField* _permission;
+    NSButton* _openPrivacy;
+    std::optional<rec::Permission> _missing;
     // Each destination's row: on, service, Vertical and Remove, then its server and key.
     NSStackView* _destRow[kMaxDestinations];
     NSButton *_destOn[kMaxDestinations], *_destVertical[kMaxDestinations], *_destRemove[kMaxDestinations];
@@ -547,6 +552,43 @@ struct PreviewHit {
 // Windows open and close while Rec is in the background; list them again when it returns.
 - (void)applicationDidBecomeActive:(NSNotification*)notification {
     if (!_pickers && _session && _session->status().state == State::idle) [self listDevices];
+    // Returning from System Settings may have changed a permission.
+    [self refresh];
+}
+
+// A permission the settings need that is off. Undecided ones are asked for when recording starts.
+- (std::optional<rec::Permission>)missingPermission {
+    const auto off = [](rec::Permission permission) {
+        const auto access = rec::permission_status(permission);
+        return access == rec::Access::denied || access == rec::Access::restricted;
+    };
+    if (!_testPattern && !CGPreflightScreenCaptureAccess()) return rec::Permission::screen;
+    if (_microphone.state == NSControlStateValueOn && off(rec::Permission::microphone)) return rec::Permission::microphone;
+    if (_settings.camera && _settings.camera_device != "test" && off(rec::Permission::camera)) return rec::Permission::camera;
+    return std::nullopt;
+}
+
+- (NSString*)permissionText:(rec::Permission)permission {
+    switch (permission) {
+    case rec::Permission::screen: return @"Screen Recording is off for Rec.";
+    case rec::Permission::microphone: return @"Microphone access is off for Rec.";
+    case rec::Permission::camera: return @"Camera access is off for Rec.";
+    }
+    return @"";
+}
+
+- (void)openPrivacy:(id)sender {
+    if (!_missing) return;
+    if (*_missing == rec::Permission::screen) {
+        [self askForScreenRecording];
+        return;
+    }
+    if (auto opened = rec::open_permission_settings(*_missing); !opened) {
+        _note = ns(opened.error);
+        _noteAttention = true;
+        _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
+        [self refresh];
+    }
 }
 
 - (void)registerHotkey {
@@ -834,6 +876,13 @@ struct PreviewHit {
     NSStackView* buttons = [NSStackView stackViewWithViews:@[_record, _pause, _saveReplay]];
     buttons.distribution = NSStackViewDistributionFill;
     [_record setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    _permission = label(@"");
+    _permission.textColor = NSColor.systemOrangeColor;
+    _openPrivacy = [self button:@"Open Privacy Settings" action:@selector(openPrivacy:)];
+    _permissionRow = [NSStackView stackViewWithViews:@[_permission, _openPrivacy]];
+    _permissionRow.distribution = NSStackViewDistributionFill;
+    [_permission setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    _permissionRow.hidden = YES;
 
     _source = [self popup:@"Source"];
     _systemAudio = [self check:@"System audio"];
@@ -974,7 +1023,7 @@ struct PreviewHit {
     // Status and preview side by side over two columns: what and how to record on the left,
     // where it goes on the right, and the scenes in a narrower third column. One column would
     // be taller than a 13-inch screen.
-    NSArray<NSView*>* status = @[_status, _detail, _live, meters, buttons];
+    NSArray<NSView*>* status = @[_status, _detail, _live, meters, buttons, _permissionRow];
     NSArray<NSView*>* left = @[header(@"Capture"), capture, header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons,
                                _verticalMovie];
     NSArray<NSView*>* right = @[header(@"Live stream"), live, header(@"Replay"), replay];
@@ -1582,6 +1631,14 @@ struct PreviewHit {
             [self askForScreenRecording];
             return;
         }
+        if (const auto missing = [self missingPermission]) {
+            _note = [[self permissionText:*missing] stringByAppendingString:@" Turn it on to record."];
+            _noteAttention = true;
+            _noteUntil = [NSDate dateWithTimeIntervalSinceNow:8];
+            [self refresh];
+            [_window makeFirstResponder:_openPrivacy];
+            return;
+        }
         [self remember];
         if (auto started = _session->start(_settings, [self streamKeys], _testPattern); !started) {
             [self warn:ns(started.error)];
@@ -1922,6 +1979,10 @@ struct PreviewHit {
         }
         if (s.reconnects) [text appendFormat:@", stream reconnected %u %@", s.reconnects, s.reconnects == 1 ? @"time" : @"times"];
         if (s.replay) [text appendFormat:@", replay %d s", static_cast<int>(s.replay_seconds)];
+        if (const auto lost = rec::app::lost_sources_text(s); !lost.empty()) {
+            [text insertString:[ns(lost) stringByAppendingString:@" "] atIndex:0];
+            _attention = true;
+        }
         detail = text;
     }
     if (_note && _noteUntil.timeIntervalSinceNow > 0) {
@@ -1949,6 +2010,12 @@ struct PreviewHit {
     _record.enabled = s.state == State::idle || active;
     _pause.enabled = active;
     _saveReplay.enabled = active && s.replay;
+    // Checked while idle only: a recording already holds its devices.
+    if (s.state == State::idle) {
+        _missing = [self missingPermission];
+        _permissionRow.hidden = !_missing;
+        if (_missing) _permission.stringValue = [self permissionText:*_missing];
+    }
     const bool editable = s.state == State::idle;
     for (NSControl* control in @[_source, _systemAudio, _microphone, _cursor, _clicks, _resolution, _fps, _codec, _format,
                                  _stream, _bitrate, _replay, _replayLength, _changeFolder, _addDestination, _verticalMovie])

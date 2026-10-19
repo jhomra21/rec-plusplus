@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
 #include <thread>
 
@@ -159,6 +160,14 @@ public:
         }
         [session_ addOutput:output_];
         [session_ commitConfiguration];
+        // An unplugged camera, or a session that fails, stops delivering; its last frame stays.
+        NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
+        observers_ = @[
+            [center addObserverForName:AVCaptureDeviceWasDisconnectedNotification object:device queue:nil
+                            usingBlock:^(NSNotification*) { lost_.store(true); }],
+            [center addObserverForName:AVCaptureSessionRuntimeErrorNotification object:session_ queue:nil
+                            usingBlock:^(NSNotification*) { lost_.store(true); }],
+        ];
         return {};
     }
 
@@ -168,6 +177,8 @@ public:
     }
 
     void stop() {
+        for (id observer in observers_) [NSNotificationCenter.defaultCenter removeObserver:observer];
+        observers_ = nil;
         if (session_) {
             [session_ stopRunning];
             [output_ setSampleBufferDelegate:nil queue:nil];
@@ -205,11 +216,16 @@ public:
     }
 
     std::uint64_t frames() const { return frames_.load(); }
+    bool lost() const { return lost_.load(); }
 
 private:
     void generate() {
         const auto begin = std::chrono::steady_clock::now();
+        // REC_E2E_LOSE_CAMERA=MS stops the test camera as an unplug would.
+        const char* lose = std::getenv("REC_E2E_LOSE_CAMERA");
+        const std::uint64_t lose_frame = lose ? std::strtoull(lose, nullptr, 10) * core::kTestCameraFps / 1000 : UINT64_MAX;
         for (std::uint64_t n = 0; !stop_; ++n) {
+            if (n == lose_frame) { lost_.store(true); return; }
             CVPixelBufferRef pixel = nullptr;
             if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool_, &pixel) == kCVReturnSuccess) {
                 CVPixelBufferLockBaseAddress(pixel, 0);
@@ -231,6 +247,8 @@ private:
     CVPixelBufferPoolRef pool_ = nullptr;  // The test camera's frames.
     std::mutex mutex_;
     CVPixelBufferRef latest_ = nullptr;
+    NSArray* __strong observers_ = nil;
+    std::atomic_bool lost_{false};
     std::atomic<std::uint64_t> frames_{0};
     std::atomic_bool stop_{false};
     std::thread thread_;
@@ -717,6 +735,13 @@ public:
         return total;
     }
 
+    bool camera_lost() const {
+        std::lock_guard lock(mutex_);
+        for (const auto& layer : layers_)
+            if (layer.camera && layer.camera->lost()) return true;
+        return false;
+    }
+
     void stop() {
         std::lock_guard lock(mutex_);
         for (auto& layer : layers_) {
@@ -881,6 +906,7 @@ Result Overlays::set_layout(std::size_t canvas, std::size_t layer, const Layout&
 }
 Result Overlays::set_style(std::size_t index, const Style& style) { return impl_->set_style(index, style); }
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }
+bool Overlays::camera_lost() const { return impl_->camera_lost(); }
 void Overlays::stop() { impl_->stop(); }
 
 } // namespace rec::mac

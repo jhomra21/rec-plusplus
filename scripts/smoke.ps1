@@ -46,7 +46,16 @@ try {
     Expect-Failure 'window not found' @('record', '--window', 'no-such-window-title-xyz')
     $windows = Invoke-Rec $rec @('windows')
     if ($windows.Code -ne 0) { throw "rec windows failed: $($windows.Text)" }
-
+    # Diagnostics: what the system allows, one line each; Windows asks nothing for the screen.
+    $permissions = Invoke-Rec $rec @('permissions')
+    Set-Content -Path (Join-Path $artifacts 'permissions.txt') -Value $permissions.Text
+    if ($permissions.Code -ne 0) { throw "rec permissions failed: $($permissions.Text)" }
+    if ($permissions.Text -notmatch '(?m)^Screen recording: granted\r?$') { throw "screen permission: $($permissions.Text)" }
+    foreach ($name in 'Microphone', 'Camera') {
+        if ($permissions.Text -notmatch "(?m)^${name}: (granted|denied \(turn it on: rec permissions --open \w+\))\r?$") { throw "$name permission: $($permissions.Text)" }
+    }
+    Expect-Failure '--open takes screen, microphone or camera' @('permissions', '--open', 'speakers')
+    Expect-Failure 'Windows asks no permission' @('permissions', '--open', 'screen')
     # The live A/V sync stimulus must at least compile.
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'flash-beep.ps1') -CheckOnly
     if ($LASTEXITCODE -ne 0) { throw 'flash-beep.ps1 does not compile' }
@@ -183,6 +192,14 @@ try {
     Expect-Within $engine 'av_offset_max_ms' 0 20
     $short = Get-Probe $rec $shortPath (Join-Path $artifacts 'engine-short.probe')
     Expect-Field $short 'frames' '60'
+    # A camera that stops mid-recording, as an unplugged one does: the recording goes on with
+    # its last frame, and the outage is reported when it happens.
+    $env:REC_E2E_LOSE_CAMERA = '1000'
+    try { $cameraLost = Record 'camera-lost' 'camera-lost.mp4' @('--test-pattern', '-f', '30', '-t', '3', '--camera', 'test') }
+    finally { Remove-Item Env:REC_E2E_LOSE_CAMERA }
+    if ($cameraLost.Log -notmatch 'Camera lost at 00:0[01]\.\d; it shows its last frame') { throw "the camera loss was not reported: $($cameraLost.Log)" }
+    Expect-Text $cameraLost.Log 'Camera frames 30'
+    Expect-Field $cameraLost.Probe 'frames' '90'
     # Overlays: a camera and an image drawn into every frame on the GPU; "hide 1" removes the
     # camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
     $png = Join-Path $PSScriptRoot 'overlay-test.png'

@@ -14,6 +14,9 @@
 # REC_E2E_SOURCE=region records a 1280x720 region of the display.
 # REC_E2E_REPLAY=1 keeps a 5 s replay buffer and saves it when the stimulus ends; the clip
 # must be in sync too.
+# REC_E2E_LOSE_AUDIO=system|mic:AFTER_MS:HOLD_MS makes rec drop that source's buffers HOLD_MS
+# long, AFTER_MS into the recording, as an unplug would: the movie must keep its length,
+# report the outage, and stay in sync after it.
 set -euo pipefail
 
 [[ "$(uname -s)" == Darwin ]] || { echo 'live A/V sync E2E requires macOS' >&2; exit 1; }
@@ -129,7 +132,14 @@ if [[ "$pause" == 1 ]]; then grep -q 'not in the movie' "$artifacts/record.log";
 events="$(value av_sync_events)"
 offset="$(value av_offset_ms)"
 worst="$(value av_offset_max_ms)"
-awk -v n="$events" 'BEGIN { exit !(n >= 4) }' || { echo "only $events flash/beep pairs found" >&2; exit 1; }
+# Beeps played while the source was gone are missing, so fewer pairs remain.
+least=4
+if [[ -n "${REC_E2E_LOSE_AUDIO:-}" ]]; then
+  grep -q ' lost at ' "$artifacts/record.log" || { echo 'the audio outage was not reported' >&2; exit 1; }
+  grep -q ' back at ' "$artifacts/record.log" || { echo 'the audio did not come back' >&2; exit 1; }
+  least=3
+fi
+awk -v n="$events" -v least="$least" 'BEGIN { exit !(n >= least) }' || { echo "only $events flash/beep pairs found" >&2; exit 1; }
 # ITU-R BT.1359 detectability: audio more than 45 ms early or 125 ms late.
 awk -v m="$offset" 'BEGIN { exit !(m >= -45 && m <= 125) }' || { echo "A/V offset $offset ms is noticeable" >&2; exit 1; }
 

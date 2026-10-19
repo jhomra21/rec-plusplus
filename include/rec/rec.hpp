@@ -224,6 +224,13 @@ struct Stats {
     // fell behind. Its servers follow the main canvas's in streams.
     std::uint64_t canvas2_frames = 0;
     std::uint64_t canvas2_dropped = 0;
+    // A source that stopped delivering (unplugged, switched off, or its device failed). Its
+    // track stays silent meanwhile, so the recording continues; an audio device is reopened
+    // when it, or for the default device another one, is available again.
+    bool system_audio_lost = false;
+    bool microphone_lost = false;
+    bool camera_lost = false;          // A camera overlay stopped; it keeps showing its last frame.
+    std::uint32_t audio_reconnects = 0; // Audio devices reopened after a loss.
 };
 
 struct Probe {
@@ -261,6 +268,18 @@ struct Result {
     std::string error;
     explicit operator bool() const noexcept { return error.empty(); }
 };
+
+enum class Permission { screen, microphone, camera };
+enum class Access { granted, denied, not_determined, restricted };
+
+// What the system allows this process now. Windows asks no permission for the screen, and
+// reports the microphone or camera denied when "Let desktop apps access" it is off.
+Access permission_status(Permission permission) noexcept;
+// Shows the system prompt when the user has not decided yet, and returns at once. For the
+// screen, macOS only lists the app in System Settings; the grant applies after a relaunch.
+void request_permission(Permission permission);
+// Opens the system settings page that grants the permission.
+Result open_permission_settings(Permission permission);
 
 // A failure sets error and returns an empty list.
 std::vector<Display> list_displays(std::string& error);

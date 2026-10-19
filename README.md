@@ -28,9 +28,13 @@ cmake --build build --config Release --parallel
 
 Windows uses Windows.Graphics.Capture for the display, a Lanczos-3 pixel shader to scale and a Direct3D 11 video processor to convert to NV12 on the GPU, WASAPI for system audio (loopback) and the microphone, and the Media Foundation sink writer with the hardware encoder of the GPU that drives the display. Frames stay on the GPU from capture to encoder. Windows writes ISO MP4 structure for both `.mp4` and `.mov`. If Windows blocks the microphone, turn on "Let desktop apps access your microphone" in Settings > Privacy & security > Microphone.
 
-### macOS permissions
+### Permissions
 
-macOS may prompt for Screen Recording permission on the first attempt. Allow access to the app that starts the CLI in System Settings > Privacy & Security > Screen & System Audio Recording, then retry.
+`rec permissions` shows whether the system lets rec record the screen, the microphone and the camera. `rec permissions --request` asks for whatever is not decided yet, and `rec permissions --open microphone` (or `screen`, `camera`) opens the settings page that grants it.
+
+macOS may prompt for Screen Recording permission on the first attempt. Allow access to the app that starts the CLI in System Settings > Privacy & Security > Screen & System Audio Recording, then retry. Windows asks no permission for the screen; it blocks the microphone and camera for every desktop app when "Let desktop apps access" them is off in Settings > Privacy & security.
+
+The desktop apps check the same before recording. When a permission the settings need is off, the status area says which one and shows Open Privacy Settings, and Start explains why it does not record.
 
 `-r native` selects the display's native pixel size. The other resolution presets bound the output dimensions without stretching or upscaling. If a recording already exists at the output path, rec refuses to overwrite it.
 
@@ -196,6 +200,7 @@ The app has no launch at login yet, and its camera and scene controls have not b
 - **System audio latency.** ScreenCaptureKit captures system audio when macOS mixes it, one output latency before you hear it. rec delays it by the default output device's latency from CoreAudio (`rec devices` prints it). Override with `--system-audio-offset-ms`; shift the microphone with `--mic-offset-ms`.
 - The microphone is captured through ScreenCaptureKit (macOS 15). macOS asks for microphone permission on first use.
 - On Windows, every source is stamped on the QueryPerformanceCounter clock. System audio is delayed by the default output endpoint's stream latency plus one device period.
+- **Devices that go away.** When the microphone or the system audio stops delivering (unplugged, or the device failed), the recording keeps going: that track gets silence, the CLI prints "Microphone lost at 00:12.3" and "Microphone back at ...", and the app's status line says so. On Windows rec reopens the device once it is back, and follows the default output or microphone when it changes (headphones plugged in). A camera that stops keeps showing its last frame. `REC_E2E_LOSE_AUDIO=mic:2000:3000` (or `system:...`) and `REC_E2E_LOSE_CAMERA=1000` simulate a loss for the end-to-end checks.
 
 ## Verify
 

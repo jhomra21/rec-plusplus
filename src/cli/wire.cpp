@@ -258,6 +258,10 @@ std::string encode_stats(const Stats& s) {
     add("camera_frames", std::to_string(s.camera_frames));
     add("canvas2_frames", std::to_string(s.canvas2_frames));
     add("canvas2_dropped", std::to_string(s.canvas2_dropped));
+    add("system_audio_lost", s.system_audio_lost ? "1" : "0");
+    add("microphone_lost", s.microphone_lost ? "1" : "0");
+    add("camera_lost", s.camera_lost ? "1" : "0");
+    add("audio_reconnects", std::to_string(s.audio_reconnects));
     return out;
 }
 
@@ -298,6 +302,10 @@ bool decode_stat(std::string_view key, std::string_view v, Stats& s) {
     if (key == "camera_frames") return integer(v, s.camera_frames);
     if (key == "canvas2_frames") return integer(v, s.canvas2_frames);
     if (key == "canvas2_dropped") return integer(v, s.canvas2_dropped);
+    if (key == "system_audio_lost") return flag(v, s.system_audio_lost);
+    if (key == "microphone_lost") return flag(v, s.microphone_lost);
+    if (key == "camera_lost") return flag(v, s.camera_lost);
+    if (key == "audio_reconnects") return integer(v, s.audio_reconnects);
     return false;
 }
 

@@ -63,6 +63,7 @@ enum Control : int {
     kScenesHeader, kNewScene, kDeleteScene, kSceneNameLabel, kSceneName, kSourcesLabel, kSceneSources, kSourceShown,
     kAddDisplay, kAddWindow, kRemoveSource,
     kVerticalMovie, kVerticalLayoutLabel, kVerticalLayout, kPreview2, kAddDestination,
+    kPermission, kOpenPrivacy,
     // Each destination's row: kDestination + 10 * index + one of DestinationField.
     kDestination = 400,
 };
@@ -660,6 +661,10 @@ private:
         case kSessionChanged:
             refresh();
             return 0;
+        case WM_ACTIVATE:
+            // Returning from Settings may have changed a permission.
+            if (LOWORD(w) != WA_INACTIVE) PostMessageW(window_, kSessionChanged, 0, 0);
+            return DefWindowProcW(window_, message, w, l);
         case WM_SHOWWINDOW:
         case WM_SIZE:
             // Visibility settles after these; the preview follows it.
@@ -771,6 +776,9 @@ private:
         button(kRecord, L"&Start Recording", BS_DEFPUSHBUTTON);
         button(kPause, L"&Pause");
         button(kSaveReplay, L"Save Rep&lay");
+        // Shown only when a permission the settings need is off.
+        label(kPermission, L"");
+        button(kOpenPrivacy, L"Open privacy settings");
         add(kPreview, L"RecPreview", L"Preview", 0);
         add(kPreview2, L"RecPreview", L"Vertical video preview", 0);
         preview_brush_ = CreateSolidBrush(RGB(28, 28, 32));
@@ -960,6 +968,14 @@ private:
         place(kPause, x + width - 2 * button_width - gap, y, button_width, px(40));
         place(kSaveReplay, x + width - button_width, y, button_width, px(40));
         y += px(40);
+        for (int id : {kPermission, kOpenPrivacy}) ShowWindow(get(id), permission_shown_ ? SW_SHOWNA : SW_HIDE);
+        if (permission_shown_) {
+            const int open_width = px(170);
+            y += gap;
+            place(kPermission, x, y + px(4), width - open_width - gap, px(20));
+            place(kOpenPrivacy, x + width - open_width, y, open_width, px(26));
+            y += px(26);
+        }
         const int preview_height = column * 9 / 16;
         // With the vertical video, its preview stands beside the landscape one.
         const int vertical_width = vertical_shown_ ? preview_height * 9 / 16 : 0;
@@ -1088,7 +1104,7 @@ private:
             if (state_ == State::recording) return RGB(210, 30, 30);
             if (state_ == State::paused) return RGB(190, 120, 0);
         }
-        if (id == kDetail && attention_) return RGB(190, 60, 0);
+        if ((id == kDetail && attention_) || id == kPermission) return RGB(190, 60, 0);
         if (id == kDetail || id == kFolder || id == kImageFile) return GetSysColor(COLOR_GRAYTEXT);
         return GetSysColor(COLOR_WINDOWTEXT);
     }
@@ -1472,7 +1488,20 @@ private:
                 show_scene_sources();
             }
             return;
-        case kStream: case kSystemAudio: case kMicrophone:
+        case kMicrophone:
+            if (code == BN_CLICKED) refresh();
+            return;
+        case kOpenPrivacy:
+            if (code == BN_CLICKED && missing_permission_) {
+                if (auto opened = rec::open_permission_settings(*missing_permission_); !opened) {
+                    note_ = wide(opened.error);
+                    note_attention_ = true;
+                    note_until_ = GetTickCount64() + 5000;
+                    refresh();
+                }
+            }
+            return;
+        case kStream: case kSystemAudio:
             return;
         case kShowPreview:
             if (code == BN_CLICKED) remember();
@@ -1567,6 +1596,15 @@ private:
             session_.stop();
         } else if (state == State::idle) {
             remember();
+            refresh();
+            if (missing_permission_) {
+                note_ = permission_text(*missing_permission_) + L" Turn it on to record.";
+                note_attention_ = true;
+                note_until_ = GetTickCount64() + 8000;
+                refresh();
+                SetFocus(get(kOpenPrivacy));
+                return;
+            }
             if (auto started = session_.start(settings_, stream_keys(), test_pattern_); !started) {
                 MessageBoxW(window_, wide(started.error).c_str(), L"Rec could not start recording", MB_ICONWARNING);
                 return;
@@ -1992,6 +2030,10 @@ private:
             }
             if (s.reconnects) detail += L", stream reconnected " + std::to_wstring(s.reconnects) + (s.reconnects == 1 ? L" time" : L" times");
             if (s.replay) detail += L", replay " + std::to_wstring(static_cast<int>(s.replay_seconds)) + L" s";
+            if (const auto lost = rec::app::lost_sources_text(s); !lost.empty()) {
+                detail = wide(lost) + L" " + detail;
+                attention_ = true;
+            }
         }
         if (!note_.empty() && GetTickCount64() < note_until_) {
             detail = note_;
@@ -2060,6 +2102,18 @@ private:
             layout();
         }
         EnableWindow(get(kShowLast), !settings_.last_recording.empty());
+        // Checked while idle only: a recording already holds its devices.
+        if (s.state == State::idle) {
+            const auto missing = missing_permission();
+            if (missing != missing_permission_ || missing.has_value() != permission_shown_) {
+                missing_permission_ = missing;
+                permission_shown_ = missing.has_value();
+                set_text(kPermission, missing ? permission_text(*missing) : L"");
+                layout();
+                fit();
+                InvalidateRect(window_, nullptr, TRUE);
+            }
+        }
 
         // Preview frames are made only while the window is on screen: the recording's, or
         // before recording the idle preview's when Show preview is on.
@@ -2135,6 +2189,22 @@ private:
     rec::PreviewFrame frame_;
     rec::PreviewFrame frame2_;   // The vertical video's.
     bool vertical_shown_ = false;  // The vertical video's preview is laid out.
+    bool permission_shown_ = false;  // The missing permission's row is laid out.
+    std::optional<rec::Permission> missing_permission_;
+
+    // A device the settings use that Windows privacy settings keep from desktop apps.
+    std::optional<rec::Permission> missing_permission() const {
+        if (checked(kMicrophone) && rec::permission_status(rec::Permission::microphone) != rec::Access::granted)
+            return rec::Permission::microphone;
+        if (settings_.camera && settings_.camera_device != "test" &&
+            rec::permission_status(rec::Permission::camera) != rec::Access::granted)
+            return rec::Permission::camera;
+        return std::nullopt;
+    }
+    static std::wstring permission_text(rec::Permission permission) {
+        return permission == rec::Permission::microphone ? L"Microphone access is off for desktop apps."
+                                                         : L"Camera access is off for desktop apps.";
+    }
     std::wstring preview_hint_;  // Shown while the preview has no frame.
     HBRUSH preview_brush_ = nullptr;
     bool quitting_ = false;
