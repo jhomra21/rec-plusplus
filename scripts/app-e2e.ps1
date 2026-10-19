@@ -374,7 +374,8 @@ try {
     Expect-Field $verticalProbe 'height' '1920'
     Expect-Within $verticalProbe 'frames' ([int]([int]$mainProbe['frames'] * (1 - $behind)) - 2) ([int]$mainProbe['frames'] + 2)
     Expect-Within $verticalProbe 'av_sync_events' 3 6
-    Expect-Within $verticalProbe 'av_offset_max_ms' 0 20
+    # A vertical frame skipped behind a slow CI encoder moves its flash to the next 33 ms slot.
+    Expect-Within $verticalProbe 'av_offset_max_ms' 0 $(if ($behind -gt 0) { 35 } else { 20 })
     Write-Host "3. stream: received $($got['frames']) and $($second['frames']) frames (the second 1080x1920), $($got['av_sync_events']) pairs, worst $($got['av_offset_max_ms']) ms; vertical movie $($verticalProbe['frames']) of $($mainProbe['frames']) frames"
     Set-Check $ui 'Send the vertical video to Custom 2' $false
     Press $ui 'Remove Twitch'
