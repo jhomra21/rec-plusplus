@@ -123,12 +123,19 @@ function Wait-Status($ui, [string]$prefix, [int]$seconds = 20) {
 # Waits until the status shows at least this many recorded seconds, so steps land at the movie
 # times the checks expect however slow the machine is.
 function Wait-Recorded($ui, [int]$seconds, [int]$timeout = 60) {
-    $deadline = (Get-Date).AddSeconds($timeout)
+    $start = Get-Date
+    $deadline = $start.AddSeconds($timeout)
+    $report = $start.AddSeconds(5)
     while ((Get-Date) -lt $deadline) {
         if ((Text-Of $ui 100) -match '(\d+):(\d\d)$' -and [int]$Matches[1] * 60 + [int]$Matches[2] -ge $seconds) { return }
-        Start-Sleep -Milliseconds 50
+        # A slow wait shows whether the engine still writes, drops, or stopped.
+        if ((Get-Date) -gt $report) {
+            Write-Host "  waiting for $seconds s, $([int]((Get-Date) - $start).TotalSeconds) s in: $(Text-Of $ui 100); $(Text-Of $ui 101)"
+            $report = $report.AddSeconds(5)
+        }
+        Start-Sleep -Milliseconds 100
     }
-    throw "the recording did not reach $seconds s: '$(Text-Of $ui 100)'"
+    throw "the recording did not reach $seconds s: '$(Text-Of $ui 100)' ($(Text-Of $ui 101))"
 }
 # The preview as the window shows it (the window's composed picture, cropped), saved as a PNG.
 function Snapshot-Preview($ui, [string]$path) {
