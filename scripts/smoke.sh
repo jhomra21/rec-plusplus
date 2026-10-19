@@ -376,6 +376,46 @@ else
   within "$(value av_sync_events "$artifacts/replay-clip.probe")" 4 8
   within "$(value av_offset_max_ms "$artifacts/replay-clip.probe")" 0 25
 
+  # Engine: `rec start` launches the background engine, which keeps recording after each
+  # client exits; other clients pause, change and stop it. A short recording ends by itself.
+  export REC_ENGINE_SOCKET="$tmp/engine.sock"
+  trap '"$rec" shutdown >/dev/null 2>&1 || true; cp "$tmp/engine.log" "$artifacts/engine.log" 2>/dev/null || true; stop_mediamtx; rm -rf "$tmp"' EXIT
+  engine() {
+    echo "> rec $*" >>"$artifacts/engine.client.log"
+    "$rec" "$@" 2>&1 | tee -a "$artifacts/engine.client.log"
+    return "${PIPESTATUS[0]}"
+  }
+  expect_failure 'the engine is not running' status
+  out="$(engine start --test-pattern --test-tone -f 30 --camera test -o "$artifacts/engine.mov")"
+  grep -q 'Recording to' <<<"$out"
+  expect_failure 'already recording' start --test-pattern -o "$tmp/second.mov"
+  sleep 2
+  out="$(engine pause)"; grep -q 'Paused at' <<<"$out"
+  sleep 1
+  out="$(engine resume)"; grep -q 'Resumed at' <<<"$out"
+  out="$(engine send hide 1)"; grep -q 'Hiding camera 1' <<<"$out"
+  expect_failure 'unknown command' send bogus
+  out="$(engine status)"; grep -qx 'state=recording' <<<"$out"
+  sleep 1
+  out="$(engine stop)"
+  grep -q 'Paused 1.0 s' <<<"$out"
+  grep -qx "Saved $artifacts/engine.mov" <<<"$out"
+  out="$(engine status)"; grep -qx "last_saved=$artifacts/engine.mov" <<<"$out"
+  out="$(engine start --test-pattern -f 30 -t 2 -o "$artifacts/engine-short.mov")"
+  sleep 4
+  out="$(engine status)"
+  grep -qx 'state=idle' <<<"$out"
+  grep -qx "last_saved=$artifacts/engine-short.mov" <<<"$out"
+  out="$(engine shutdown)"; grep -q 'the engine stopped' <<<"$out"
+  sleep 0.5
+  expect_failure 'the engine is not running' status
+  cp "$tmp/engine.log" "$artifacts/engine.log"
+  "$rec" probe "$artifacts/engine.mov" | tee "$artifacts/engine.probe"
+  within "$(value frames "$artifacts/engine.probe")" 80 110
+  within "$(value av_sync_events "$artifacts/engine.probe")" 2 4
+  within "$(value av_offset_max_ms "$artifacts/engine.probe")" 0 25
+  "$rec" probe "$artifacts/engine-short.mov" | tee "$artifacts/engine-short.probe"
+  grep -qx 'frames=60' "$artifacts/engine-short.probe"
 
   if [[ "${REC_E2E_CAPTURE:-0}" == 1 ]]; then
     "$rec" record --display 1 -r 1080p -f 30 -t 3 --codec h264 -o "$artifacts/screen.mov" | tee "$artifacts/screen.record.log"

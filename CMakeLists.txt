@@ -35,11 +35,14 @@ else()
     target_sources(rec PRIVATE src/platform/unsupported.cpp)
 endif()
 
-add_executable(rec-cli src/main.cpp)
+add_executable(rec-cli src/main.cpp src/cli/options.cpp src/cli/engine.cpp src/cli/local_socket.cpp)
+target_include_directories(rec-cli PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(rec-cli PRIVATE rec)
 set_target_properties(rec-cli PROPERTIES OUTPUT_NAME rec)
 if(MSVC)
     target_compile_options(rec-cli PRIVATE /utf-8)
+    target_compile_definitions(rec-cli PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(rec-cli PRIVATE ws2_32)
     # Its import library would otherwise be rec.lib, the engine library's own path, and
     # MSBuild then skipped relinking rec.exe after engine-only changes.
     set_target_properties(rec-cli PROPERTIES ARCHIVE_OUTPUT_NAME rec-cli)

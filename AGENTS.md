@@ -44,6 +44,7 @@ These are references, not dependencies. Record the upstream revision when copyin
 
 - `include/rec/`: public C++ API.
 - `src/`: command-line frontend.
+- `src/cli/`: record options and control lines shared by `rec record` and the background engine (`rec serve`), which hosts one recording behind a per-user local socket.
 - `src/core/`: platform-neutral mixer, sync analysis, RTMP client and its TCP transport, shared by the engines.
 - `src/platform/macos/`: Apple capture, timing and encoding adapter, and TLS for RTMPS (Network.framework).
 - `src/platform/windows/`: Windows capture (WGC, WASAPI), timing and Media Foundation encoding adapter, and TLS for RTMPS (Schannel).

@@ -113,7 +113,21 @@ The buffer holds H.264 at `--stream-bitrate` and 160 kb/s AAC, the same encode a
 - Paused time is cut from the stream too. The server receives nothing while paused and may time out a long pause.
 - Repeat `--stream` to go live on up to four servers at once, for example Twitch and YouTube. rec encodes the stream once and sends it to each server over its own connection, with its own queue and reconnects, so a slow or lost server holds back only itself. rec connects to all of them before recording starts, and if one cannot be reached it does not start and names that server. The status line shows how many are live (`LIVE 2/2`), the summary lists each server, and `Stream stopped early:` names the ones that ended. The upload is the stream bitrate times the number of servers.
 
-`rec::Recorder` in `include/rec/rec.hpp` is the public library API. The CLI uses the same engine. IOSurface-backed pixel buffers go to AVAssetWriter without CPU pixel copying. It uses ScreenCaptureKit for resizing in this initial version.
+### Background engine
+
+```sh
+rec start --system-audio -o talk.mov   # returns at once; the engine records
+rec pause; rec resume
+rec send "hide 1"                      # any control line: show, hide, move, mute, volume, save
+rec status                             # state=recording, output, recorded, written, dropped
+rec stop                               # saves and prints the summary
+rec shutdown                           # stops the engine
+```
+
+`rec start` takes the `record` options and hands the recording to a background engine process, launching `rec serve` if none is running. The recording keeps going after the terminal or script that started it exits, and any later `rec` command can pause, change or stop it. Without `-t` it records until `rec stop`. A recording that ends by itself (its duration, a closed window) is saved, and `rec status` reports it as `last_saved`. Relative paths are taken from the directory `rec start` ran in.
+
+The engine runs one recording at a time and listens on a per-user Unix domain socket (`~/Library/Application Support/rec/engine.sock`, `%LOCALAPPDATA%\rec\engine.sock`; `REC_ENGINE_SOCKET` overrides it). Windows supports these sockets since Windows 10 1803. The socket's folder keeps an `engine.log`. Each request is one text line and each reply ends with `ok` or `error`, so scripts and other programs can drive it too. `rec serve` runs the engine in the foreground instead. The desktop apps still record in their own process.
+`rec::Recorder` in `include/rec/rec.hpp` is the public library API. The CLI and the background engine use it. IOSurface-backed pixel buffers go to AVAssetWriter without CPU pixel copying.
 
 ## Desktop app
 

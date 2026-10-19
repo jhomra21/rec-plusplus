@@ -134,6 +134,54 @@ try {
     Expect-Within $replay 'av_sync_events' 4 8
     Expect-Within $replay 'av_offset_max_ms' 0 25
 
+    # Engine: `rec start` launches the background engine, which keeps recording after each
+    # client exits; other clients pause, change and stop it. A short recording ends by itself.
+    $env:REC_ENGINE_SOCKET = Join-Path $tmp 'engine.sock'
+    Expect-Failure 'the engine is not running' @('status')
+    $enginePath = Join-Path $artifacts 'engine.mp4'
+    $engineLog = New-Object System.Collections.Generic.List[string]
+    function Engine([string[]]$arguments) {
+        $run = Invoke-Rec $rec $arguments
+        $engineLog.Add("> rec $arguments [exit $($run.Code)]`n$($run.Text)")
+        if ($run.Code -ne 0) { throw "rec $arguments failed: $($run.Text)" }
+        return $run.Text
+    }
+    try {
+        Expect-Text (Engine @('start', '--test-pattern', '--test-tone', '-f', '30', '--camera', 'test', '-o', $enginePath)) 'Recording to'
+        Expect-Failure 'already recording' @('start', '--test-pattern', '-o', (Join-Path $tmp 'second.mp4'))
+        Start-Sleep -Milliseconds 2000
+        Expect-Text (Engine @('pause')) 'Paused at'
+        Start-Sleep -Milliseconds 1000
+        Expect-Text (Engine @('resume')) 'Resumed at'
+        Expect-Text (Engine @('send', 'hide', '1')) 'Hiding camera 1'
+        Expect-Failure 'unknown command' @('send', 'bogus')
+        Expect-Text (Engine @('status')) 'state=recording'
+        Start-Sleep -Milliseconds 1000
+        $stopped = Engine @('stop')
+        Expect-Text $stopped 'Paused 1.0 s'
+        Expect-Text $stopped "Saved $enginePath"
+        Expect-Text (Engine @('status')) "last_saved=$enginePath"
+        $shortPath = Join-Path $artifacts 'engine-short.mp4'
+        Engine @('start', '--test-pattern', '-f', '30', '-t', '2', '-o', $shortPath) | Out-Null
+        Start-Sleep -Milliseconds 4000
+        $idle = Engine @('status')
+        Expect-Text $idle 'state=idle'
+        Expect-Text $idle "last_saved=$shortPath"
+        Expect-Text (Engine @('shutdown')) 'the engine stopped'
+        Start-Sleep -Milliseconds 500
+        Expect-Failure 'the engine is not running' @('status')
+    } finally {
+        Invoke-Rec $rec @('shutdown') | Out-Null
+        Set-Content -Path (Join-Path $artifacts 'engine.client.log') -Value ($engineLog -join "`n")
+        Copy-Item (Join-Path $tmp 'engine.log') (Join-Path $artifacts 'engine.log') -ErrorAction SilentlyContinue
+        Remove-Item Env:REC_ENGINE_SOCKET -ErrorAction SilentlyContinue
+    }
+    $engine = Get-Probe $rec $enginePath (Join-Path $artifacts 'engine.probe')
+    Expect-Within $engine 'frames' 80 110
+    Expect-Within $engine 'av_sync_events' 2 4
+    Expect-Within $engine 'av_offset_max_ms' 0 20
+    $short = Get-Probe $rec $shortPath (Join-Path $artifacts 'engine-short.probe')
+    Expect-Field $short 'frames' '60'
     # Overlays: a camera and an image drawn into every frame on the GPU; "hide 1" removes the
     # camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
     $png = Join-Path $PSScriptRoot 'overlay-test.png'
