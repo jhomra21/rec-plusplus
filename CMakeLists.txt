@@ -35,14 +35,23 @@ else()
     target_sources(rec PRIVATE src/platform/unsupported.cpp)
 endif()
 
-add_executable(rec-cli src/main.cpp src/cli/options.cpp src/cli/engine.cpp src/cli/local_socket.cpp)
-target_include_directories(rec-cli PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_link_libraries(rec-cli PRIVATE rec)
+# The background engine and its clients, shared by the CLI and the desktop app.
+add_library(rec-engine STATIC src/cli/options.cpp src/cli/engine.cpp src/cli/engine_client.cpp src/cli/local_socket.cpp
+    src/cli/shared_frame.cpp src/cli/wire.cpp)
+target_include_directories(rec-engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(rec-engine PUBLIC rec)
+if(MSVC)
+    target_compile_options(rec-engine PRIVATE /utf-8)
+    target_compile_definitions(rec-engine PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_link_libraries(rec-engine PUBLIC ws2_32)
+endif()
+
+add_executable(rec-cli src/main.cpp)
+target_link_libraries(rec-cli PRIVATE rec-engine)
 set_target_properties(rec-cli PROPERTIES OUTPUT_NAME rec)
 if(MSVC)
     target_compile_options(rec-cli PRIVATE /utf-8)
     target_compile_definitions(rec-cli PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
-    target_link_libraries(rec-cli PRIVATE ws2_32)
     # Its import library would otherwise be rec.lib, the engine library's own path, and
     # MSBuild then skipped relinking rec.exe after engine-only changes.
     set_target_properties(rec-cli PROPERTIES ARCHIVE_OUTPUT_NAME rec-cli)
@@ -60,12 +69,12 @@ if(WIN32)
     target_include_directories(rec-app PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_compile_definitions(rec-app PRIVATE UNICODE _UNICODE)
     target_compile_options(rec-app PRIVATE /utf-8 /EHsc /permissive-)
-    target_link_libraries(rec-app PRIVATE rec comctl32 shell32 ole32 oleacc advapi32)
+    target_link_libraries(rec-app PRIVATE rec-engine comctl32 shell32 ole32 oleacc advapi32)
 elseif(APPLE)
     add_executable(rec-app MACOSX_BUNDLE src/app/macos/main.mm src/app/session.cpp)
     set_source_files_properties(src/app/macos/main.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_include_directories(rec-app PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
-    target_link_libraries(rec-app PRIVATE rec "-framework AppKit" "-framework Carbon" "-framework QuartzCore" "-framework Security")
+    target_link_libraries(rec-app PRIVATE rec-engine "-framework AppKit" "-framework Carbon" "-framework QuartzCore" "-framework Security")
     set_target_properties(rec-app PROPERTIES OUTPUT_NAME Rec
         MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/support/RecApp-Info.plist")
     # Sign the whole bundle so privacy permissions apply to Rec.app. macOS ties an ad-hoc

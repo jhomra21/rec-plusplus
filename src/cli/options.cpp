@@ -278,6 +278,37 @@ std::optional<Request> parse_request(std::string_view line, std::string& error) 
         r.action = Action::move;
         r.layer = *layer;
         r.area = to;
+    } else if (line.rfind("place ", 0) == 0) {
+        const auto args = std::string(rest(6));
+        const auto first = args.find(' ');
+        const auto second = first == std::string::npos ? std::string::npos : args.find(' ', first + 1);
+        const auto layer = first == std::string::npos ? std::nullopt : layer_index(std::string_view(args).substr(0, first));
+        const auto shown = second == std::string::npos ? std::string() : args.substr(first + 1, second - first - 1);
+        Area to;
+        if (!layer || (shown != "0" && shown != "1") || !area(std::string_view(args).substr(second + 1), to)) {
+            error = "Use: place N|screen 0|1 X,Y,W,H (fractions of the frame)";
+            return std::nullopt;
+        }
+        r.action = Action::place;
+        r.layer = *layer;
+        r.visible = shown == "1";
+        r.area = to;
+    } else if (line.rfind("level ", 0) == 0) {
+        const auto args = std::string(rest(6));
+        const auto first = args.find(' ');
+        const auto second = first == std::string::npos ? std::string::npos : args.find(' ', first + 1);
+        const auto input = first == std::string::npos ? std::nullopt : audio_input(std::string_view(args).substr(0, first));
+        double db = 0;
+        const auto muted = second == std::string::npos ? std::string() : args.substr(second + 1);
+        if (!input || !number(std::string_view(args).substr(first + 1, second - first - 1), -60, 24, db) ||
+            (muted != "0" && muted != "1")) {
+            error = "Use: level system|mic DB 0|1 (-60 to 24 dB, then muted)";
+            return std::nullopt;
+        }
+        r.action = Action::audio;
+        r.input = *input;
+        r.gain_db = db;
+        r.muted = muted == "1";
     } else if ((line.rfind("mute ", 0) == 0 && audio_input(rest(5))) || (line.rfind("unmute ", 0) == 0 && audio_input(rest(7)))) {
         const bool mute = line[0] == 'm';
         r.action = Action::audio;
@@ -323,17 +354,20 @@ Result Controls::apply(const Request& request, double recorded, std::string& mes
     case Action::show:
     case Action::hide:
     case Action::flip:
-    case Action::move: {
+    case Action::move:
+    case Action::place: {
         const std::size_t n = request.layer;
         if (n != kScreen && n >= visible_.size())
             return {"No overlay " + std::to_string(n + 1) + "; add one with --camera, --image, --add-display or --add-window"};
         const bool was = n == kScreen ? screen_visible_ : static_cast<bool>(visible_[n]);
-        const bool show = request.action == Action::move ? was
-                                                         : request.action == Action::show || (request.action == Action::flip && !was);
+        const bool show = request.action == Action::place  ? request.visible
+                          : request.action == Action::move ? was
+                                                           : request.action == Action::show || (request.action == Action::flip && !was);
         const auto changed = n == kScreen ? recorder_.set_screen(show, request.area) : recorder_.set_overlay(n, show, request.area);
         if (!changed) return changed;
         if (n == kScreen) screen_visible_ = show;
         else visible_[n] = show;
+        if (request.action == Action::place) return {};  // Scenes place many sources at once; not logged.
         if (request.action == Action::move) {
             const auto& a = *request.area;
             out << "Moved " << layer_name(n) << " to " << a.x << ',' << a.y << ',' << a.width << ',' << a.height;

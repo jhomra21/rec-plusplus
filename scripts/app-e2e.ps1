@@ -7,7 +7,7 @@
 #   1. Record with system audio and microphone, pause, resume, stop: the movie keeps sync.
 #   2. Start and stop with the global hotkey Ctrl+Alt+R.
 #   3. Go live to two paths of a local MediaMTX server at once while recording; both copies decode.
-#   4. Closing the window while recording keeps recording; the next stop saves the movie.
+#   4. Closing the window while recording keeps recording; the tray menu stops and saves it.
 #   5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
 #   6. A camera and an image are drawn; the scene moves the camera while recording. The
 #      preview shows the same picture, before Start too, and stops when Show preview is off.
@@ -16,6 +16,8 @@
 #   7. Volume and mute change the mix while recording, from the window and the menu.
 #   8. Settings persist without the stream key, which Credential Manager holds.
 #   9. Quit Rec from the notification-area menu while recording saves the movie, then exits.
+#      With Keep Recording After Quit, the background engine records on; the next launch
+#      takes the recording over, preview included, and stops it.
 #  10. Logging off while recording saves the movie before WM_ENDSESSION returns.
 param([string]$Rec, [string]$App, [string]$Artifacts)
 $ErrorActionPreference = 'Stop'
@@ -75,10 +77,12 @@ function Save-Stacks($process) {
     Get-Content $out | Write-Host
 }
 
-function Start-App {    $env:REC_APP_HOME = $appHome
+function Start-App {
+    $env:REC_APP_HOME = $appHome
     $env:REC_APP_TEST_PATTERN = '1'
+    $env:REC_ENGINE_SOCKET = $engineSocket
     $process = Start-Process -FilePath $App -PassThru
-    Remove-Item Env:REC_APP_HOME, Env:REC_APP_TEST_PATTERN
+    Remove-Item Env:REC_APP_HOME, Env:REC_APP_TEST_PATTERN, Env:REC_ENGINE_SOCKET
     $deadline = (Get-Date).AddSeconds(20)
     while ((Get-Date) -lt $deadline) {
         $window = [AppWindow]::FindWindow('RecWindow', [NullString]::Value)
@@ -234,7 +238,17 @@ $bitmap.Save($overlayImage, [System.Drawing.Imaging.ImageFormat]::Png)
 $bitmap.Dispose()
 # 30 fps keeps the check light on CI runners, which encode in software and draw with WARP;
 # at 60 fps a slow runner fell over 500 ms behind in the camera step and dropped frames.
-[IO.File]::WriteAllText((Join-Path $appHome 'settings.conf'), "fps=30`ncamera_device=test`nimage_path=$overlayImage`n")
+[IO.File]::WriteAllText((Join-Path $appHome 'settings.conf'), "fps=30`ncamera_device=test`nimage_path=$overlayImage`nkeep_recording=no`n")
+# The app's recordings run in a background engine; this home has its own.
+$engineSocket = Join-Path $appHome 'engine.sock'
+# A rec command on this home's engine; its output, errors included.
+function Engine-Command([string]$command) {
+    $ErrorActionPreference = 'Continue'
+    $env:REC_ENGINE_SOCKET = $engineSocket
+    try { return (& $Rec $command 2>&1 | Out-String) } finally { Remove-Item Env:REC_ENGINE_SOCKET }
+}
+function Stop-Engine { Engine-Command 'shutdown' | Out-Null }
+Stop-Engine
 $mediamtx = Start-MediaMTX (Get-MediaMTX (Join-Path (Split-Path -Parent $PSScriptRoot) 'build\tools')) $received (Join-Path $Artifacts 'app-mediamtx')
 $ui = $null
 try {
@@ -332,7 +346,9 @@ try {
     Start-Sleep -Seconds 2
     if ([AppWindow]::IsWindowVisible($handle)) { throw 'the window stayed open' }
     if ($ui.Process.HasExited) { throw 'closing the window ended the app' }
-    [Windows.Forms.SendKeys]::SendWait('^%r')
+    # The tray menu stops it. (Typed keys would go to whichever window took the focus, which
+    # drops them when it runs elevated; step 2 covers the hotkey.)
+    [AppWindow]::PostMessage($handle, 0x0111, [IntPtr]1000, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Stop Recording"
     $deadline = (Get-Date).AddSeconds(20)
     while ((Text-Of $ui 100) -ne 'Ready to record') {
         if ((Get-Date) -gt $deadline) { throw 'the hidden recording did not stop' }
@@ -555,6 +571,7 @@ try {
     Expect-Text $settings 'preview=1'
     Expect-Text $settings 'system_volume=-6'
     Expect-Text $settings 'system_muted=0'
+    Expect-Text $settings 'keep_recording=no'
     if ($settings.Contains('appkey')) { throw 'the stream key was written to the settings file' }
 
     # 9. Quit from the notification-area menu while recording: the app saves the movie, then exits.
@@ -572,6 +589,40 @@ try {
     Expect-Within $quit 'av_offset_max_ms' 0 20
     Write-Host "9. quit while recording: $($quit['frames']) frames"
 
+    # 9b. With Keep Recording After Quit, quitting leaves the recording to the background
+    # engine. The next launch takes it over: status, timer and the preview (shared memory from
+    # the engine; the camera sits top right since 6b), and Stop saves one movie spanning both.
+    $conf = Join-Path $appHome 'settings.conf'
+    [IO.File]::WriteAllText($conf, ((Get-Content -Raw $conf) -replace 'keep_recording=no', 'keep_recording=yes'))
+    $keptBefore = @(Get-ChildItem $folder -Filter '*.mp4').Count
+    $ui = Start-App
+    Wait-Status $ui 'Ready to record' | Out-Null
+    Press $ui 'Start Recording'
+    Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    Wait-Recorded $ui 2
+    [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1004, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, Quit Rec
+    if (-not $ui.Process.WaitForExit(15000)) { throw 'Quit Rec did not end the app with Keep Recording After Quit' }
+    $engineStatus = Engine-Command 'status'
+    $engineStatus | Set-Content (Join-Path $Artifacts 'app-keep-status.txt')
+    Expect-Text $engineStatus 'state=recording'
+    Start-Sleep -Seconds 2
+    $ui = Start-App
+    Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-keep-preview.png') @(0.72, 0.08, 0.22, 0.22) 'green'
+    Wait-Recorded $ui 6
+    Press $ui 'Stop Recording'
+    Wait-Status $ui 'Ready to record' | Out-Null
+    Expect-Text (Text-Of $ui 101) 'Saved rec-'
+    if (@(Get-ChildItem $folder -Filter '*.mp4').Count -ne $keptBefore + 1) { throw 'the kept recording did not save one movie' }
+    $kept = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-keep.probe')
+    Copy-Item (Newest-Movie) (Join-Path $Artifacts 'app-keep.mp4')
+    Expect-Within $kept 'duration' 5.5 9
+    Expect-Within $kept 'av_sync_events' 4 9
+    Expect-Within $kept 'av_offset_max_ms' 0 20
+    Write-Host "9b. kept after quit: $($kept['frames']) frames ($($kept['duration']) s) across the app quitting and reopening; the preview came from the engine"
+    [IO.File]::WriteAllText($conf, ((Get-Content -Raw $conf) -replace 'keep_recording=yes', 'keep_recording=no'))
+    [AppWindow]::PostMessage($ui.Window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_CLOSE, idle: quits
+    if (-not $ui.Process.WaitForExit(15000)) { throw 'the app did not quit' }
     # 10. Log off while recording: the movie is complete when WM_ENDSESSION returns, after which
     # Windows may end the process at any moment.
     $ui = Start-App
@@ -584,7 +635,7 @@ try {
     [AppWindow]::SendMessage($ui.Window, 0x0016, [IntPtr]1, $logoff) | Out-Null  # WM_ENDSESSION
     $ui.Process.Kill()
     $ui.Process.WaitForExit()
-    if (@(Get-ChildItem $folder -Filter '*.mp4').Count -ne $before + 2) { throw 'log-off did not save the recording' }
+    if (@(Get-ChildItem $folder -Filter '*.mp4').Count -ne $before + 3) { throw 'log-off did not save the recording' }
     $ended = Get-Probe $Rec (Newest-Movie) (Join-Path $Artifacts 'app-logoff.probe')
     Expect-Within $ended 'duration' 1.5 3.5
     Expect-Within $ended 'av_offset_max_ms' 0 20
@@ -596,5 +647,7 @@ try {
 } finally {
     if ($ui -and -not $ui.Process.HasExited) { $ui.Process.Kill() }
     Stop-MediaMTX $mediamtx
+    Stop-Engine
+    if (Test-Path (Join-Path $appHome 'engine.log')) { Copy-Item (Join-Path $appHome 'engine.log') (Join-Path $Artifacts 'app-engine.log') }
     foreach ($url in $server, $server2) { cmdkey "/delete:rec/stream/$url" 2>&1 | Out-Null }
 }

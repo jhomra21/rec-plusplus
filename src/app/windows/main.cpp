@@ -19,14 +19,17 @@
 #include <oleacc.h>
 
 #include "app/session.hpp"
+#include "cli/engine.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -62,6 +65,7 @@ enum Control : int {
 
 enum Command : UINT {
     kMenuRecord = 1000, kMenuPause, kMenuShow, kMenuFolder, kMenuQuit, kMenuReplay, kMenuMuteSystem, kMenuMuteMic,
+    kMenuKeepRecording,
     // The Add Display and Add Window menus, then one command per scene.
     kMenuAddDisplay = 1100, kMenuAddWindow = 1200, kMenuScene = 2000
 };
@@ -344,6 +348,9 @@ public:
         home_ = environment(L"REC_APP_HOME");
         test_pattern_ = environment(L"REC_APP_TEST_PATTERN") == L"1";
         settings_path_ = narrow((home_.empty() ? known_folder(FOLDERID_RoamingAppData) + L"\\rec" : home_) + L"\\settings.conf");
+        // A separate home (the app E2E) has its own engine; the engine started from here inherits it.
+        if (!home_.empty() && environment(L"REC_ENGINE_SOCKET").empty())
+            _wputenv_s(L"REC_ENGINE_SOCKET", (home_ + L"\\engine.sock").c_str());
         settings_ = rec::app::load_settings(settings_path_);
         if (settings_.folder.empty())
             settings_.folder = narrow(home_.empty() ? known_folder(FOLDERID_Videos) : home_ + L"\\recordings");
@@ -377,6 +384,14 @@ public:
                                   CW_USEDEFAULT, CW_USEDEFAULT, 480, 760, nullptr, nullptr, instance, this);
         if (!window_) return 1;
         ShowWindow(window_, show);
+        // A recording left running when Rec last quit (or started with `rec start`) shows here.
+        std::string engine_error;
+        if (!session_.attach(settings_, engine_error) && !engine_error.empty()) {
+            note_ = L"Could not reach the background engine: " + wide(engine_error);
+            note_attention_ = true;
+            note_until_ = GetTickCount64() + 8000;
+        }
+        refresh();
         MSG message;
         while (GetMessageW(&message, nullptr, 0, 0) > 0) {
             if (IsDialogMessageW(window_, &message)) continue;
@@ -1248,6 +1263,10 @@ private:
         case kMenuShow: show_window(); return;
         case kOpenFolder: case kMenuFolder: open_folder(); return;
         case kMenuQuit: quit(); return;
+        case kMenuKeepRecording:
+            settings_.keep_recording = settings_.keep_recording == "yes" ? "no" : "yes";
+            rec::app::save_settings(settings_path_, settings_);
+            return;
         case kChangeFolder: choose_folder(); return;
         case kBrowseImage: choose_image(); return;
         case kScene:
@@ -1400,6 +1419,18 @@ private:
     bool busy() { return session_.status().state != State::idle; }
 
     void quit() {
+        const auto state = session_.status().state;
+        if (state == State::recording || state == State::paused) {
+            const auto keep = keep_recording();
+            if (!keep) return;  // Cancelled.
+            if (*keep) {
+                // The engine records on; opening Rec again (or `rec stop`) stops it.
+                session_.detach();
+                remember();
+                DestroyWindow(window_);
+                return;
+            }
+        }
         quitting_ = true;
         if (busy()) {
             session_.stop();
@@ -1409,6 +1440,30 @@ private:
         }
         remember();
         DestroyWindow(window_);
+    }
+
+    // Whether quitting leaves the recording running: the setting, or the first time, the
+    // person's answer, which becomes the setting. Empty when they cancel.
+    std::optional<bool> keep_recording() {
+        if (settings_.keep_recording != "ask") return settings_.keep_recording == "yes";
+        TASKDIALOG_BUTTON buttons[] = {{IDYES, L"Keep Recording"}, {IDNO, L"Stop and Save"}};
+        TASKDIALOGCONFIG dialog{sizeof dialog};
+        dialog.hwndParent = IsWindowVisible(window_) ? window_ : nullptr;
+        dialog.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+        dialog.pszWindowTitle = L"Rec";
+        dialog.pszMainIcon = TD_INFORMATION_ICON;
+        dialog.pszMainInstruction = L"Keep recording after Rec quits?";
+        dialog.pszContent = L"Rec can keep recording in the background. Open Rec again to see it and stop it.";
+        dialog.pszFooter = L"Rec remembers your answer. Change it in the notification-area menu: Keep Recording After Quit.";
+        dialog.cButtons = static_cast<UINT>(std::size(buttons));
+        dialog.pButtons = buttons;
+        dialog.nDefaultButton = IDYES;
+        dialog.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+        int chosen = IDCANCEL;
+        if (FAILED(TaskDialogIndirect(&dialog, &chosen, nullptr, nullptr)) || chosen == IDCANCEL) return std::nullopt;
+        settings_.keep_recording = chosen == IDYES ? "yes" : "no";
+        rec::app::save_settings(settings_path_, settings_);
+        return chosen == IDYES;
     }
 
     void save_replay() {
@@ -1678,6 +1733,8 @@ private:
         AppendMenuW(menu, MF_STRING, kMenuShow, L"Show Rec");
         AppendMenuW(menu, MF_STRING, kMenuFolder, L"Open Recordings Folder");
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (settings_.keep_recording == "yes" ? MF_CHECKED : 0), kMenuKeepRecording,
+                    L"Keep Recording After Quit");
         AppendMenuW(menu, MF_STRING, kMenuQuit, L"Quit Rec");
         POINT at{};
         GetCursorPos(&at);
@@ -1890,7 +1947,13 @@ private:
 };
 } // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int show) {
+    // `rec-app --engine`: the background engine that hosts the app's recordings, so they can
+    // outlive it (cli/engine.hpp). It exits after a minute without a recording or a client.
+    if (command && std::wstring_view(command) == L"--engine") {
+        static std::atomic_bool interrupted{false};
+        return rec::cli::serve(rec::cli::engine_socket(), interrupted, 60);
+    }
     // One instance: a second launch brings the first window forward.
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\rec-app");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {

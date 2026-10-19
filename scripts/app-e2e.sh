@@ -15,7 +15,9 @@
 #      a new scene places the screen by dragging and hides the camera, and is switched away
 #      from while recording;
 #   8. volume and mute change the mix while recording, from the window and the menu bar item;
-#   9. quitting during a recording saves the movie; settings persist without the stream key.
+#   9. quitting during a recording saves the movie; settings persist without the stream key;
+#  10. with Keep Recording After Quit, the background engine records on after quitting; the
+#      next launch takes the recording over, preview included, and stops it.
 # Usage: app-e2e.sh REC REC_APP ARTIFACTS
 set -euo pipefail
 
@@ -28,7 +30,6 @@ home="$artifacts/app-home"
 report="$artifacts/self-test.txt"
 rm -rf "$home" "$report"
 mkdir -p "$artifacts"
-trap stop_mediamtx EXIT
 
 value() { awk -F= -v key="$1" '$1 == key { print $2 }' "$2"; }
 within() {
@@ -57,28 +58,47 @@ probe() {
 received="$artifacts/stream-server"
 start_mediamtx "$(get_mediamtx "$root/build/tools")" "$received" "$artifacts/mediamtx"
 
-REC_APP_HOME="$home" REC_APP_TEST_PATTERN=1 REC_APP_SELF_TEST="$report" \
-  REC_APP_SELF_TEST_STREAM=rtmp://127.0.0.1:1935/live \
-  "$app/Contents/MacOS/Rec" >"$artifacts/app.log" 2>&1 &
-pid="$!"
-for _ in $(seq 360); do
-  kill -0 "$pid" 2>/dev/null || break
+# The app's recordings run in a background engine. This run has its own, on a short path:
+# Unix socket paths are limited to 104 bytes.
+engine_dir="$(mktemp -d /tmp/rec-e2e.XXXXXX)"
+export REC_ENGINE_SOCKET="$engine_dir/engine.sock"
+finish() {
+  "$rec" shutdown >/dev/null 2>&1 || true
   sleep 0.5
-done
-if kill -0 "$pid" 2>/dev/null; then
-  kill -9 "$pid"
-  cat "$artifacts/app.log" >&2
-  echo 'Rec did not finish its self-test in 3 minutes' >&2
-  exit 1
-fi
-code=0
-wait "$pid" || code="$?"
-cat "$report"
-if [[ "$code" != 0 ]]; then
-  cat "$artifacts/app.log" >&2
-  echo "Rec exited with $code" >&2
-  exit 1
-fi
+  cp "$engine_dir/engine.log" "$artifacts/app-engine.log" 2>/dev/null || true
+  rm -rf "$engine_dir"
+  stop_mediamtx
+}
+trap finish EXIT
+# Quitting during a recording stops it until step 10 turns Keep Recording After Quit on.
+mkdir -p "$home"
+printf 'keep_recording=no\n' >"$home/settings.conf"
+
+# run_app REPORT LOG [PHASE]: runs Rec's self-test (or one phase of it) to the end.
+run_app() {
+  REC_APP_HOME="$home" REC_APP_TEST_PATTERN=1 REC_APP_SELF_TEST="$1" REC_APP_SELF_TEST_PHASE="${3:-}" \
+    REC_APP_SELF_TEST_STREAM=rtmp://127.0.0.1:1935/live \
+    "$app/Contents/MacOS/Rec" >"$2" 2>&1 &
+  local pid="$!" code=0
+  for _ in $(seq 360); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -9 "$pid"
+    cat "$2" >&2
+    echo 'Rec did not finish its self-test in 3 minutes' >&2
+    exit 1
+  fi
+  wait "$pid" || code="$?"
+  cat "$1"
+  if [[ "$code" != 0 ]]; then
+    cat "$2" >&2
+    echo "Rec exited with $code" >&2
+    exit 1
+  fi
+}
+run_app "$report" "$artifacts/app.log"
 grep -qx 'accessibility=ok' "$report"
 grep '^margins=' "$report"
 grep -qx 'keychain=ok' "$report"
@@ -188,5 +208,23 @@ grep -qx 'image=0' "$settings"
 grep -qx 'preview=1' "$settings"
 grep -qx 'system_volume=-6' "$settings"
 grep -qx 'system_muted=0' "$settings"
+grep -qx 'keep_recording=no' "$settings"
 if grep -q appkey "$settings"; then echo 'the stream key was written to the settings file' >&2; exit 1; fi
+
+# 10. With Keep Recording After Quit, quitting leaves the recording to the background engine;
+# the next launch takes it over, preview included, and Stop saves one movie spanning both.
+sed -i '' 's/^keep_recording=no$/keep_recording=yes/' "$settings"
+run_app "$artifacts/self-test-keep.txt" "$artifacts/app-keep.log" keep
+grep -qx 'keep=started' "$artifacts/self-test-keep.txt"
+"$rec" status | tee "$artifacts/app-keep-status.txt"
+grep -qx 'state=recording' "$artifacts/app-keep-status.txt"
+sleep 2
+run_app "$artifacts/self-test-attach.txt" "$artifacts/app-attach.log" attach
+grep -qx 'keep-preview=ok' "$artifacts/self-test-attach.txt"
+kept="$(awk 'index($0, "keep=") == 1 { print substr($0, 6) }' "$artifacts/self-test-attach.txt")"
+probe "$kept" app-keep
+within "$(value duration "$artifacts/app-keep.probe")" 5.5 9
+within "$(value av_sync_events "$artifacts/app-keep.probe")" 4 9
+within "$(value av_offset_max_ms "$artifacts/app-keep.probe")" 0 20
+echo "10. kept after quit: $(value frames "$artifacts/app-keep.probe") frames across the app quitting and reopening"
 echo 'app e2e passed'

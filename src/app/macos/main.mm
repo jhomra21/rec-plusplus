@@ -10,9 +10,12 @@
 #import <Security/Security.h>
 
 #include "app/session.hpp"
+#include "cli/engine.hpp"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <csignal>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -299,6 +302,8 @@ struct PreviewHit {
     NSString* support = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES).firstObject
         stringByAppendingPathComponent:@"rec"];
     _settingsPath = (home.empty() ? utf8(support) : home) + "/settings.conf";
+    // A separate home (the app E2E) has its own engine; the engine started from here inherits it.
+    if (!home.empty() && environment("REC_ENGINE_SOCKET").empty()) setenv("REC_ENGINE_SOCKET", (home + "/engine.sock").c_str(), 1);
     _settings = rec::app::load_settings(_settingsPath);
     if (_settings.folder.empty()) {
         NSString* movies = NSSearchPathForDirectoriesInDomains(NSMoviesDirectory, NSUserDomainMask, YES).firstObject;
@@ -318,6 +323,13 @@ struct PreviewHit {
     [self buildStatusItem];
     [self showSettings];
     [self registerHotkey];
+    // A recording left running when Rec last quit (or started with `rec start`) shows here.
+    std::string engineError;
+    if (!_session->attach(_settings, engineError) && !engineError.empty()) {
+        _note = [@"Could not reach the background engine: " stringByAppendingString:ns(engineError)];
+        _noteAttention = true;
+        _noteUntil = [NSDate dateWithTimeIntervalSinceNow:8];
+    }
     [self refresh];
     [_window center];
     [_window makeKeyAndOrderFront:nil];
@@ -615,6 +627,9 @@ struct PreviewHit {
         [menu addItem:[self item:@"Show Rec" action:@selector(showWindow:) key:@""]];
         [menu addItem:[self item:@"Open Recordings Folder" action:@selector(openFolder:) key:@""]];
         [menu addItem:NSMenuItem.separatorItem];
+        NSMenuItem* keep = [self item:@"Keep Recording After Quit" action:@selector(toggleKeepRecording:) key:@""];
+        keep.state = _settings.keep_recording == "yes" ? NSControlStateValueOn : NSControlStateValueOff;
+        [menu addItem:keep];
         NSMenuItem* quit = [[NSMenuItem alloc] initWithTitle:@"Quit Rec" action:@selector(terminate:) keyEquivalent:@""];
         [menu addItem:quit];
     }
@@ -1503,17 +1518,53 @@ struct PreviewHit {
 
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)sender { return NO; }
 
-// Quitting during a recording saves the movie first.
+// Quitting during a recording saves the movie first, unless the background engine is to keep
+// recording.
 - (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)sender {
-    if (_session->status().state == State::idle) {
+    const auto state = _session->status().state;
+    if (state == State::idle) {
         [self remember];
         _saved = true;
         return NSTerminateNow;
+    }
+    if (state == State::recording || state == State::paused) {
+        const auto keep = [self keepRecording];
+        if (!keep) return NSTerminateCancel;
+        if (*keep) {
+            // The engine records on; opening Rec again (or `rec stop`) stops it.
+            _session->detach();
+            [self remember];
+            _saved = true;
+            return NSTerminateNow;
+        }
     }
     _quitting = true;
     _session->stop();
     [self refresh];
     return NSTerminateLater;
+}
+
+// Whether quitting leaves the recording running: the setting, or the first time, the
+// person's answer, which becomes the setting. Empty when they cancel.
+- (std::optional<bool>)keepRecording {
+    if (_settings.keep_recording != "ask") return _settings.keep_recording == "yes";
+    NSAlert* alert = [[NSAlert alloc] init];
+    alert.messageText = @"Keep recording after Rec quits?";
+    alert.informativeText = @"Rec can keep recording in the background. Open Rec again to see it and stop it.\n\n"
+                            @"Rec remembers your answer. Change it in the menu bar item's menu: Keep Recording After Quit.";
+    [alert addButtonWithTitle:@"Keep Recording"];
+    [alert addButtonWithTitle:@"Stop and Save"];
+    [alert addButtonWithTitle:@"Cancel"];
+    const NSModalResponse answer = [alert runModal];
+    if (answer != NSAlertFirstButtonReturn && answer != NSAlertSecondButtonReturn) return std::nullopt;
+    _settings.keep_recording = answer == NSAlertFirstButtonReturn ? "yes" : "no";
+    rec::app::save_settings(_settingsPath, _settings);
+    return answer == NSAlertFirstButtonReturn;
+}
+
+- (void)toggleKeepRecording:(id)sender {
+    _settings.keep_recording = _settings.keep_recording == "yes" ? "no" : "yes";
+    rec::app::save_settings(_settingsPath, _settings);
 }
 
 - (void)applicationWillTerminate:(NSNotification*)notification {
@@ -1856,6 +1907,53 @@ struct PreviewHit {
     };
     NSString* const recording = @"● Recording";
 
+    // The keep-recording step spans launches (app-e2e.sh): "keep" starts a recording and quits
+    // with Keep Recording After Quit on; "attach" finds it still running, its preview coming
+    // from the background engine (the test camera top right), and stops it.
+    const std::string phase = environment("REC_APP_SELF_TEST_PHASE");
+    if (!phase.empty()) {
+        const auto seconds = [&](double at) {
+            for (int i = 0; i < 2000; ++i) {
+                if (self->_session->status().seconds >= at) return;
+                usleep(10000);
+            }
+            fail([NSString stringWithFormat:@"the recording did not reach %.1f s", at]);
+        };
+        if (phase == "keep") {
+            wait_for(@"Ready to record", 20);
+            press(_record);
+            wait_for(recording, 20);
+            seconds(2);
+            note(@"keep=started");
+        } else {
+            wait_for(recording, 20);
+            bool green = false;
+            for (int i = 0; i < 150 && !green; ++i) {
+                __block rec::PreviewFrame shot;
+                ui(^{ shot = self->_frame; });
+                if (shot.number) {
+                    long r = 0, g = 0, b = 0;
+                    for (int x = 0; x < 10; ++x)
+                        for (int y = 0; y < 10; ++y) {
+                            const auto px = static_cast<std::size_t>((0.72 + 0.22 * (x + 0.5) / 10) * shot.width);
+                            const auto py = static_cast<std::size_t>((0.08 + 0.22 * (y + 0.5) / 10) * shot.height);
+                            const std::uint8_t* p = shot.pixels.data() + (py * shot.width + px) * 4;
+                            b += p[0]; g += p[1]; r += p[2];
+                        }
+                    green = g / 100 > 120 && g > r + 6000 && g > b + 6000;
+                }
+                if (!green) usleep(100000);
+            }
+            if (!green) fail(@"keep: the preview never showed the engine's camera");
+            note(@"keep-preview=ok");
+            seconds(6);
+            press(_record);
+            wait_for(@"Ready to record", 30);
+            saved(@"keep");
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
+        return;
+    }
     // Every control has an accessible name.
     __block NSString* unnamed = nil;
     ui(^{
@@ -2342,7 +2440,20 @@ OSStatus on_hotkey(EventHandlerCallRef, EventRef event, void* context) {
 }
 } // namespace
 
+namespace {
+std::atomic_bool engine_interrupted{false};
+extern "C" void on_engine_signal(int) { engine_interrupted.store(true); }
+} // namespace
+
 int main(int argc, const char* argv[]) {
+    // `Rec --engine`: the background engine that hosts the app's recordings, so they can
+    // outlive it (cli/engine.hpp). It exits after a minute without a recording or a client,
+    // and saves its recording when logging out sends SIGTERM.
+    if (argc == 2 && std::strcmp(argv[1], "--engine") == 0) {
+        std::signal(SIGINT, on_engine_signal);
+        std::signal(SIGTERM, on_engine_signal);
+        return rec::cli::serve(rec::cli::engine_socket(), engine_interrupted, 60);
+    }
     @autoreleasepool {
         NSApplication* app = NSApplication.sharedApplication;
         app.activationPolicy = NSApplicationActivationPolicyRegular;

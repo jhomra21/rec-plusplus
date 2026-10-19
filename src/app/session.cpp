@@ -1,5 +1,7 @@
 #include "app/session.hpp"
 
+#include "cli/engine.hpp"
+
 #include "core/overlay.hpp"
 
 #include <algorithm>
@@ -165,6 +167,7 @@ Settings load_settings(const std::string& path) {
         else if (key == "image") s.image = yes;
         else if (key == "image_path") s.image_path = value;
         else if (key == "preview") s.preview = yes;
+        else if (key == "keep_recording" && (value == "ask" || value == "yes" || value == "no")) s.keep_recording = value;
         else if (key == "last_recording") s.last_recording = value;
         else {
             std::size_t n = 0;
@@ -245,6 +248,7 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
             << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
+            << "\nkeep_recording=" << s.keep_recording
             << "\nlast_recording=" << s.last_recording << '\n';
         for (std::size_t i = 0; i < s.layers.size(); ++i) {
             const Layer& layer = s.layers[i];
@@ -670,7 +674,8 @@ Result capture_options(const Settings& s, bool test_pattern, Options& o, SourceI
 }
 
 // Moves, shows and hides every source the capture has to where scene puts it.
-Result show(Recorder& recorder, const SourceIndices& indices, const Scene& scene) {
+template <typename Capture>
+Result show(Capture& recorder, const SourceIndices& indices, const Scene& scene) {
     if (auto set = recorder.set_screen(scene.screen.visible, scene.screen.area); !set) return set;
     for (std::size_t i = 0; i < indices.layers.size() && i < scene.layers.size(); ++i)
         if (auto set = recorder.set_overlay(indices.layers[i], scene.layers[i].visible, scene.layers[i].area); !set)
@@ -747,7 +752,7 @@ Result Session::start(const Settings& s, const std::string& stream_key, const st
         idle_wake_.notify_all();
         options_ = o;
         state_ = State::starting;
-        stop_requested_ = false;
+        stop_requested_ = detach_requested_ = false;
         streaming_ = s.stream;
         replay_ = s.replay;
         indices_ = indices;
@@ -760,16 +765,70 @@ Result Session::start(const Settings& s, const std::string& stream_key, const st
         rate_time_ = std::chrono::steady_clock::now();
         stream_kbps_ = 0;
     }
-    worker_ = std::thread([this, recorder = std::make_unique<Recorder>(o)]() mutable { run(std::move(recorder)); });
+    auto recorder = std::make_unique<cli::EngineRecorder>(o, cli::engine_socket(), std::vector<std::string>{"--engine"});
+    worker_ = std::thread([this, recorder = std::move(recorder)]() mutable { run(std::move(recorder), false); });
     return {};
 }
 
-void Session::run(std::unique_ptr<Recorder> recorder) {
+bool Session::attach(const Settings& s, std::string& error) {
+    error.clear();
+    {
+        std::lock_guard lock(mutex_);
+        if (state_ != State::idle) return false;
+    }
+    wait();
+    Options o;
+    auto recorder = cli::EngineRecorder::attach(cli::engine_socket(), o, error);
+    if (!recorder) return false;
+    const bool paused = recorder->stats().paused;
+    SourceIndices indices;
+    for (std::size_t i = 0; i < o.overlays.size(); ++i) {
+        const auto kind = o.overlays[i].kind;
+        if (kind == Overlay::Kind::camera && !indices.camera) indices.camera = i;
+        else if (kind == Overlay::Kind::image && !indices.image) indices.image = i;
+        else if (kind == Overlay::Kind::display || kind == Overlay::Kind::window) indices.layers.push_back(i);
+    }
+    {
+        std::lock_guard lock(mutex_);
+        idle_settings_.reset();
+        idle_key_.clear();
+        ++idle_generation_;
+        idle_wake_.notify_all();
+        options_ = o;
+        state_ = State::starting;
+        stop_requested_ = detach_requested_ = false;
+        streaming_ = !o.stream_urls.empty();
+        replay_ = o.replay_seconds > 0;
+        indices_ = indices;
+        scene_ = std::min<std::uint32_t>(s.scene, static_cast<std::uint32_t>(s.scenes.size() - 1));
+        error_.clear();
+        stream_error_.clear();
+        saved_.clear();
+        last_ = {};
+        rate_bytes_ = 0;
+        rate_time_ = std::chrono::steady_clock::now();
+        stream_kbps_ = 0;
+        paused_on_attach_ = paused;
+    }
+    worker_ = std::thread([this, recorder = std::move(recorder)]() mutable { run(std::move(recorder), true); });
+    return true;
+}
+
+void Session::detach() {
+    {
+        std::lock_guard lock(mutex_);
+        if (state_ != State::recording && state_ != State::paused) return;
+        detach_requested_ = stop_requested_ = true;
+    }
+    wake_.notify_all();
+    wait();
+}
+void Session::run(std::unique_ptr<cli::EngineRecorder> recorder, bool attached) {
     {
         std::unique_lock lock(mutex_);
         idle_wake_.wait(lock, [this] { return !idle_alive_; });
     }
-    const auto started = recorder->start();
+    const auto started = attached ? Result{} : recorder->start();
     {
         std::lock_guard lock(mutex_);
         if (!started) {
@@ -778,17 +837,22 @@ void Session::run(std::unique_ptr<Recorder> recorder) {
         } else {
             recorder_ = recorder.get();
             recorder_->show_preview(preview_shown_);
-            state_ = State::recording;
+            state_ = attached && paused_on_attach_ ? State::paused : State::recording;
         }
     }
     if (changed_) changed_();
     if (!started) return;
+    bool let_go = false;
     {
         std::unique_lock lock(mutex_);
         wake_.wait(lock, [this] { return stop_requested_; });
-        state_ = State::finishing;
+        // Letting go, the engine keeps recording; only this session ends.
+        let_go = detach_requested_;
+        if (let_go) recorder_ = nullptr;
+        state_ = let_go ? State::idle : State::finishing;
     }
     if (changed_) changed_();
+    if (let_go) return;
     // Finalizing can take seconds; it happens here, never on the UI thread.
     const auto stopped = recorder->stop();
     {
@@ -863,13 +927,14 @@ Result Session::set_volume(AudioInput input, int volume, bool muted) {
 
 bool Session::preview(PreviewFrame& frame) {
     std::lock_guard lock(mutex_);
-    const Recorder* source = recorder_ ? recorder_ : idle_;
+    const void* source = recorder_ ? static_cast<const void*>(recorder_) : idle_;
     // Each capture numbers its frames from 1.
     if (source != preview_source_) {
         preview_source_ = source;
         frame.number = 0;
     }
-    return source && source->preview(frame);
+    if (recorder_) return recorder_->preview(frame);
+    return idle_ && idle_->preview(frame);
 }
 
 void Session::idle_preview(const Settings* settings, bool test_pattern) {

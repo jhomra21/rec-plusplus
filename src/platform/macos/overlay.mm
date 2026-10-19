@@ -372,6 +372,8 @@ public:
         if (!device || !MPSSupportsMTLDevice(device)) return false;
         queue_ = [device newCommandQueue];
         filter_ = [[MPSImageLanczosScale alloc] initWithDevice:device];
+        // Past the edge the filter would read black and darken the outermost pixels.
+        filter_.edgeMode = MPSImageEdgeModeClamp;
         return queue_ && filter_ &&
                CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, device, nullptr, &cache_) == kCVReturnSuccess;
     }

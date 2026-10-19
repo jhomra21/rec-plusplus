@@ -1,5 +1,6 @@
 #pragma once
 
+#include "cli/engine_client.hpp"
 #include "rec/rec.hpp"
 
 #include <array>
@@ -88,6 +89,9 @@ struct Settings {
     std::vector<Scene> scenes = default_scenes();  // Never empty.
     std::uint32_t scene = 0;          // The scene shown; switchable while recording.
     bool preview = true;              // Show the scene before recording while the window shows.
+    // Quitting during a recording: "ask" (the first time), "yes" (the background engine keeps
+    // recording) or "no" (stop and save first).
+    std::string keep_recording = "ask";
     std::string last_recording;
 };
 
@@ -239,9 +243,10 @@ struct SourceIndices {
     std::vector<std::size_t> layers;
 };
 
-// One recording at a time, owned by a worker thread: start() checks the settings and
-// returns at once; the worker starts capture (which can wait on permissions and the first
-// frame), waits for stop(), then finalizes the movie. The change callback runs on the
+// One recording at a time, hosted by the background engine (cli/engine_client.hpp) so it
+// can outlive the app, and followed by a worker thread: start() checks the settings and
+// returns at once; the worker starts the engine's capture (which can wait on permissions and
+// the first frame), waits for stop(), then has the engine finalize the movie. The change callback runs on the
 // worker after each step; it must only post to the UI thread, never call back in. A
 // recording that ends on its own (capture lost) is stopped when status() sees it.
 // start(), wait() and the destructor belong to one thread, the UI thread.
@@ -258,6 +263,13 @@ public:
     Result start(const Settings& settings, const std::string& stream_key, const std::string& second_key,
                  bool test_pattern = false);
     void stop();
+    // Takes over the recording the background engine runs, if any: one this app left
+    // running when it quit, or `rec start`'s. True when there was one; it then runs as if
+    // start() had started it. error says why the engine could not be asked.
+    bool attach(const Settings& settings, std::string& error);
+    // Lets go of a running recording without stopping it: the engine keeps recording and
+    // saves it when stopped from the CLI or a later attach(). Returns once let go.
+    void detach();
     Result pause();
     Result resume();
     // Writes the replay buffer to a new replay-YYYY-MM-DD-HHMMSS.mp4 in folder; path and
@@ -281,17 +293,19 @@ public:
     void wait();  // Blocks until a stop in progress has saved the movie.
 
 private:
-    void run(std::unique_ptr<Recorder> recorder);
+    void run(std::unique_ptr<cli::EngineRecorder> recorder, bool attached);
     void run_idle();
     void place_idle();  // With mutex_ held.
 
     std::function<void()> changed_;
     std::mutex mutex_;
     std::condition_variable wake_;
-    Recorder* recorder_ = nullptr;  // Owned by the worker; set while capture runs.
+    cli::EngineRecorder* recorder_ = nullptr;  // Owned by the worker; set while capture runs.
     Options options_;
     State state_ = State::idle;
     bool stop_requested_ = false;
+    bool detach_requested_ = false;
+    bool paused_on_attach_ = false;
     std::thread worker_;
     std::string error_, stream_error_, saved_;
     bool streaming_ = false, replay_ = false;
@@ -315,7 +329,7 @@ private:
     bool idle_alive_ = false;           // A capture exists, starting, running or stopping.
     bool closing_ = false;
     SourceIndices idle_indices_;
-    const Recorder* preview_source_ = nullptr;  // Whose frames preview() copied last.
+    const void* preview_source_ = nullptr;  // Whose frames preview() copied last.
 };
 
 // <prefix>-YYYY-MM-DD-HHMMSS.<format> in folder, with -2, -3 ... if that file exists.

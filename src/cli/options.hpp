@@ -16,13 +16,14 @@ namespace rec::cli {
 // Record options, as on the `rec record` command line (without "record").
 bool parse_options(const std::vector<std::string>& args, Options& options, std::string& error);
 
-enum class Action { toggle, pause, resume, stop, save_replay, show, hide, flip, move, audio };
+enum class Action { toggle, pause, resume, stop, save_replay, show, hide, flip, move, place, audio };
 inline constexpr std::size_t kScreen = SIZE_MAX;  // show, hide and move the main capture.
 
 struct Request {
     Action action = Action::toggle;
-    std::size_t layer = 0;      // show, hide, flip and move: 0-based overlay, or kScreen.
-    std::optional<Area> area;   // move.
+    std::size_t layer = 0;      // show, hide, flip, move and place: 0-based overlay, or kScreen.
+    std::optional<Area> area;   // move and place.
+    bool visible = true;        // place.
     // audio: the source, and its new mute (none: toggle) or volume.
     AudioInput input = AudioInput::system;
     std::optional<bool> muted;
@@ -30,7 +31,9 @@ struct Request {
 };
 
 // One control line: pause, resume, toggle, save, show N|screen, hide N|screen,
-// move N|screen X,Y,W,H, mute system|mic, unmute system|mic, volume system|mic DB, stop.
+// move N|screen X,Y,W,H, place N|screen 0|1 X,Y,W,H (visibility and area at once),
+// mute system|mic, unmute system|mic, volume system|mic DB, level system|mic DB 0|1 (volume
+// and mute at once), stop.
 // Empty with error set when line is not one.
 std::optional<Request> parse_request(std::string_view line, std::string& error);
 
