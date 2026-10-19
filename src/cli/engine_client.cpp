@@ -3,6 +3,7 @@
 #include "cli/engine.hpp"
 #include "cli/local_socket.hpp"
 #include "cli/wire.hpp"
+#include "core/shape.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -236,6 +237,10 @@ Result EngineRecorder::set_volume(AudioInput input, double gain_db, bool muted) 
     char text[64];
     std::snprintf(text, sizeof text, "%.3f", gain_db);
     return simple(std::string("level ") + (input == AudioInput::system ? "system " : "mic ") + text + (muted ? " 1" : " 0"));
+}
+
+Result EngineRecorder::set_style(std::size_t index, const Style& style) {
+    return simple("style " + std::to_string(index + 1) + ' ' + core::style_text(style));
 }
 
 Result EngineRecorder::set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {

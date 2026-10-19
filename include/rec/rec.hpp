@@ -54,6 +54,17 @@ struct Layout {
     Area crop;
 };
 
+// How a camera is cut out and framed. Circle, square and squircle show a square of the
+// camera's area, against the side of it nearer the frame's edge.
+struct Style {
+    enum class Shape { rectangle, rounded, circle, square, pill, squircle };
+    Shape shape = Shape::rectangle;
+    double roundness = 0.2;               // 0 (sharp) to 1 (as round as the shape allows): rounded, square, squircle.
+    double border = 0;                    // Width in pixels at 1080p, scaled with the canvas; 0 to 40.
+    std::uint32_t border_color = 0xffffff;  // 0xRRGGBB.
+    bool shadow = false;                  // A soft drop shadow below the camera.
+};
+
 // A picture drawn over the capture in every frame: an image file, a camera, or another
 // display or window captured live. Overlays draw in order, later ones on top.
 struct Overlay {
@@ -69,6 +80,7 @@ struct Overlay {
     Area area;
     bool visible = true;
     Area crop;  // The part of the picture shown, in fractions of it.
+    Style style;  // A camera's shape, border and shadow, the same in both canvases.
 };
 
 // A second picture of the same recording with its own size and its own layout of every
@@ -290,6 +302,8 @@ public:
     // Places a source (an index into Options::overlays, or kScreenLayer) in a canvas
     // (kMainCanvas or kSecondCanvas) from the next frame on.
     Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout);
+    // Changes a camera overlay's shape, border and shadow from the next frame on.
+    Result set_style(std::size_t index, const Style& style);
     // Changes a source's volume (-60 to 24 dB) and mute in the program audio while
     // recording, ramped over one audio buffer.
     Result set_volume(AudioInput input, double gain_db, bool muted);

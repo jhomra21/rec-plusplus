@@ -159,6 +159,11 @@ Settings load_settings(const std::string& path) {
             if (std::find(kReplayLengths.begin(), kReplayLengths.end(), seconds) != kReplayLengths.end()) s.replay_seconds = seconds;
         } else if (key == "camera") s.camera = yes;
         else if (key == "camera_device" && !value.empty()) s.camera_device = value;
+        else if (key == "camera_style") {
+            Style style;
+            std::string error;
+            if (core::parse_style(value, style, error) && core::check_style(style).empty()) s.camera_style = style;
+        }
         else if (key == "camera_corner" && known(kCorners, value)) old_corner = value;
         else if (key == "camera_size" && known(kCameraSizes, value)) old_size = value;
         else if (key == "camera_custom") old_custom = parse_area(value);
@@ -275,6 +280,7 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nstream=" << s.stream << "\nvertical_movie=" << s.vertical_movie
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
+            << "\ncamera_style=" << core::style_text(s.camera_style)
             << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
             << "\nkeep_recording=" << s.keep_recording
             << "\nlast_recording=" << s.last_recording << '\n';
@@ -785,6 +791,7 @@ Result capture_options(const Settings& s, bool test_pattern, Options& o, SourceI
         c.source = s.camera_device.empty() ? "default" : s.camera_device;
         c.area = scene.camera.area;
         c.visible = scene.camera.visible;
+        c.style = s.camera_style;
         o.overlays.push_back(c);
     }
     if (s.image) {
@@ -824,10 +831,13 @@ Result capture_options(const Settings& s, bool test_pattern, Options& o, SourceI
     }
     return {};
 }
-// Moves, shows and hides every source the capture has to where scene puts it, in both
-// pictures when it composes the vertical video.
+// Moves, shows and hides every source the capture has to where s's scene puts it, in both
+// pictures when it composes the vertical video, and gives the camera its style.
 template <typename Capture>
-Result show(Capture& recorder, const SourceIndices& indices, const Scene& scene) {
+Result show(Capture& recorder, const SourceIndices& indices, const Settings& s) {
+    const Scene& scene = current_scene(s);
+    if (indices.camera)
+        if (auto set = recorder.set_style(*indices.camera, s.camera_style); !set) return set;
     if (auto set = recorder.set_screen(scene.screen.visible, scene.screen.area); !set) return set;
     for (std::size_t i = 0; i < indices.layers.size() && i < scene.layers.size(); ++i)
         if (auto set = recorder.set_overlay(indices.layers[i], scene.layers[i].visible, scene.layers[i].area); !set)
@@ -1089,13 +1099,14 @@ Result Session::show_scene(const Settings& settings) {
     std::lock_guard lock(mutex_);
     if (state_ == State::recording || state_ == State::paused) {
         if (stop_requested_) return {"not recording"};
-        auto shown = show(*recorder_, indices_, current_scene(settings));
+        auto shown = show(*recorder_, indices_, settings);
         if (shown) scene_ = std::min<std::uint32_t>(settings.scene, static_cast<std::uint32_t>(settings.scenes.size() - 1));
         return shown;
     }
     if (idle_settings_) {
         idle_settings_->scenes = settings.scenes;
         idle_settings_->scene = settings.scene;
+        idle_settings_->camera_style = settings.camera_style;
         place_idle();
     }
     return {};
@@ -1128,6 +1139,7 @@ void Session::idle_preview(const Settings* settings, bool test_pattern) {
             if (settings && idle_settings_) {
                 idle_settings_->scenes = settings->scenes;
                 idle_settings_->scene = settings->scene;
+                idle_settings_->camera_style = settings->camera_style;
                 place_idle();
             }
             return;
@@ -1145,7 +1157,7 @@ void Session::idle_preview(const Settings* settings, bool test_pattern) {
 }
 
 void Session::place_idle() {
-    if (idle_ && idle_settings_) show(*idle_, idle_indices_, current_scene(*idle_settings_));
+    if (idle_ && idle_settings_) show(*idle_, idle_indices_, *idle_settings_);
 }
 
 void Session::run_idle() {

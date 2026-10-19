@@ -13,6 +13,7 @@
 #   6. A camera and an image are drawn; the scene moves the camera while recording. The
 #      preview shows the same picture, before Start too, and stops when Show preview is off.
 #      Dragging the camera in the preview moves and resizes it, before Start and while recording.
+#      The camera's shape, border and shadow show before Start and change while recording.
 #      A new scene with a display layer, placed by dragging, is switched away from while recording.
 #   7. Volume and mute change the mix while recording, from the window and the menu.
 #   8. Settings persist without the stream key, which Credential Manager holds.
@@ -138,6 +139,12 @@ function Choose-Last($ui, [string]$name) {
     $combo = (Find $ui $name $ComboBox).Handle
     $count = [int][AppWindow]::SendMessage($combo, 0x0146, [IntPtr]::Zero, [IntPtr]::Zero)  # CB_GETCOUNT
     [AppWindow]::SendMessage($combo, 0x014E, [IntPtr]($count - 1), [IntPtr]::Zero) | Out-Null  # CB_SETCURSEL
+    $id = [AppWindow]::GetDlgCtrlID($combo)
+    [AppWindow]::SendMessage($ui.Window, 0x0111, [IntPtr]((1 -shl 16) -bor $id), $combo) | Out-Null  # WM_COMMAND, CBN_SELCHANGE
+}
+function Choose-Item($ui, [string]$name, [int]$index) {
+    $combo = (Find $ui $name $ComboBox).Handle
+    [AppWindow]::SendMessage($combo, 0x014E, [IntPtr]$index, [IntPtr]::Zero) | Out-Null  # CB_SETCURSEL
     $id = [AppWindow]::GetDlgCtrlID($combo)
     [AppWindow]::SendMessage($ui.Window, 0x0111, [IntPtr]((1 -shl 16) -bor $id), $combo) | Out-Null  # WM_COMMAND, CBN_SELCHANGE
 }
@@ -513,7 +520,66 @@ try {
     Expect-Color $moved 'sample_4' 'green'
     Write-Host "6b. camera layout: $($middle['frames']) frames; dragged and resized before Start, moved while recording"
 
-    # 6c. Scenes: a new scene gets display 1 (covered by a blue window) as a layer over the
+    # 6c. Camera look: before Start a circle with a thick black border and a drop shadow; while
+    # recording, a rectangle again. The circle is the largest square in the camera's place from
+    # 6b, against the frame's right edge.
+    Choose-Item $ui 'Shape' 2  # Circle
+    Choose-Item $ui 'Border' 4  # Thick black
+    Set-Check $ui 'Drop shadow' $true
+    if (((Find $ui 'Camera roundness' 51).Item.accState(0) -band 0x1) -eq 0) { throw 'Roundness stayed enabled for a circle' }
+    Start-Sleep -Milliseconds 300
+    $conf = [IO.File]::ReadAllText((Join-Path $appHome 'settings.conf'))
+    Expect-Text $conf "camera_style=circle,border=10:000000,shadow`n"
+    $culture = [Globalization.CultureInfo]::InvariantCulture
+    $place = ($conf -split "`n" | Where-Object { $_ -like 'scene.0.camera=*' } | Select-Object -First 1).Split('=')[1].Split(',') |
+        ForEach-Object { [double]::Parse($_, $culture) }
+    # Where a square of side pixels sits along one axis of the camera's place.
+    $align = {
+        param([double]$start, [double]$length, [double]$canvas, [double]$side)
+        $before = $start; $after = 1 - $start - $length
+        if ([Math]::Abs($before - $after) -lt 1e-3) { return $start * $canvas + ($length * $canvas - $side) / 2 }
+        if ($before -lt $after) { return $start * $canvas }
+        return ($start + $length) * $canvas - $side
+    }
+    $side = [Math]::Min($place[3] * 1920, $place[4] * 1080)
+    $sx = & $align $place[1] $place[3] 1920 $side
+    $sy = & $align $place[2] $place[4] 1080 $side
+    $cx = [int]($sx + $side / 2); $cy = [int]($sy + $side / 2)
+    # Outside the circle, and below the rectangle's border once the shape changes.
+    $squareCorner = @((($sx + 6) / 1920), (($sy + 18) / 1080), (12 / 1920), (12 / 1080))
+    $look = Join-Path $Artifacts 'app-preview-look.png'
+    Wait-PreviewColor $ui $look @((($cx - 20) / 1920), (($cy - 20) / 1080), (40 / 1920), (40 / 1080)) 'green'
+    Wait-PreviewColor $ui $look $squareCorner 'green' -Not
+    Press $ui 'Start Recording'
+    Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    Wait-Recorded $ui 2
+    Choose-Item $ui 'Shape' 0  # Rectangle
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-look-rectangle.png') $squareCorner 'green'
+    Wait-Recorded $ui 5
+    Press $ui 'Stop Recording'
+    Wait-Status $ui 'Ready to record' | Out-Null
+    $movie = Newest-Movie
+    Copy-Item $movie (Join-Path $Artifacts 'app-look.mp4')
+    $sample = { param([double]$x, [double]$y, [int]$w, [int]$h) "$([int]$x),$([int]$y),$w,$h" }
+    $center = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-look-center.probe') @('--sample', (& $sample ($cx - 20) ($cy - 20) 40 40))
+    $outside = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-look-corner.probe') @('--sample', (& $sample ($sx + 4) ($sy + 16) 10 10))
+    $border = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-look-border.probe') @('--sample', (& $sample ($cx - 5) ($sy + 3) 10 4))
+    $shadow = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-look-shadow.probe') @('--sample', (& $sample ($cx - 10) ($sy + $side + 2) 20 6))
+    Expect-Color $center 'sample_1' 'green'
+    Expect-Color $outside 'sample_1' 'white'
+    Expect-Color $border 'sample_1' 'black'
+    $r, $g, $b = $shadow['sample_1'].Split(',') | ForEach-Object { [int]$_ }
+    # The screen there is white; the shadow, fading away from the circle, darkens it.
+    if ($r -gt 230 -or $g -gt 230 -or $b -gt 230) { throw "no drop shadow below the circle: $($shadow['sample_1'])" }
+    Expect-Color $center 'sample_4' 'green'
+    Expect-Color $outside 'sample_4' 'green'
+    Choose-Item $ui 'Border' 0  # None
+    Set-Check $ui 'Drop shadow' $false
+    Start-Sleep -Milliseconds 300
+    Expect-Text ([IO.File]::ReadAllText((Join-Path $appHome 'settings.conf'))) "camera_style=rectangle`n"
+    Write-Host "6c. camera look: $($center['frames']) frames; circle, border and shadow before Start, a rectangle while recording"
+
+    # 6d. Scenes: a new scene gets display 1 (covered by a blue window) as a layer over the
     # whole frame; dragging the layer's top-left corner makes it the bottom-right quarter, and
     # the scene is renamed. Recording starts in it and switches to the first scene, where the
     # layer is hidden. Then the layer is removed again.
@@ -561,7 +627,7 @@ try {
     Press $ui 'Remove'
     Start-Sleep -Milliseconds 300
     if ([int][AppWindow]::SendMessage($sources, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero) -ne 2) { throw 'the display layer was not removed' }  # LB_GETCOUNT
-    Write-Host "6c. scenes: $($quarter['frames']) frames ($counted at Stop); a display layer placed by dragging in a new scene, switched away while recording"
+    Write-Host "6d. scenes: $($quarter['frames']) frames ($counted at Stop); a display layer placed by dragging in a new scene, switched away while recording"
     # 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
     # unmuted from the notification-area menu 4.5 s in. The mix loses the beeps at 3 and 4 s.
     Set-Check $ui 'Microphone' $true

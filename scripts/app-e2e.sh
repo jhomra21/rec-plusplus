@@ -13,6 +13,7 @@
 #   7. a camera and an image are drawn, and the scene moves the camera while recording; the
 #      preview shows the same picture, before Start too, and Show preview turns it off;
 #      dragging the camera in the preview moves and resizes it, before Start and while recording;
+#      the camera's shape, border and shadow show before Start and change while recording;
 #      a new scene places the screen by dragging and hides the camera, and is switched away
 #      from while recording;
 #   8. volume and mute change the mix while recording, from the window and the menu bar item;
@@ -110,6 +111,7 @@ grep -qx 'quit=started' "$report"
 grep -qx 'idle-preview=ok' "$report"
 grep -qx 'preview=ok' "$report"
 grep -qx 'camera-layout=ok' "$report"
+grep -qx 'camera-look=ok' "$report"
 grep -qx 'scene-editor=ok' "$report"
 grep -q '^live=● LIVE 2/2' "$report"
 
@@ -174,6 +176,22 @@ color sample_1 "$artifacts/app-layout-middle.probe" green
 color sample_1 "$artifacts/app-layout-moved.probe" white
 color sample_4 "$artifacts/app-layout-middle.probe" white
 color sample_4 "$artifacts/app-layout-moved.probe" green
+
+# The camera look step: a circle with a thick black border and a drop shadow, then a
+# rectangle from 2 s. The self-test notes where to look.
+look="$(step look)"
+[[ -f "$look" ]] || { echo "missing movie: $look" >&2; exit 1; }
+for part in center corner border shadow; do
+  "$rec" probe "$look" --sample "$(value "look-$part" "$report")" | tee "$artifacts/app-look-$part.probe"
+done
+color sample_1 "$artifacts/app-look-center.probe" green
+color sample_1 "$artifacts/app-look-corner.probe" white
+color sample_1 "$artifacts/app-look-border.probe" black
+# The screen there is white; the shadow, fading away from the circle, darkens it.
+awk -F= '$1 == "sample_1" { split($2, c, ","); found = 1; ok = c[1] <= 230 && c[2] <= 230 && c[3] <= 230 }
+  END { exit !(found && ok) }' "$artifacts/app-look-shadow.probe" || { echo "no drop shadow below the circle" >&2; exit 1; }
+color sample_4 "$artifacts/app-look-center.probe" green
+color sample_4 "$artifacts/app-look-corner.probe" green
 
 # The scenes step: the screen in the bottom-right quarter without the camera, then the first
 # scene (the whole screen, the camera top right) from 2 s.

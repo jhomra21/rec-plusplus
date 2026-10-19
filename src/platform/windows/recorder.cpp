@@ -948,6 +948,10 @@ public:
         if (!overlays_) return {"this recording draws the capture as is; start it with a screen area or an overlay to change it"};
         return overlays_->set_layout(canvas, layer, layout);
     }
+    Result set_style(std::size_t index, const Style& style) {
+        if (!overlays_) return {"no overlay " + std::to_string(index + 1)};
+        return overlays_->set_style(index, style);
+    }
     Result set_volume(AudioInput input, double gain_db, bool muted) {
         if (!(gain_db >= -60 && gain_db <= 24)) return {"volume must be between -60 and 24 dB"};
         auto& source = audio_[input == AudioInput::system ? kSystem : kMic];
@@ -2058,6 +2062,7 @@ Result Recorder::set_volume(AudioInput input, double gain_db, bool muted) {
 Result Recorder::set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
     return impl_->capture.set_layout(canvas, layer, layout);
 }
+Result Recorder::set_style(std::size_t index, const Style& style) { return impl_->capture.set_style(index, style); }
 bool Recorder::preview(PreviewFrame& frame) const { return impl_->capture.preview(frame, kMainCanvas); }
 bool Recorder::preview(PreviewFrame& frame, std::size_t canvas) const { return impl_->capture.preview(frame, canvas); }
 void Recorder::show_preview(bool on) noexcept { impl_->capture.show_preview(on); }

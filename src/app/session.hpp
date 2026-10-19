@@ -98,6 +98,7 @@ struct Settings {
     std::uint32_t replay_seconds = 30;
     bool camera = false;              // Use a camera in the scenes.
     std::string camera_device = "default";  // default, test, or a camera ID.
+    rec::Style camera_style;          // The camera's shape, border and shadow in every scene; changeable while recording.
     bool image = false;               // Use an image (PNG, JPEG) in the scenes, drawn over everything, fitted.
     std::string image_path;
     std::vector<Layer> layers;        // Drawn above the screen and below the camera, in order.
@@ -139,6 +140,31 @@ inline constexpr std::array<Choice, 5> kCorners{{{"bottom-right", "Bottom right"
                                                 {"top-left", "Top left"},
                                                 {"custom", "Custom"}}};
 inline constexpr std::array<Choice, 3> kCameraSizes{{{"small", "Small"}, {"medium", "Medium"}, {"large", "Large"}}};
+// In rec::Style::Shape's order.
+inline constexpr std::array<Choice, 6> kCameraShapes{{{"rectangle", "Rectangle"},
+                                                     {"rounded", "Rounded"},
+                                                     {"circle", "Circle"},
+                                                     {"square", "Square"},
+                                                     {"pill", "Pill"},
+                                                     {"squircle", "Squircle"}}};
+// The camera borders offered: width in pixels at 1080p and color.
+struct BorderChoice {
+    double width;
+    std::uint32_t color;
+    const char* label;
+};
+inline constexpr std::array<BorderChoice, 5> kCameraBorders{{{0, 0xffffff, "None"},
+                                                             {4, 0xffffff, "Thin white"},
+                                                             {10, 0xffffff, "Thick white"},
+                                                             {4, 0x000000, "Thin black"},
+                                                             {10, 0x000000, "Thick black"}}};
+// The kCameraBorders entry style has, or -1.
+inline int border_index(const rec::Style& style) {
+    for (std::size_t i = 0; i < kCameraBorders.size(); ++i)
+        if (kCameraBorders[i].width == style.border && (style.border == 0 || kCameraBorders[i].color == style.border_color))
+            return static_cast<int>(i);
+    return -1;
+}
 // Fit: the whole landscape picture in the middle. Fill: its middle fills the frame and the
 // camera sits below. Split: the middle on top, the camera filling the bottom half.
 inline constexpr std::array<Choice, 3> kVerticalLayouts{

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rec/rec.hpp"
+#include "core/shape.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -139,6 +140,8 @@ inline std::string check_overlays(const std::vector<Overlay>& overlays) {
         }
         if (auto error = check_area(i, overlays[i].area); !error.empty()) return error;
         if (auto error = check_crop(name, overlays[i].crop); !error.empty()) return error;
+        if (o.kind != Overlay::Kind::camera && !plain(o.style)) return name + ": shapes, borders and shadows are for a camera";
+        if (auto error = check_style(o.style); !error.empty()) return name + ": " + error;
     }
     return {};
 }

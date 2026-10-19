@@ -44,6 +44,7 @@ public:
     Result set_screen(bool visible, std::optional<Area> area = std::nullopt);
     Result set_volume(AudioInput input, double gain_db, bool muted);
     Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout);
+    Result set_style(std::size_t index, const Style& style);
     bool preview(PreviewFrame& frame) const;
     bool preview(PreviewFrame& frame, std::size_t canvas) const;
     void show_preview(bool on);

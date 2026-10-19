@@ -11,6 +11,7 @@
 
 #include "app/session.hpp"
 #include "cli/engine.hpp"
+#include "core/shape.hpp"
 
 #include <algorithm>
 #include <array>
@@ -288,6 +289,9 @@ struct PreviewHit {
     std::vector<rec::Window> _menuWindows;  // What the Add Window menu offered.
     NSPopUpButton *_source, *_micDevice, *_resolution, *_fps, *_codec, *_format, *_replayLength;
     NSPopUpButton *_cameraDevice, *_corner, *_cameraSize, *_scene;
+    NSPopUpButton *_cameraShape, *_cameraBorder;
+    NSSlider* _roundness;
+    NSButton* _shadow;
     NSTextField *_bitrate, *_imageFile;
     NSStatusItem* _statusItem;
     NSTimer* _timer;
@@ -899,6 +903,14 @@ struct PreviewHit {
     for (const auto& choice : kCorners) [_corner addItemWithTitle:ns(choice.label)];
     _cameraSize = [self popup:@"Camera size"];
     for (const auto& choice : kCameraSizes) [_cameraSize addItemWithTitle:ns(choice.label)];
+    _cameraShape = [self popup:@"Camera shape"];
+    for (const auto& choice : rec::app::kCameraShapes) [_cameraShape addItemWithTitle:ns(choice.label)];
+    _roundness = [NSSlider sliderWithValue:0.2 minValue:0 maxValue:1 target:self action:@selector(changed:)];
+    _roundness.continuous = YES;
+    _roundness.accessibilityLabel = @"Camera roundness";
+    _cameraBorder = [self popup:@"Camera border"];
+    for (const auto& choice : rec::app::kCameraBorders) [_cameraBorder addItemWithTitle:ns(choice.label)];
+    _shadow = [self check:@"Drop shadow"];
     _image = [self check:@"Image overlay"];
     _imageFile = label(@"");
     _imageFile.textColor = NSColor.secondaryLabelColor;
@@ -909,6 +921,8 @@ struct PreviewHit {
     NSStackView* imageRow = [NSStackView stackViewWithViews:@[_imageFile, _chooseImage]];
     imageRow.distribution = NSStackViewDistributionFill;
     NSGridView* camera = [self grid:@[@[_camera, _cameraDevice], @[label(@"Position"), _corner], @[label(@"Size"), _cameraSize],
+                                      @[label(@"Shape"), _cameraShape], @[label(@"Roundness"), _roundness],
+                                      @[label(@"Border"), _cameraBorder], @[NSGridCell.emptyContentView, _shadow],
                                       @[_image, imageRow]]];
     [camera columnAtIndex:0].width = 120;
 
@@ -1037,6 +1051,7 @@ struct PreviewHit {
     const auto length = std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds);
     [_replayLength selectItemAtIndex:length == rec::app::kReplayLengths.end() ? 1 : length - rec::app::kReplayLengths.begin()];
     _camera.state = s.camera ? NSControlStateValueOn : NSControlStateValueOff;
+    [self showCameraStyle];
     [self showVolume:rec::AudioInput::system];
     [self showVolume:rec::AudioInput::microphone];
     _image.state = s.image ? NSControlStateValueOn : NSControlStateValueOff;
@@ -1300,6 +1315,10 @@ struct PreviewHit {
         [self placeCamera];
         return;
     }
+    if (sender == _cameraShape || sender == _roundness || sender == _cameraBorder || sender == _shadow) {
+        [self changeCameraStyle];
+        return;
+    }
     if (sender == _sourceShown) {
         rec::app::scene_item(rec::app::current_scene(_settings), _selected).visible = _sourceShown.state == NSControlStateValueOn;
         [self showSceneSources];
@@ -1397,6 +1416,28 @@ struct PreviewHit {
     const auto& area = rec::app::current_scene(_settings).camera.area;
     [_corner selectItemAtIndex:choice_index(kCorners, rec::app::corner_of(area))];
     if (const auto size = rec::app::size_of(area); !size.empty()) [_cameraSize selectItemAtIndex:choice_index(kCameraSizes, size)];
+}
+
+- (void)showCameraStyle {
+    const auto& style = _settings.camera_style;
+    [_cameraShape selectItemAtIndex:static_cast<NSInteger>(style.shape)];
+    _roundness.doubleValue = style.roundness;
+    [_cameraBorder selectItemAtIndex:rec::app::border_index(style)];
+    _shadow.state = style.shadow ? NSControlStateValueOn : NSControlStateValueOff;
+}
+
+// A new shape, roundness, border or shadow shows at once, also while recording.
+- (void)changeCameraStyle {
+    auto& style = _settings.camera_style;
+    const auto shapes = static_cast<NSInteger>(rec::app::kCameraShapes.size());
+    style.shape = static_cast<rec::Style::Shape>(std::clamp<NSInteger>(_cameraShape.indexOfSelectedItem, 0, shapes - 1));
+    style.roundness = std::clamp(_roundness.doubleValue, 0.0, 1.0);
+    if (const NSInteger b = _cameraBorder.indexOfSelectedItem; b >= 0) {
+        style.border = rec::app::kCameraBorders[static_cast<std::size_t>(b)].width;
+        style.border_color = rec::app::kCameraBorders[static_cast<std::size_t>(b)].color;
+    }
+    style.shadow = _shadow.state == NSControlStateValueOn;
+    [self applyScene];
 }
 
 // A preset Position or Size puts the camera there in this scene.
@@ -1932,6 +1973,9 @@ struct PreviewHit {
     _corner.enabled = arranging && _settings.camera;
     // A dragged camera is sized by its corners.
     _cameraSize.enabled = arranging && _settings.camera && _corner.indexOfSelectedItem != choice_index(kCorners, "custom");
+    // The camera's look changes while recording, in every scene.
+    for (NSControl* control in @[_cameraShape, _cameraBorder, _shadow]) control.enabled = arranging && _settings.camera;
+    _roundness.enabled = arranging && _settings.camera && rec::core::uses_roundness(_settings.camera_style.shape);
     // The vertical video's layout changes with the scene, also while recording.
     const bool vertical = active ? s.vertical : rec::app::uses_vertical(_settings);
     _verticalLayout.enabled = arranging && vertical;
@@ -2547,7 +2591,66 @@ struct PreviewHit {
     save_png(moved, @"app-preview-layout-moved");
     note(@"camera-layout=ok");
 
-    // 6c. Scenes: a new scene, renamed, puts the recorded screen in the bottom-right quarter by
+    // 6c. Camera look: before Start a circle with a thick black border and a drop shadow; while
+    // recording, a rectangle again. The circle is the largest square in the camera's place
+    // from 6b, against the frame's right edge. The script probes the movie where noted.
+    const auto choose = [&](NSPopUpButton* popup, NSInteger index) {
+        ui(^{
+            [popup selectItemAtIndex:index];
+            [popup sendAction:popup.action to:popup.target];
+        });
+    };
+    const auto style_now = [&] {
+        __block std::string text;
+        ui(^{ text = rec::core::style_text(self->_settings.camera_style); });
+        return text;
+    };
+    choose(_cameraShape, 2);  // Circle
+    choose(_cameraBorder, 4);  // Thick black
+    set_check(_shadow, true);
+    __block BOOL roundable = YES;
+    __block rec::Area square;
+    ui(^{
+        [self refresh];
+        roundable = self->_roundness.enabled;
+        square = rec::core::shaped_area(self->_settings.camera_style, rec::app::current_scene(self->_settings).camera.area, 1920, 1080);
+    });
+    if (roundable) fail(@"Roundness stayed enabled for a circle");
+    if (style_now() != "circle,border=10:000000,shadow") fail([@"the camera style is " stringByAppendingString:ns(style_now())]);
+    const double sx = square.x * 1920, sy = square.y * 1080, side = square.height * 1080;
+    const double cx = sx + side / 2, cy = sy + side / 2;
+    // Outside the circle, and below the rectangle's border once the shape changes.
+    const double ox = sx + 6, oy = sy + 18;
+    const auto rect = [](double x, double y, int w, int h) { return [NSString stringWithFormat:@"%d,%d,%d,%d", static_cast<int>(x), static_cast<int>(y), w, h]; };
+    note([@"look-center=" stringByAppendingString:rect(cx - 20, cy - 20, 40, 40)]);
+    note([@"look-corner=" stringByAppendingString:rect(sx + 4, sy + 16, 10, 10)]);
+    note([@"look-border=" stringByAppendingString:rect(cx - 5, sy + 3, 10, 4)]);
+    note([@"look-shadow=" stringByAppendingString:rect(cx - 10, sy + side + 2, 20, 6)]);
+    const auto look = wait_preview(@"app-look", @"green", (cx - 20) / 1920, (cy - 20) / 1080, 40.0 / 1920, 40.0 / 1080);
+    __block BOOL cut = NO;
+    for (int i = 0; i < 150 && !cut; ++i) {
+        __block rec::PreviewFrame shot;
+        ui(^{ shot = self->_frame; });
+        cut = shot.number && !is_color(mean_color(shot, ox / 1920, oy / 1080, 12.0 / 1920, 12.0 / 1080), @"green");
+        if (!cut) usleep(100000);
+    }
+    if (!cut) fail(@"app-look: the preview never showed the circle's corner cut away");
+    press(_record);
+    wait_for(recording, 20);
+    recorded(2.0);
+    choose(_cameraShape, 0);  // Rectangle
+    wait_preview(@"app-look-rectangle", @"green", ox / 1920, oy / 1080, 12.0 / 1920, 12.0 / 1080);
+    recorded(5.0);
+    press(_record);
+    wait_for(@"Ready to record", 30);
+    saved(@"look");
+    save_png(look, @"app-preview-look");
+    choose(_cameraBorder, 0);  // None
+    set_check(_shadow, false);
+    if (style_now() != "rectangle") fail([@"the camera style is " stringByAppendingString:ns(style_now())]);
+    note(@"camera-look=ok");
+
+    // 6d. Scenes: a new scene, renamed, puts the recorded screen in the bottom-right quarter by
     // dragging its top-left corner, and hides the camera with Show in this scene. Recording
     // starts in it and switches back to the first scene at 2 s.
     set_check(_image, false);  // It fills the frame, so it would take the corner.

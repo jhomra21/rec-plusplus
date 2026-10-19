@@ -27,7 +27,7 @@ struct ClickSource {
 // Composes NV12 frames on the GPU: the main capture in its area, click marks, then the
 // image, camera, display and window overlays. Each canvas (the main one and, with
 // options.canvas2, a second one) has its own size and layout of the same sources. The
-// recording thread calls draw(); set(), set_screen() and set_layout() may come from any thread. Each camera has a reader thread that only replaces
+// recording thread calls draw(); set(), set_screen(), set_layout() and set_style() may come from any thread. Each camera has a reader thread that only replaces
 // one CPU copy of its newest frame, and each display or window capture only retains its
 // newest frame; draw() uploads what changed. With options.clicks a low-level mouse hook on
 // its own thread records presses.
@@ -53,6 +53,8 @@ public:
     Result set_screen(bool visible, const std::optional<Area>& area);
     // layer: an index into options.overlays, or kScreenLayer.
     Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout);
+    // A camera's shape, border and shadow, in both canvases.
+    Result set_style(std::size_t index, const Style& style);
     std::uint64_t camera_frames() const;
     void stop();
 

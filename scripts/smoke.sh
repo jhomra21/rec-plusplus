@@ -147,6 +147,29 @@ else
   color sample_3 "$artifacts/overlay-camera.probe" white
   "$rec" probe "$artifacts/overlay.mov" --sample 150,100,250,100 | tee "$artifacts/overlay-image.probe"
   for second in 0 1 2 3; do color "sample_$second" "$artifacts/overlay-image.probe" red; done
+  # Camera shapes: over the red image filling the frame, the camera at 1152,324 576x324 is a
+  # circle (the 324-pixel square against the right edge, from 1404) with a 12-pixel white
+  # border and a shadow; mid-recording "style 2 rectangle,border=12,shadow" fills the box.
+  expect_failure 'follows the --camera' record --test-pattern --camera-style circle
+  expect_failure "unknown shape 'hexagon'" record --test-pattern --camera test --camera-style hexagon
+  expect_failure 'the border must be' record --test-pattern --camera test --camera-style circle,border=99
+  { sleep 2.5; echo 'style 2 rectangle,border=12,shadow'; sleep 5; } |
+    "$rec" record --test-pattern -r 1080p -f 30 -t 4 --image "$png@0,0,1,1" --camera test@0.6,0.3,0.3,0.3 \
+      --camera-style circle,border=12,shadow -o "$artifacts/shape.mov" | tee "$artifacts/shape.record.log"
+  grep -q 'Styled camera 2 rectangle,border=12:ffffff,shadow' "$artifacts/shape.record.log"
+  grep -q 'written 120, dropped 0' "$artifacts/shape.record.log"
+  for part in center:1556,476,20,20 box:1200,476,20,20 corner:1408,340,8,8 border:1560,326,10,6 shadow:1560,652,10,6; do
+    "$rec" probe "$artifacts/shape.mov" --sample "${part#*:}" | tee "$artifacts/shape-${part%%:*}.probe"
+  done
+  color sample_1 "$artifacts/shape-center.probe" green
+  color sample_1 "$artifacts/shape-box.probe" red
+  color sample_1 "$artifacts/shape-corner.probe" red
+  color sample_1 "$artifacts/shape-border.probe" white
+  awk -F= '$1 == "sample_1" { split($2, c, ","); found = 1; ok = c[1] >= 120 && c[1] <= 200 }
+    END { exit !(found && ok) }' "$artifacts/shape-shadow.probe" || { echo 'no drop shadow below the camera' >&2; exit 1; }
+  color sample_3 "$artifacts/shape-center.probe" green
+  color sample_3 "$artifacts/shape-box.probe" green
+  color sample_3 "$artifacts/shape-corner.probe" green
   # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
   # pattern fills it and the camera sits near the bottom; mid-recording "place canvas2 1 0 ..."
   # hides the camera there while the main movie keeps showing it.

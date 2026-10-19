@@ -20,6 +20,7 @@
 
 #include "app/session.hpp"
 #include "cli/engine.hpp"
+#include "core/shape.hpp"
 
 #include <algorithm>
 #include <array>
@@ -56,6 +57,7 @@ enum Control : int {
     kStreamHeader, kStream, kBitrateLabel, kBitrate,
     kReplayHeader, kReplay, kReplayLength,
     kCameraHeader, kCamera, kCameraDevice, kPositionLabel, kCorner, kSizeLabel, kCameraSize, kSceneLabel, kScene,
+    kShapeLabel, kShape, kRoundnessLabel, kRoundness, kBorderLabel, kBorder, kShadow,
     kImage, kImageFile, kBrowseImage,
     kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast, kPreview, kShowPreview,
     kScenesHeader, kNewScene, kDeleteScene, kSceneNameLabel, kSceneName, kSourcesLabel, kSceneSources, kSourceShown,
@@ -645,6 +647,7 @@ private:
             if (id == kSystemVolume || id == kMicVolume)
                 change_volume(id == kSystemVolume ? rec::AudioInput::system : rec::AudioInput::microphone,
                               LOWORD(w) == TB_ENDTRACK);
+            else if (id == kRoundness) change_camera_style();
             return 0;
         }
         case WM_TIMER:
@@ -843,6 +846,13 @@ private:
         HWND corner = combo(kCorner);
         label(kSizeLabel, L"Si&ze");
         HWND size = combo(kCameraSize);
+        label(kShapeLabel, L"Shape");
+        HWND shape = combo(kShape);
+        label(kRoundnessLabel, L"Round");
+        add(kRoundness, TRACKBAR_CLASSW, L"Camera roundness", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
+        label(kBorderLabel, L"Border");
+        HWND border = combo(kBorder);
+        check(kShadow, L"Drop shadow");
         check(kImage, L"Image overla&y");
         label(kImageFile, L"");
         button(kBrowseImage, L"Bro&wse...");
@@ -861,6 +871,12 @@ private:
         fill(corner, kCorners);
         fill(vertical_layout, rec::app::kVerticalLayouts);
         fill(size, kCameraSizes);
+        fill(shape, rec::app::kCameraShapes);
+        for (const auto& choice : rec::app::kCameraBorders)
+            SendMessageW(border, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(choice.label).c_str()));
+        SendMessageW(get(kRoundness), TBM_SETRANGEMIN, FALSE, 0);
+        SendMessageW(get(kRoundness), TBM_SETRANGEMAX, FALSE, 100);
+        SendMessageW(get(kRoundness), TBM_SETPAGESIZE, 0, 10);
         for (const auto& c : cameras_) SendMessageW(camera, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(c.name).c_str()));
         for (auto seconds : rec::app::kReplayLengths)
             SendMessageW(replay, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(duration_label(seconds).c_str()));
@@ -876,6 +892,7 @@ private:
         if (SUCCEEDED(CoCreateInstance(CLSID_AccPropServices, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&access_)))) {
             access_->SetHwndPropStr(get(kSystemVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"System audio volume");
             access_->SetHwndPropStr(get(kMicVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Microphone volume");
+            access_->SetHwndPropStr(get(kRoundness), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Camera roundness");
         }
 
         show_settings();
@@ -1043,6 +1060,11 @@ private:
         y += row + gap;
         row_of(kPositionLabel, kCorner, true);
         row_of(kSizeLabel, kCameraSize, true);
+        row_of(kShapeLabel, kShape, true);
+        row_of(kRoundnessLabel, kRoundness, false);
+        row_of(kBorderLabel, kBorder, true);
+        place(kShadow, x + short_label, y, width - short_label, px(22));
+        y += row + gap;
         place(kImage, x, y, box - gap, px(22));
         place(kImageFile, x + box, y + px(4), width - box, px(20));
         y += row;
@@ -1104,6 +1126,7 @@ private:
         for (std::size_t i = 0; i < cameras_.size(); ++i)
             if (cameras_[i].id == s.camera_device) camera = static_cast<int>(i);
         select(kCameraDevice, camera);
+        show_camera_style();
         set_check(kImage, s.image);
         set_check(kShowPreview, s.preview);
         show_image();
@@ -1410,6 +1433,12 @@ private:
         case kCorner: case kCameraSize:
             if (code == CBN_SELCHANGE) place_camera();
             return;
+        case kShape: case kBorder:
+            if (code == CBN_SELCHANGE) change_camera_style();
+            return;
+        case kShadow:
+            if (code == BN_CLICKED) change_camera_style();
+            return;
         case kShowLast: show_last(); return;
         case kAddDestination:
             if (code == BN_CLICKED) {
@@ -1690,6 +1719,28 @@ private:
         if (selected(kCorner) != choice_index(kCorners, corner)) select(kCorner, choice_index(kCorners, corner));
         if (const auto size = rec::app::size_of(area); !size.empty()) select(kCameraSize, choice_index(kCameraSizes, size));
         EnableWindow(get(kCameraSize), IsWindowEnabled(get(kCorner)) && corner != "custom");
+    }
+
+    void show_camera_style() {
+        const auto& style = settings_.camera_style;
+        select(kShape, static_cast<int>(style.shape));
+        SendMessageW(get(kRoundness), TBM_SETPOS, TRUE, std::lround(style.roundness * 100));
+        select(kBorder, rec::app::border_index(style));
+        set_check(kShadow, style.shadow);
+    }
+
+    // A new shape, roundness, border or shadow shows at once, also while recording.
+    void change_camera_style() {
+        auto& style = settings_.camera_style;
+        const int shapes = static_cast<int>(rec::app::kCameraShapes.size());
+        style.shape = static_cast<rec::Style::Shape>(std::clamp(selected(kShape), 0, shapes - 1));
+        style.roundness = static_cast<double>(SendMessageW(get(kRoundness), TBM_GETPOS, 0, 0)) / 100;
+        if (const int b = selected(kBorder); b >= 0) {
+            style.border = rec::app::kCameraBorders[static_cast<std::size_t>(b)].width;
+            style.border_color = rec::app::kCameraBorders[static_cast<std::size_t>(b)].color;
+        }
+        style.shadow = checked(kShadow);
+        apply_scene();
     }
 
     // A preset Position or Size puts the camera there in this scene.
@@ -1996,6 +2047,9 @@ private:
         EnableWindow(get(kCorner), arranging && settings_.camera);
         // A dragged camera is sized by its corners.
         EnableWindow(get(kCameraSize), arranging && settings_.camera && selected(kCorner) != choice_index(kCorners, "custom"));
+        // The camera's look changes while recording, in every scene.
+        for (int id : {kShape, kBorder, kShadow}) EnableWindow(get(id), arranging && settings_.camera);
+        EnableWindow(get(kRoundness), arranging && settings_.camera && rec::core::uses_roundness(settings_.camera_style.shape));
         EnableWindow(get(kVerticalMovie), editable);
         // The vertical video's layout changes with the scene, also while recording.
         const bool vertical = active ? s.vertical : rec::app::uses_vertical(settings_);

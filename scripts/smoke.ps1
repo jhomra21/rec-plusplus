@@ -206,6 +206,35 @@ try {
     Expect-Color $camera 'sample_3' 'white'
     $image = Get-Probe $rec $overlayPath (Join-Path $artifacts 'overlay-image.probe') @('--sample', '150,100,250,100')
     foreach ($second in 0..3) { Expect-Color $image "sample_$second" 'red' }
+    # Camera shapes: over the red image filling the frame, the camera at 1152,324 576x324 is a
+    # circle (the 324-pixel square against the right edge, from 1404) with a 12-pixel white
+    # border and a shadow; mid-recording "style 2 rectangle,border=12,shadow" fills the box.
+    Expect-Failure 'follows the --camera' @('record', '--test-pattern', '--camera-style', 'circle')
+    Expect-Failure "unknown shape 'hexagon'" @('record', '--test-pattern', '--camera', 'test', '--camera-style', 'hexagon')
+    Expect-Failure 'the border must be' @('record', '--test-pattern', '--camera', 'test', '--camera-style', 'circle,border=99')
+    $shapePath = Join-Path $artifacts 'shape.mp4'
+    $run = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '4', '--image', "$png@0,0,1,1",
+        '--camera', 'test@0.6,0.3,0.3,0.3', '--camera-style', 'circle,border=12,shadow', '-o', $shapePath)
+    Start-Sleep -Milliseconds 2500
+    Send-RecCommand $run 'style 2 rectangle,border=12,shadow'
+    $shaped = Stop-RecProcess $run
+    Set-Content -Path (Join-Path $artifacts 'shape.record.log') -Value $shaped.Text
+    Write-Host $shaped.Text
+    if ($shaped.Code -ne 0) { throw "the shaped camera recording failed: $($shaped.Text)" }
+    Expect-Text $shaped.Text 'Styled camera 2 rectangle,border=12:ffffff,shadow'
+    Expect-Text $shaped.Text 'written 120, dropped 0'
+    $shapeAt = @{ center = '1556,476,20,20'; box = '1200,476,20,20'; corner = '1408,340,8,8'; border = '1560,326,10,6'; shadow = '1560,652,10,6' }
+    $shape = @{}
+    foreach ($part in $shapeAt.Keys) { $shape[$part] = Get-Probe $rec $shapePath (Join-Path $artifacts "shape-$part.probe") @('--sample', $shapeAt[$part]) }
+    Expect-Color $shape.center 'sample_1' 'green'
+    Expect-Color $shape.box 'sample_1' 'red'
+    Expect-Color $shape.corner 'sample_1' 'red'
+    Expect-Color $shape.border 'sample_1' 'white'
+    $r, $g, $b = $shape.shadow['sample_1'].Split(',') | ForEach-Object { [int]$_ }
+    if ($r -gt 200 -or $r -lt 120) { throw "no drop shadow below the camera: $($shape.shadow['sample_1'])" }
+    Expect-Color $shape.center 'sample_3' 'green'
+    Expect-Color $shape.box 'sample_3' 'green'
+    Expect-Color $shape.corner 'sample_3' 'green'
     # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
     # test pattern fills it and the camera sits near the bottom; mid-recording
     # "place canvas2 1 0 ..." hides the camera there while the main movie keeps showing it.

@@ -16,7 +16,7 @@ namespace rec::cli {
 // Record options, as on the `rec record` command line (without "record").
 bool parse_options(const std::vector<std::string>& args, Options& options, std::string& error);
 
-enum class Action { toggle, pause, resume, stop, save_replay, show, hide, flip, move, place, audio };
+enum class Action { toggle, pause, resume, stop, save_replay, show, hide, flip, move, place, audio, style };
 inline constexpr std::size_t kScreen = SIZE_MAX;  // show, hide and move the main capture.
 
 struct Request {
@@ -26,6 +26,7 @@ struct Request {
     bool visible = true;        // place.
     std::size_t canvas = kMainCanvas;  // place.
     std::optional<Area> crop;   // place: the part of the source shown.
+    Style style;                // style: a camera's shape, border and shadow.
     // audio: the source, and its new mute (none: toggle) or volume.
     AudioInput input = AudioInput::system;
     std::optional<bool> muted;
@@ -35,6 +36,7 @@ struct Request {
 // One control line: pause, resume, toggle, save, show N|screen, hide N|screen,
 // move N|screen X,Y,W,H, place [canvas2] N|screen 0|1 X,Y,W,H [CROP] (visibility, area and
 // optionally the crop at once, in the main or the second canvas),
+// style N SHAPE[:ROUNDNESS][,border=PIXELS[:RRGGBB]][,shadow] (a camera's look),
 // mute system|mic, unmute system|mic, volume system|mic DB, level system|mic DB 0|1 (volume
 // and mute at once), stop.
 // Empty with error set when line is not one.

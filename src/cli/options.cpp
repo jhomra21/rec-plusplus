@@ -1,4 +1,5 @@
 #include "cli/options.hpp"
+#include "core/shape.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -219,6 +220,11 @@ bool parse_options(const std::vector<std::string>& args, Options& o, std::string
             }
             o.overlays.push_back(overlay(camera ? Overlay::Kind::camera : Overlay::Kind::image, value,
                                          camera ? Area{0.73, 0.715, 0.25, 0.25} : Area{}));
+        } else if (arg == "--camera-style") {
+            if (o.overlays.empty() || o.overlays.back().kind != Overlay::Kind::camera) {
+                error = "--camera-style follows the --camera it styles"; return false;
+            }
+            if (!core::parse_style(value, o.overlays.back().style, error)) return false;
         } else if (arg == "--add-display" || arg == "--add-window") {
             if (o.overlays.size() == 15) { error = "at most 15 overlays"; return false; }
             Overlay layer = overlay(Overlay::Kind::display, value, Area{});
@@ -375,6 +381,16 @@ std::optional<Request> parse_request(std::string_view line, std::string& error) 
         r.visible = w[i + 1] == "1";
         r.area = to;
         if (w.size() == i + 4) r.crop = crop;
+    } else if (line.rfind("style ", 0) == 0) {
+        const auto space = line.find(' ', 6);
+        const auto layer = space == std::string_view::npos ? std::nullopt : layer_index(line.substr(6, space - 6));
+        std::string why;
+        if (!layer || *layer == kScreen || !core::parse_style(rest(space + 1), r.style, why)) {
+            error = "Use: style N SHAPE[:ROUNDNESS][,border=PIXELS[:RRGGBB]][,shadow]" + (why.empty() ? std::string() : " (" + why + ")");
+            return std::nullopt;
+        }
+        r.action = Action::style;
+        r.layer = *layer;
     } else if (line.rfind("level ", 0) == 0) {
         const auto args = std::string(rest(6));
         const auto first = args.find(' ');
@@ -480,6 +496,13 @@ Result Controls::apply(const Request& request, double recorded, std::string& mes
         out << at;
         gains_[i] = gain;
         mutes_[i] = mute;
+        break;
+    }
+    case Action::style: {
+        const std::size_t n = request.layer;
+        if (n >= visible_.size()) return {"No overlay " + std::to_string(n + 1)};
+        if (auto changed = recorder_.set_style(n, request.style); !changed) return changed;
+        out << "Styled " << layer_name(n) << ' ' << core::style_text(request.style) << at;
         break;
     }
     case Action::save_replay: {

@@ -450,11 +450,20 @@ private:
 };
 class Overlays::Impl {
 public:
+    // A style's pictures for one size, made on the CPU once and reused every frame.
+    struct DecorImages {
+        int width = 0, height = 0;
+        std::string style;  // core::style_text
+        CIImage* __strong shadow = nil;
+        CIImage* __strong border = nil;
+        CIImage* __strong inside = nil;
+    };
     struct Layer {
         Overlay overlay;
         CIImage* __strong image = nil;
         std::unique_ptr<CameraFeed> camera;
         std::unique_ptr<ScreenFeed> screen;
+        DecorImages decor[2];  // One per canvas, each used only by the thread that composes it.
     };
 
     ~Impl() { stop(); }
@@ -551,7 +560,7 @@ public:
     CVPixelBufferRef compose(std::size_t index, CVPixelBufferRef base) {
         if (index >= canvas_count_) return nullptr;
         Canvas& canvas = canvases_[index];
-        struct Job { Layer* layer; Layout layout; };
+        struct Job { Layer* layer; Layout layout; Style style; };
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
         Layout screen;
@@ -568,7 +577,7 @@ public:
             // canvas found last.
             std::lock_guard lock(mutex_);
             for (std::size_t i = 0; i < layers_.size(); ++i)
-                if (canvas.layers[i].visible) jobs[count++] = {&layers_[i], canvas.layers[i]};
+                if (canvas.layers[i].visible) jobs[count++] = {&layers_[i], canvas.layers[i], layers_[i].overlay.style};
             screen = canvas.screen;
             if (index == kMainCanvas) click_now_ = click_place;
             else click_place = click_now_;
@@ -631,7 +640,29 @@ public:
                     picture = [CIImage imageWithCVPixelBuffer:pixel options:@{kCIImageColorSpace: [NSNull null]}];
                     CVPixelBufferRelease(pixel);
                 }
-                result = [placed(picture, layer.overlay.kind, jobs[i].layout, width, height) imageByCompositingOverImage:result];
+                const Style& style = jobs[i].style;
+                Layout layout = jobs[i].layout;
+                layout.area = core::shaped_area(style, layout.area, width, height);
+                CGRect target;
+                CIImage* shown = placed(picture, layer.overlay.kind, layout, width, height, &target);
+                if (core::plain(style)) {
+                    result = [shown imageByCompositingOverImage:result];
+                    continue;
+                }
+                const auto d = core::decor(style, height);
+                const DecorImages& decor = decor_for(layer.decor[index], style, d, static_cast<int>(std::lround(target.size.width)),
+                                                     static_cast<int>(std::lround(target.size.height)));
+                const auto at = [](CIImage* image, double x, double y) {
+                    return [image imageByApplyingTransform:CGAffineTransformMakeTranslation(x, y)];
+                };
+                // Core Image's origin is at the bottom left, so the shadow drops toward lower y.
+                if (decor.shadow)
+                    result = [at(decor.shadow, target.origin.x - d.pad, target.origin.y - d.pad - d.drop) imageByCompositingOverImage:result];
+                if (decor.border) result = [at(decor.border, target.origin.x, target.origin.y) imageByCompositingOverImage:result];
+                if (!decor.inside) continue;
+                result = [shown imageByApplyingFilter:@"CIBlendWithAlphaMask"
+                                  withInputParameters:@{kCIInputBackgroundImageKey: result,
+                                                        kCIInputMaskImageKey: at(decor.inside, target.origin.x, target.origin.y)}];
             }
             [context_ render:result toCVPixelBuffer:out bounds:frame colorSpace:nil];
             return out;
@@ -669,6 +700,15 @@ public:
         canvases_[canvas].layers[layer] = layout;
         return {};
     }
+    Result set_style(std::size_t index, const Style& style) {
+        if (auto error = core::check_style(style); !error.empty()) return {error};
+        std::lock_guard lock(mutex_);
+        if (index >= layers_.size()) return {"no overlay " + std::to_string(index + 1)};
+        if (layers_[index].overlay.kind != Overlay::Kind::camera) return {"shapes, borders and shadows are for a camera"};
+        layers_[index].overlay.style = style;
+        return {};
+    }
+
     std::uint64_t camera_frames() const {
         std::lock_guard lock(mutex_);
         std::uint64_t total = 0;
@@ -774,7 +814,27 @@ private:
 
     // A picture's crop scaled and cropped into its area of a width x height canvas, as
     // core::place lays it out.
-    CIImage* placed(CIImage* picture, Overlay::Kind kind, const Layout& layout, std::uint32_t width, std::uint32_t height) const {
+    // A style's pictures for a camera drawn width x height, made again when either changes.
+    static const DecorImages& decor_for(DecorImages& decor, const Style& style, const core::Decor& d, int width, int height) {
+        const auto key = core::style_text(style);
+        if (decor.width == width && decor.height == height && decor.style == key) return decor;
+        const auto image = [&](core::DecorPart part, double pad) -> CIImage* {
+            auto pixels = core::decor_pixels(style, d, part, width, height);
+            if (pixels.empty()) return nil;
+            const int w = width + static_cast<int>(2 * pad), h = height + static_cast<int>(2 * pad);
+            return [CIImage imageWithBitmapData:[NSData dataWithBytes:pixels.data() length:pixels.size()]
+                                    bytesPerRow:static_cast<size_t>(w) * 4
+                                           size:CGSizeMake(w, h)
+                                         format:kCIFormatBGRA8
+                                     colorSpace:nil];
+        };
+        decor = {width, height, key, image(core::DecorPart::shadow, d.pad), image(core::DecorPart::border, 0),
+                 image(core::DecorPart::inside, 0)};
+        return decor;
+    }
+
+    CIImage* placed(CIImage* picture, Overlay::Kind kind, const Layout& layout, std::uint32_t width, std::uint32_t height,
+                    CGRect* where = nullptr) const {
         const CGRect extent = picture.extent;
         const double pw = extent.size.width, ph = extent.size.height;
         const auto p = core::place(kind, layout.area, width, height, static_cast<std::uint32_t>(pw), static_cast<std::uint32_t>(ph),
@@ -782,7 +842,9 @@ private:
         // Core Image puts the origin at the bottom left.
         const CGRect shown = CGRectMake(extent.origin.x + p.u0 * pw, extent.origin.y + (1 - p.v1) * ph,
                                         (p.u1 - p.u0) * pw, (p.v1 - p.v0) * ph);
-        const CGRect target = CGRectMake(p.left, height - p.bottom, p.right - p.left, p.bottom - p.top);        const double sx = target.size.width / shown.size.width, sy = target.size.height / shown.size.height;
+        const CGRect target = CGRectMake(p.left, height - p.bottom, p.right - p.left, p.bottom - p.top);
+        if (where) *where = target;
+        const double sx = target.size.width / shown.size.width, sy = target.size.height / shown.size.height;
         CIImage* cropped = [picture imageByCroppingToRect:shown];
         CGAffineTransform move = CGAffineTransformMakeTranslation(-shown.origin.x, -shown.origin.y);
         move = CGAffineTransformConcat(move, CGAffineTransformMakeScale(sx, sy));
@@ -817,6 +879,7 @@ Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { ret
 Result Overlays::set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
     return impl_->set_layout(canvas, layer, layout);
 }
+Result Overlays::set_style(std::size_t index, const Style& style) { return impl_->set_style(index, style); }
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }
 void Overlays::stop() { impl_->stop(); }
 

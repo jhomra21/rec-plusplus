@@ -1,4 +1,5 @@
 #include "cli/wire.hpp"
+#include "core/shape.hpp"
 
 #include <charconv>
 #include <cstdio>
@@ -129,6 +130,7 @@ std::vector<std::string> encode_options(const Options& o) {
         add("overlay.area", area_text(l.area));
         add("overlay.visible", yes(l.visible));
         add("overlay.crop", area_text(l.crop));
+        if (!core::plain(l.style)) add("overlay.style", core::style_text(l.style));
     }
     if (const auto& c = o.canvas2; c.width) {
         add("canvas2", std::to_string(c.width) + 'x' + std::to_string(c.height));
@@ -208,6 +210,7 @@ bool decode_options(const std::vector<std::string>& words, Options& o, std::stri
             else if (field == "area") ok = area(v, layer->area);
             else if (field == "visible") ok = flag(v, layer->visible);
             else if (field == "crop") ok = area(v, layer->crop);
+            else if (field == "style") { std::string why; ok = core::parse_style(v, layer->style, why); }
             else ok = false;
         } else ok = false;
         if (!ok) {

@@ -57,29 +57,56 @@ cbuffer Placement : register(b0) {
     float4 source;  // u0, v0, u1, v1
     float opaque;   // 1: the texture has no alpha (a camera)
     float fade;     // Opacity of a picture with alpha.
-    float2 unused;
+    float mode;     // 0: the picture, 1: a solid fill (a border), 2: a drop shadow
+    float shape;    // Style::Shape, or -1 for none
+    float4 box;     // Pixels from the shape box's top-left at the quad's left, top, right, bottom
+    float4 size;    // The shape box's width and height, its roundness (a squircle's exponent), the shadow's reach
+    float4 fill;    // A border's color
 };
-struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; };
+struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; float2 local : TEXCOORD1; };
 Vertex vs(uint id : SV_VertexID) {
     float2 t = float2(id & 1, id >> 1);
     Vertex v;
     v.position = float4(lerp(dest.x, dest.z, t.x), lerp(dest.y, dest.w, t.y), 0, 1);
     v.uv = float2(lerp(source.x, source.z, t.x), lerp(source.y, source.w, t.y));
+    v.local = float2(lerp(box.x, box.z, t.x), lerp(box.y, box.w, t.y));
     return v;
 }
 Texture2D picture : register(t0);
 SamplerState smooth : register(s0);
-float4 color(float2 uv) {
-    float4 c = picture.Sample(smooth, uv);
-    return opaque > 0.5 ? float4(c.rgb, 1) : c * fade;
+// core::shape_distance: signed distance in pixels (negative inside) to the shape's edge.
+float edge(float2 p) {
+    float2 hs = size.xy / 2;
+    float least = min(hs.x, hs.y);
+    float2 a = abs(p - hs);
+    int s = (int)(shape + 0.5);
+    if (s == 5) {
+        float n = size.z;
+        return (pow(pow(a.x / hs.x, n) + pow(a.y / hs.y, n), 1 / n) - 1) * least;
+    }
+    if (s == 2) return (length(a / hs) - 1) * least;
+    float r = s == 4 ? least : s == 0 ? 0 : size.z * least;
+    float2 q = a - (hs - r);
+    return length(max(q, 0)) + min(max(q.x, q.y), 0) - r;
+}
+float4 color(Vertex v) {
+    float cover = 1;
+    if (shape >= 0) {
+        float d = edge(v.local);
+        cover = mode > 1.5 ? 0.45 * (1 - smoothstep(-size.w, size.w, d)) : saturate(0.5 - d);
+    }
+    if (mode > 1.5) return float4(0, 0, 0, cover);
+    if (mode > 0.5) return float4(fill.rgb, 1) * cover;
+    float4 c = picture.Sample(smooth, v.uv);
+    return (opaque > 0.5 ? float4(c.rgb, 1) : c * fade) * cover;
 }
 static const float3 kLuma = float3(0.2126, 0.7152, 0.0722);
 float4 luma(Vertex v) : SV_Target {
-    float4 c = color(v.uv);
+    float4 c = color(v);
     return float4(c.a * 16.0 / 255 + 219.0 / 255 * dot(c.rgb, kLuma), 0, 0, c.a);
 }
 float4 chroma(Vertex v) : SV_Target {
-    float4 c = color(v.uv);
+    float4 c = color(v);
     float y = dot(c.rgb, kLuma);
     float2 uv = float2((c.b - y) / 1.8556, (c.r - y) / 1.5748);
     return float4(c.a * 128.0 / 255 + 224.0 / 255 * uv, 0, c.a);
@@ -95,7 +122,19 @@ struct Constants {
     float source[4];
     float opaque;
     float fade;
-    float unused[2];
+    float mode;
+    float shape;
+    float box[4];
+    float size[4];
+    float fill[4];
+};
+
+// How a quad is cut to a shape; see the shader's Placement.
+struct Shaping {
+    float mode = 0, shape = -1;
+    float box[4] = {};
+    float size[4] = {};
+    float fill[4] = {};
 };
 
 std::string failed(const char* what, HRESULT hr) {
@@ -736,6 +775,15 @@ public:
         return {};
     }
 
+    Result set_style(std::size_t index, const Style& style) {
+        if (auto error = core::check_style(style); !error.empty()) return {error};
+        std::lock_guard lock(mutex_);
+        if (index >= layers_.size()) return {"no overlay " + std::to_string(index + 1)};
+        if (layers_[index].overlay.kind != Overlay::Kind::camera) return {"shapes, borders and shadows are for a camera"};
+        layers_[index].overlay.style = style;
+        return {};
+    }
+
     std::uint64_t camera_frames() const {
         std::lock_guard lock(mutex_);
         std::uint64_t total = 0;
@@ -746,7 +794,7 @@ public:
 
     bool draw(std::size_t canvas, ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame,
               unsigned subresource, std::chrono::steady_clock::time_point at) {
-        struct Job { Layer* layer; Layout layout; };
+        struct Job { Layer* layer; Layout layout; Style style; };
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
         Layout shown;
@@ -755,7 +803,7 @@ public:
             if (canvas > kSecondCanvas || !canvases_[canvas].width) return false;
             const auto& c = canvases_[canvas];
             for (std::size_t i = 0; i < layers_.size(); ++i)
-                if (c.layers[i].visible) jobs[count++] = {&layers_[i], c.layers[i]};
+                if (c.layers[i].visible) jobs[count++] = {&layers_[i], c.layers[i], layers_[i].overlay.style};
             shown = c.screen;
             draw_width_ = c.width;
             draw_height_ = c.height;
@@ -785,7 +833,7 @@ public:
                 if (shown.visible) drawn = draw_screen(context, *target, screen, shown);
             }
             for (std::size_t i = 0; i < mark_count && drawn; ++i) draw_mark(context, *target, marks[i]);
-            for (std::size_t i = 0; i < count && drawn; ++i) draw_layer(context, *target, *jobs[i].layer, jobs[i].layout);
+            for (std::size_t i = 0; i < count && drawn; ++i) draw_layer(context, *target, *jobs[i].layer, jobs[i].layout, jobs[i].style);
             end(context);
         }
         if (multithread) multithread->Leave();
@@ -839,15 +887,20 @@ private:
 
     // One picture into both planes of the frame.
     void quad(ID3D11DeviceContext* context, Target& target, const core::Placement& p, const double (&uv)[4], bool opaque,
-              ID3D11PixelShader* luma, ID3D11PixelShader* chroma, double fade = 1) {
+              ID3D11PixelShader* luma, ID3D11PixelShader* chroma, double fade = 1, const Shaping& shaping = {}) {
         const double w = draw_width_, h = draw_height_;
-        const Constants constants{
+        Constants constants{
             {static_cast<float>(2 * p.left / w - 1), static_cast<float>(1 - 2 * p.top / h),
              static_cast<float>(2 * p.right / w - 1), static_cast<float>(1 - 2 * p.bottom / h)},
             {static_cast<float>(uv[0]), static_cast<float>(uv[1]), static_cast<float>(uv[2]), static_cast<float>(uv[3])},
             opaque ? 1.0f : 0.0f,
             static_cast<float>(fade),
-            {}};
+            shaping.mode,
+            shaping.shape,
+            {}, {}, {}};
+        std::copy(std::begin(shaping.box), std::end(shaping.box), constants.box);
+        std::copy(std::begin(shaping.size), std::end(shaping.size), constants.size);
+        std::copy(std::begin(shaping.fill), std::end(shaping.fill), constants.fill);
         context->UpdateSubresource(constants_.Get(), 0, nullptr, &constants, 0, 0);
         const D3D11_VIEWPORT full{0, 0, static_cast<float>(draw_width_), static_cast<float>(draw_height_), 0, 1};
         const D3D11_VIEWPORT half{0, 0, static_cast<float>(draw_width_ / 2), static_cast<float>(draw_height_ / 2), 0, 1};
@@ -904,7 +957,7 @@ private:
         return click_rect_;
     }
 
-    void draw_layer(ID3D11DeviceContext* context, Target& target, Layer& layer, const Layout& layout) {
+    void draw_layer(ID3D11DeviceContext* context, Target& target, Layer& layer, const Layout& layout, const Style& style) {
         if (layer.camera) {
             layer.camera->upload(layer.seen, [&](const std::uint8_t* pixels, std::size_t row) {
                 D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -918,12 +971,41 @@ private:
             });
         }
         if (!layer.ready) return;
-        const auto p = core::place(layer.overlay.kind, layout.area, draw_width_, draw_height_, layer.width, layer.height, layout.crop);
+        const auto area = core::shaped_area(style, layout.area, draw_width_, draw_height_);
+        const auto p = core::place(layer.overlay.kind, area, draw_width_, draw_height_, layer.width, layer.height, layout.crop);
         const double* c = layer.crop;
         const double uv[4] = {c[0] + p.u0 * (c[2] - c[0]), c[1] + p.v0 * (c[3] - c[1]), c[0] + p.u1 * (c[2] - c[0]),
                               c[1] + p.v1 * (c[3] - c[1])};
+        Shaping inside;
+        if (!core::plain(style)) {
+            const auto d = core::decor(style, draw_height_);
+            const double w = p.right - p.left, h = p.bottom - p.top;
+            const auto shaping = [&](float mode, double inset, double pad) {
+                Shaping s;
+                s.mode = mode;
+                s.shape = static_cast<float>(style.shape);
+                const double box[4] = {-pad - inset, -pad - inset, w + pad - inset, h + pad - inset};
+                const double size[4] = {w - 2 * inset, h - 2 * inset,
+                                        style.shape == Style::Shape::squircle ? core::squircle_exponent(style.roundness) : style.roundness, pad};
+                for (int i = 0; i < 4; ++i) {
+                    s.box[i] = static_cast<float>(box[i]);
+                    s.size[i] = static_cast<float>(size[i]);
+                }
+                s.fill[0] = (style.border_color >> 16 & 0xff) / 255.0f;
+                s.fill[1] = (style.border_color >> 8 & 0xff) / 255.0f;
+                s.fill[2] = (style.border_color & 0xff) / 255.0f;
+                return s;
+            };
+            const double none[4] = {0, 0, 1, 1};
+            if (style.shadow) {
+                const core::Placement shadow{p.left - d.pad, p.top - d.pad + d.drop, p.right + d.pad, p.bottom + d.pad + d.drop};
+                quad(context, target, shadow, none, false, luma_.Get(), chroma_.Get(), 1, shaping(2, 0, d.pad));
+            }
+            if (d.border > 0) quad(context, target, p, none, false, luma_.Get(), chroma_.Get(), 1, shaping(1, 0, 0));
+            inside = shaping(0, d.border, 0);
+        }
         context->PSSetShaderResources(0, 1, layer.view.GetAddressOf());
-        quad(context, target, p, uv, layer.camera || layer.screen, luma_.Get(), chroma_.Get());
+        quad(context, target, p, uv, layer.camera || layer.screen, luma_.Get(), chroma_.Get(), 1, inside);
     }
 
     // Copies a display's or window's newest frame into the layer's texture.
@@ -1110,6 +1192,7 @@ bool Overlays::draw(std::size_t canvas, ID3D11DeviceContext* context, ID3D11Text
 Result Overlays::set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
     return impl_->set_layout(canvas, layer, layout);
 }
+Result Overlays::set_style(std::size_t index, const Style& style) { return impl_->set_style(index, style); }
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }
 Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { return impl_->set_screen(visible, area); }
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }
