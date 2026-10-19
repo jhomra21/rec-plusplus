@@ -1853,6 +1853,28 @@ struct PreviewHit {
                    left, right, bottom, box.size.width, box.size.height, fitting.width, fitting.height,
                    screen.size.width, screen.size.height];
         if (edges.count) margins = [margins stringByAppendingFormat:@"; at the edge: %@", [edges componentsJoinedByString:@", "]];
+        // Where each layout stack sits (y from the bottom, height, fitting height), to find
+        // which one outgrows the window.
+        NSStackView* stack = (NSStackView*)content.subviews.firstObject;
+        NSStackView* body = (NSStackView*)stack.arrangedSubviews.firstObject;
+        NSStackView* columns = (NSStackView*)body.arrangedSubviews.lastObject;
+        NSMutableArray<NSString*>* frames = [NSMutableArray array];
+        const auto frame = [&](NSString* name, NSView* view) {
+            const NSRect at = [view.superview convertRect:view.frame toView:content];
+            const CGFloat y = content.isFlipped ? NSMaxY(box) - NSMaxY(at) : NSMinY(at);
+            [frames addObject:[NSString stringWithFormat:@"%@ y %.0f h %.0f fit %.0f%@", name, y, at.size.height,
+                               view.fittingSize.height, view.hasAmbiguousLayout ? @" ambiguous" : @""]];
+        };
+        frame(@"stack", stack);
+        frame(@"body", body);
+        frame(@"top", body.arrangedSubviews.firstObject);
+        frame(@"left", columns.arrangedSubviews.firstObject);
+        frame(@"right", columns.arrangedSubviews.lastObject);
+        frame(@"scenes", stack.arrangedSubviews.lastObject);
+        frame(@"folder-buttons", self->_changeFolder.superview);
+        frame(@"detail", self->_detail);
+        margins = [margins stringByAppendingFormat:@"; frames: %@; window %.0fx%.0f", [frames componentsJoinedByString:@", "],
+                   self->_window.frame.size.width, self->_window.frame.size.height];
         tight = left < 12 || right < 12 || bottom < 12;
     });
     note([@"margins=" stringByAppendingString:margins]);
