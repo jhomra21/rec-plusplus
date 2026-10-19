@@ -735,6 +735,10 @@ public:
         const bool whole = screen_visible && screen_area.x <= 0 && screen_area.y <= 0 && screen_area.width >= 1 && screen_area.height >= 1;
         if (whole) context->CopySubresourceRegion(frame, subresource, 0, 0, 0, screen, 0, nullptr);
         if (whole && !count && !mark_count) return true;
+        // Before taking the device lock: closing a capture frame takes its frame pool's lock,
+        // and the pool's present thread holds that while it waits for the device lock.
+        for (std::size_t i = 0; i < count; ++i)
+            if (jobs[i].layer->screen) upload_screen(context, *jobs[i].layer);
         ComPtr<ID3D11Multithread> multithread;
         context->QueryInterface(IID_PPV_ARGS(&multithread));
         if (multithread) multithread->Enter();
@@ -880,7 +884,6 @@ private:
                 return true;
             });
         }
-        if (layer.screen) upload_screen(context, layer);
         if (!layer.ready) return;
         const auto p = core::place(layer.overlay.kind, area, width_, height_, layer.width, layer.height);
         const double* c = layer.crop;
