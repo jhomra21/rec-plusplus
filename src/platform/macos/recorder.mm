@@ -1373,7 +1373,12 @@ private:
                 if (source.format) CFRelease(source.format);
                 source.format = static_cast<CMAudioFormatDescriptionRef>(format);
             }
-            if (!late) source.silent.store(false);
+            if (!late && source.silent.exchange(false) && source.stem && CMTIME_IS_VALID(source.end) &&
+                CMTimeCompare(start, source.end) > 0) {
+                // Padding stops a second behind real time, and AAC tracks have no gaps: without
+                // the rest of the silence, everything after the outage would play early.
+                append_silence(kind, source.end, start);
+            }
         }
         if (source.stem && CMTimeCompare(start, kCMTimeZero) >= 0 && !late) {
             CMSampleBufferRef scaled = alone && !ramp.unity() ? scaled_pcm(sample, ramp, scale_scratch_) : nullptr;
@@ -1486,6 +1491,26 @@ private:
         emit_mix(flush);
     }
 
+    // Silence in the source's stem from from to until; moves source.end on success.
+    bool append_silence(Source kind, CMTime from, CMTime until) {
+        auto& source = audio_[kind];
+        CMAudioFormatDescriptionRef format = source.format ? source.format : mix_format_;
+        CMAudioFormatDescriptionRef made = nullptr;
+        if (!format) format = made = pcm_format(kind == kSystem ? 2 : 1, true);
+        CMSampleBufferRef quiet = silence_buffer(format, from, CMTimeSubtract(until, from));
+        if (made) CFRelease(made);
+        if (!quiet) return false;
+        const bool appended = [source.stem appendSampleBuffer:quiet];
+        const CMTime end = CMTimeAdd(from, CMSampleBufferGetDuration(quiet));
+        CFRelease(quiet);
+        if (!appended) {
+            if (writer_.status == AVAssetWriterStatusFailed) fail(message(writer_.error, "audio encoding failed"));
+            return false;
+        }
+        source.end = end;
+        return true;
+    }
+
     // AVAssetWriter interleaves its inputs by time: a source that stops delivering
     // (unplugged) would stop the video input too. Its stem gets silence up to a second behind
     // real time instead, and a stream without the mix gets the same silence.
@@ -1501,20 +1526,7 @@ private:
             source.silent.store(true);
             if (source.stem) {
                 if (!source.stem.readyForMoreMediaData) continue;
-                CMAudioFormatDescriptionRef format = source.format ? source.format : mix_format_;
-                CMAudioFormatDescriptionRef made = nullptr;
-                if (!format) format = made = pcm_format(kind == kSystem ? 2 : 1, true);
-                CMSampleBufferRef quiet = silence_buffer(format, from, CMTimeSubtract(target, from));
-                if (made) CFRelease(made);
-                if (!quiet) continue;
-                const bool appended = [source.stem appendSampleBuffer:quiet];
-                const CMTime end = CMTimeAdd(from, CMSampleBufferGetDuration(quiet));
-                CFRelease(quiet);
-                if (!appended) {
-                    if (writer_.status == AVAssetWriterStatusFailed) fail(message(writer_.error, "audio encoding failed"));
-                    continue;
-                }
-                source.end = end;
+                if (!append_silence(kind, from, target)) continue;
             }
             if (!mixing_) {
                 const auto first = static_cast<std::int64_t>(std::llround(CMTimeGetSeconds(from) * kMixRate));
