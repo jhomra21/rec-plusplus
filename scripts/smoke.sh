@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+# Bash reads a script as it runs: check all of it first, so a syntax error fails now.
+bash -n "$0" || exit 2
 # A failed check (often a quiet grep -q) names its line instead of ending the run silently.
 trap 'echo "smoke.sh: line $LINENO failed: $BASH_COMMAND" >&2' ERR
 
@@ -335,6 +337,7 @@ else
   grep -q 'http://127.0.0.1:8889/\*\*\*\*: 120 frames' "$artifacts/stream-whip.record.log"
   grep -q 'rtmp://127.0.0.1:1935/live/\*\*\*\*: 120 frames' "$artifacts/stream-whip.record.log"
   if grep -Eq 'smokewhip|smoketoken|smokekey12' "$artifacts/stream-whip.record.log"; then echo 'a WHIP path or token was printed' >&2; exit 1; fi
+
   # Several servers: one encode, sent to each over its own connection. Losing one server is
   # checked in smoke.ps1; the code that keeps the others going is shared.
   expect_failure 'at most 4 --stream' record --test-pattern \
@@ -454,7 +457,8 @@ else
     within "$(value av_offset_max_ms "$artifacts/stream-received-$key.probe")" 0 55
   done
   grep -qx 'audio_codec=opus' "$artifacts/stream-received-smokewhip.probe"
-  grep -qx 'audio_codec=aac' "$artifacts/stream-received-smokekey12.probe"  for key in smokekey6 smokekey7; do
+  grep -qx 'audio_codec=aac' "$artifacts/stream-received-smokekey12.probe"
+  for key in smokekey6 smokekey7; do
     file="$(find "$received/live/$key" -name '*.mp4' -print -quit)"
     [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
     "$rec" probe "$file" | tee "$artifacts/stream-received-$key.probe"
@@ -539,7 +543,8 @@ else
   out="$(engine shutdown)"; grep -q 'the engine stopped' <<<"$out"
   sleep 0.5
   expect_failure 'the engine is not running' status
-  cp "$tmp/engine.log" "$artifacts/engine.log"
+  # Without REC_E2E_ARTIFACT_DIR the artifacts are in $tmp already.
+  [[ "$artifacts" == "$tmp" ]] || cp "$tmp/engine.log" "$artifacts/engine.log"
   "$rec" probe "$artifacts/engine.mov" | tee "$artifacts/engine.probe"
   within "$(value frames "$artifacts/engine.probe")" 80 110
   within "$(value av_sync_events "$artifacts/engine.probe")" 2 4

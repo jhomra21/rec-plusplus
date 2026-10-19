@@ -477,6 +477,7 @@ try {
         Expect-Text $whip.Log 'http://127.0.0.1:8889/****: 120 frames'
         Expect-Text $whip.Log 'rtmp://127.0.0.1:1935/live/****: 120 frames'
         if ($whip.Log -match 'smokewhip|smoketoken|smokekey12') { throw 'a WHIP path or token was printed' }
+
         # Several servers: one encode, sent to each over its own connection.
         Expect-Failure 'at most 4 --stream' (@('record', '--test-pattern') + (1..5 | ForEach-Object { '--stream'; "rtmp://127.0.0.1:1935/live/many$_" }))
         Expect-Failure 'rtmp://127.0.0.1:1/live/****: could not connect' @('record', '--test-pattern', '-t', '1',
@@ -585,7 +586,8 @@ try {
         Expect-Within $got 'av_sync_events' 4 4
         # MediaMTX writes no edit list for Opus either: its 312-sample pre-skip reads 6.5 ms late.
         Expect-Within $got 'av_offset_max_ms' 0 20
-    }    foreach ($key in 'smokekey6', 'smokekey7') {
+    }
+    foreach ($key in 'smokekey6', 'smokekey7') {
         $file = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received "live\$key") | Select-Object -First 1
         if (-not $file) { throw "MediaMTX recorded nothing for $key" }
         $both = Get-Probe $rec $file.FullName (Join-Path $artifacts "stream-received-$key.probe")
