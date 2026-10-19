@@ -34,7 +34,7 @@ macOS may prompt for Screen Recording permission on the first attempt. Allow acc
 
 `-r native` selects the display's native pixel size. The other resolution presets bound the output dimensions without stretching or upscaling. If a recording already exists at the output path, rec refuses to overwrite it.
 
-Below native size, rec captures at the native size and shrinks each frame on the GPU with a Lanczos-3 filter, so fine detail such as thin lines and small text averages out instead of shimmering (aliasing). On macOS, Core Image does this in the compositor; on Windows, a two-pass shader. `--scaler fast` lets the capture service scale instead (ScreenCaptureKit, or the Direct3D 11 video processor): less GPU work, but fine patterns turn into moiré. `rec probe --sample` reports the luma spread of a rectangle, which the smoke tests use to compare the two.
+Below native size, rec captures at the native size and shrinks each frame on the GPU with a Lanczos filter, so fine detail such as thin lines and small text averages out instead of shimmering (aliasing). On macOS, Metal Performance Shaders scales the luma and chroma planes; on Windows, a two-pass shader works on the captured BGRA frame. `--scaler fast` lets the capture service scale instead (ScreenCaptureKit, or the Direct3D 11 video processor): less GPU work, but fine patterns turn into moiré. `rec probe --sample` reports the luma spread of a rectangle, which the smoke tests use to compare the two.
 
 ### Windows and regions
 

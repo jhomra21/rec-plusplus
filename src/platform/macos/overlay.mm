@@ -4,6 +4,7 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 #include "platform/macos/overlay.hpp"
@@ -355,6 +356,95 @@ private:
 };
 
 void receive_screen(ScreenFeed* feed, CMSampleBufferRef sample) { feed->receive(sample); }
+
+// Lanczos shrinking of NV12 frames on the GPU with Metal Performance Shaders. The luma and
+// chroma planes are scaled separately, so there is no color conversion and no float
+// intermediate the size of the source. Core Image's Lanczos filter did both, and could not
+// keep up with a 4K capture.
+class PlaneScaler {
+public:
+    PlaneScaler() = default;
+    PlaneScaler(const PlaneScaler&) = delete;
+    PlaneScaler& operator=(const PlaneScaler&) = delete;
+    ~PlaneScaler() { stop(); }
+
+    bool start(id<MTLDevice> device) {
+        if (!device || !MPSSupportsMTLDevice(device)) return false;
+        queue_ = [device newCommandQueue];
+        filter_ = [[MPSImageLanczosScale alloc] initWithDevice:device];
+        return queue_ && filter_ &&
+               CVMetalTextureCacheCreate(kCFAllocatorDefault, nullptr, device, nullptr, &cache_) == kCVReturnSuccess;
+    }
+
+    bool ready() const { return cache_ != nullptr; }
+
+    void stop() {
+        if (pool_) { CVPixelBufferPoolRelease(pool_); pool_ = nullptr; }
+        if (cache_) { CFRelease(cache_); cache_ = nullptr; }
+        filter_ = nil;
+        queue_ = nil;
+    }
+
+    // A new frame with source shrunk to width x height, or null. Waits for the GPU.
+    CVPixelBufferRef scale(CVPixelBufferRef source, std::uint32_t width, std::uint32_t height) {
+        if (!pool_ || width != width_ || height != height_) {
+            if (pool_) { CVPixelBufferPoolRelease(pool_); pool_ = nullptr; }
+            NSDictionary* attributes = @{
+                (id)kCVPixelBufferPixelFormatTypeKey: @(CVPixelBufferGetPixelFormatType(source)),
+                (id)kCVPixelBufferWidthKey: @(width),
+                (id)kCVPixelBufferHeightKey: @(height),
+                (id)kCVPixelBufferIOSurfacePropertiesKey: @{},
+                (id)kCVPixelBufferMetalCompatibilityKey: @YES
+            };
+            if (CVPixelBufferPoolCreate(kCFAllocatorDefault, nullptr, (__bridge CFDictionaryRef)attributes, &pool_) != kCVReturnSuccess)
+                return nullptr;
+            width_ = width;
+            height_ = height;
+        }
+        if (CVPixelBufferGetPlaneCount(source) != 2) return nullptr;
+        CVPixelBufferRef out = nullptr;
+        if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool_, &out) != kCVReturnSuccess) return nullptr;
+        CVMetalTextureRef textures[4] = {};
+        bool ok = texture(source, 0, MTLPixelFormatR8Unorm, textures[0]) &&
+                  texture(source, 1, MTLPixelFormatRG8Unorm, textures[1]) &&
+                  texture(out, 0, MTLPixelFormatR8Unorm, textures[2]) && texture(out, 1, MTLPixelFormatRG8Unorm, textures[3]);
+        if (ok) {
+            id<MTLCommandBuffer> commands = [queue_ commandBuffer];
+            for (int plane = 0; plane < 2; ++plane)
+                [filter_ encodeToCommandBuffer:commands
+                                 sourceTexture:CVMetalTextureGetTexture(textures[plane])
+                            destinationTexture:CVMetalTextureGetTexture(textures[plane + 2])];
+            [commands commit];
+            [commands waitUntilCompleted];
+            ok = commands.status == MTLCommandBufferStatusCompleted;
+        }
+        for (CVMetalTextureRef t : textures)
+            if (t) CFRelease(t);
+        CVMetalTextureCacheFlush(cache_, 0);
+        if (!ok) {
+            CVPixelBufferRelease(out);
+            return nullptr;
+        }
+        CVBufferPropagateAttachments(source, out);
+        return out;
+    }
+
+private:
+    bool texture(CVPixelBufferRef buffer, std::size_t plane, MTLPixelFormat format, CVMetalTextureRef& out) {
+        NSDictionary* usage = @{(id)kCVMetalTextureUsage: @(MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite)};
+        return CVMetalTextureCacheCreateTextureFromImage(kCFAllocatorDefault, cache_, buffer, (__bridge CFDictionaryRef)usage,
+                                                         format, CVPixelBufferGetWidthOfPlane(buffer, plane),
+                                                         CVPixelBufferGetHeightOfPlane(buffer, plane), plane,
+                                                         &out) == kCVReturnSuccess &&
+               out;
+    }
+
+    id<MTLCommandQueue> __strong queue_ = nil;
+    MPSImageLanczosScale* __strong filter_ = nil;
+    CVMetalTextureCacheRef cache_ = nullptr;
+    CVPixelBufferPoolRef pool_ = nullptr;
+    std::uint32_t width_ = 0, height_ = 0;
+};
 class Overlays::Impl {
 public:
     struct Layer {
@@ -379,6 +469,8 @@ public:
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
         context_ = device ? [CIContext contextWithMTLDevice:device options:context_options] : [CIContext contextWithOptions:context_options];
         if (!context_) return {"could not set up overlay drawing"};
+        // Without Metal Performance Shaders, Core Image shrinks a native-size capture instead.
+        if (options.scaler == Scaler::lanczos) lanczos_.start(device);
         NSDictionary* attributes = @{
             (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange),
             (id)kCVPixelBufferWidthKey: @(width),
@@ -463,7 +555,26 @@ public:
             if (screen_visible) mark_count = clicks_->marks(now, click_area(), width_, height_, screen_area, marks);
         }
         const bool whole = screen_visible && screen_area.x <= 0 && screen_area.y <= 0 && screen_area.width >= 1 && screen_area.height >= 1;
-        // A capture at its native size (Scaler::lanczos) is shrunk here.
+        // A capture at its native size (Scaler::lanczos) is shrunk here, straight to the size
+        // it takes in the frame.
+        struct Shrunk {
+            CVPixelBufferRef frame = nullptr;
+            ~Shrunk() { if (frame) CVPixelBufferRelease(frame); }
+        } shrunk;
+        if (screen_visible && lanczos_.ready() &&
+            (CVPixelBufferGetWidth(base) != width_ || CVPixelBufferGetHeight(base) != height_)) {
+            const auto p = core::place(Overlay::Kind::image, screen_area, width_, height_,
+                                       static_cast<std::uint32_t>(CVPixelBufferGetWidth(base)),
+                                       static_cast<std::uint32_t>(CVPixelBufferGetHeight(base)));
+            const auto even = [](double size) { return std::max<std::uint32_t>(2, static_cast<std::uint32_t>(std::lround(size / 2)) * 2); };
+            // Filling the frame, it takes the frame's exact size, so no further pass is needed.
+            const std::uint32_t w = whole ? width_ : even(p.right - p.left), h = whole ? height_ : even(p.bottom - p.top);
+            if (w < CVPixelBufferGetWidth(base) || h < CVPixelBufferGetHeight(base)) {
+                shrunk.frame = lanczos_.scale(base, w, h);
+                if (!shrunk.frame) return nullptr;
+                base = shrunk.frame;
+            }
+        }
         const bool fits = CVPixelBufferGetWidth(base) == width_ && CVPixelBufferGetHeight(base) == height_;
         if (whole && fits && !count && !mark_count) return CVPixelBufferRetain(base);
         @autoreleasepool {
@@ -531,6 +642,7 @@ public:
         }
         layers_.clear();
         if (pool_) { CVPixelBufferPoolRelease(pool_); pool_ = nullptr; }
+        lanczos_.stop();
         context_ = nil;
     }
 
@@ -614,16 +726,6 @@ private:
         const CGRect target = CGRectMake(p.left, height_ - p.bottom, p.right - p.left, p.bottom - p.top);
         const double sx = target.size.width / shown.size.width, sy = target.size.height / shown.size.height;
         CIImage* cropped = [picture imageByCroppingToRect:shown];
-        if (sx < 1 || sy < 1) {
-            // Lanczos-3, widened by the scale factor, so fine detail averages out instead of
-            // aliasing. Repeating the edge pixels keeps the border from fading to transparent.
-            CIImage* source = [[cropped imageByClampingToExtent]
-                imageByApplyingTransform:CGAffineTransformMakeTranslation(-shown.origin.x, -shown.origin.y)];
-            CIImage* scaled = [source imageByApplyingFilter:@"CILanczosScaleTransform"
-                                         withInputParameters:@{kCIInputScaleKey: @(sy), kCIInputAspectRatioKey: @(sx / sy)}];
-            return [[scaled imageByApplyingTransform:CGAffineTransformMakeTranslation(target.origin.x, target.origin.y)]
-                imageByCroppingToRect:target];
-        }
         CGAffineTransform move = CGAffineTransformMakeTranslation(-shown.origin.x, -shown.origin.y);
         move = CGAffineTransformConcat(move, CGAffineTransformMakeScale(sx, sy));
         move = CGAffineTransformConcat(move, CGAffineTransformMakeTranslation(target.origin.x, target.origin.y));
@@ -633,6 +735,7 @@ private:
     std::uint32_t width_ = 0, height_ = 0;
     CIContext* __strong context_ = nil;
     CVPixelBufferPoolRef pool_ = nullptr;
+    PlaneScaler lanczos_;
     mutable std::mutex mutex_;  // Guards the layer list, each layer's visibility and area, and the screen's.
     std::vector<Layer> layers_;
     Area screen_area_;

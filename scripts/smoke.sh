@@ -451,9 +451,10 @@ else
         echo "$scaler-fine=$(value sample_1_spread "$artifacts/scaler-$scaler-fine.probe")" \
           "$scaler-coarse=$(value sample_1_spread "$artifacts/scaler-$scaler-coarse.probe")"
       done | tee "$artifacts/scaler.txt"
-      within "$(value sample_1_spread "$artifacts/scaler-lanczos-fine.probe")" 0 10
+      within "$(value sample_1_spread "$artifacts/scaler-lanczos-fine.probe")" 0 4
       within "$(value sample_1_spread "$artifacts/scaler-lanczos-coarse.probe")" 90 128
     fi
-    kill "$stripes" 2>/dev/null || true  fi
+    kill "$stripes" 2>/dev/null || true
+  fi
 fi
 echo 'smoke passed'

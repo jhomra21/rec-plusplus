@@ -947,7 +947,6 @@ private:
             native = {native_size(display).width, native_size(display).height};
             if (options_.region) {
                 const auto& r = *options_.region;
-                const auto native = native_size(display);
                 if (r.x < 0 || r.y < 0 || r.width < 2 || r.height < 2 || r.x + r.width > native.width ||
                     r.y + r.height > native.height)
                     return {"region " + std::to_string(r.x) + "," + std::to_string(r.y) + "," + std::to_string(r.width) +

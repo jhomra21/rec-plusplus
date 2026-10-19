@@ -298,7 +298,7 @@ try {
         $summary = ($spreads.GetEnumerator() | Sort-Object Name | ForEach-Object { "$($_.Name)=$([Math]::Round($_.Value, 1))" }) -join ' '
         Set-Content -Path (Join-Path $artifacts 'scaler.txt') -Value $summary
         Write-Host "Luma spread (fine stripes should be flat, coarse ones sharp): $summary"
-        if ($spreads['lanczos-fine'] -gt 10) { throw "Lanczos left moire in the fine stripes: $summary" }
+        if ($spreads['lanczos-fine'] -gt 4) { throw "Lanczos left moire in the fine stripes: $summary" }
         if ($spreads['lanczos-coarse'] -lt 90) { throw "Lanczos blurred the coarse stripes: $summary" }
     } else {
         Write-Host "Skipping the scaling-quality check: display 1 is ${screenW}x${screenH}, it needs 1920x1080"

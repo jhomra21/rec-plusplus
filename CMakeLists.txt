@@ -22,7 +22,7 @@ if(APPLE)
         "-framework Foundation" "-framework ScreenCaptureKit" "-framework AVFoundation"
         "-framework CoreMedia" "-framework CoreVideo" "-framework CoreGraphics"
         "-framework VideoToolbox" "-framework AudioToolbox" "-framework CoreAudio"
-        "-framework CoreImage" "-framework Metal" "-framework Network" "-framework Security")
+        "-framework CoreImage" "-framework Metal" "-framework MetalPerformanceShaders" "-framework Network" "-framework Security")
 elseif(WIN32)
     target_sources(rec PRIVATE src/platform/windows/recorder.cpp src/platform/windows/stream.cpp src/platform/windows/tls.cpp
         src/platform/windows/overlay.cpp src/platform/windows/scaler.cpp
