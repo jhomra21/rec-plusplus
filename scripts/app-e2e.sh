@@ -80,6 +80,7 @@ if [[ "$code" != 0 ]]; then
   exit 1
 fi
 grep -qx 'accessibility=ok' "$report"
+grep '^margins=' "$report"
 grep -qx 'keychain=ok' "$report"
 grep -qx 'quit=started' "$report"
 grep -qx 'idle-preview=ok' "$report"
