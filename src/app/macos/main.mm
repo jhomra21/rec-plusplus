@@ -1,6 +1,6 @@
 // The macOS app: one AppKit window of standard controls, a menu bar item, and the Shift-
 // Command-R global hotkey. Recording runs in rec::app::Session; this file only presents it.
-// REC_APP_HOME keeps settings and recordings in one folder, REC_APP_TEST_PATTERN=1 records
+// REC_APP_HOME keeps settings, recordings and stream keys apart, REC_APP_TEST_PATTERN=1 records
 // the synthetic flash/beep sources, and REC_APP_SELF_TEST=<report> drives the window's own
 // controls through a recording session (see scripts/app-e2e.sh).
 #import <AppKit/AppKit.h>
@@ -52,10 +52,12 @@ NSString* clock_text(double seconds) {
 }
 
 // Stream keys live in the login keychain, one generic password per server URL, never in the
-// settings file.
+// settings file. A separate home gets its own service: a freshly built test copy reading the
+// user's real keys would wait on a keychain prompt.
 NSMutableDictionary* key_query(const std::string& server) {
+    static NSString* const service = environment("REC_APP_HOME").empty() ? @"rec stream key" : @"rec stream key (test home)";
     return [@{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
-              (__bridge id)kSecAttrService: @"rec stream key",
+              (__bridge id)kSecAttrService: service,
               (__bridge id)kSecAttrAccount: ns(server)} mutableCopy];
 }
 
