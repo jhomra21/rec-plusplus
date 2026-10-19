@@ -1827,6 +1827,7 @@ struct PreviewHit {
     ui(^{
         NSView* content = self->_window.contentView;
         NSRect used = NSZeroRect;
+        NSMutableArray<NSString*>* edges = [NSMutableArray array];
         NSMutableArray<NSView*>* pending = [content.subviews mutableCopy];
         while (pending.count) {
             NSView* view = pending.lastObject;
@@ -1837,6 +1838,10 @@ struct PreviewHit {
             if (NSIsEmptyRect(shown)) continue;
             const NSRect at = [view convertRect:shown toView:content];
             used = NSIsEmptyRect(used) ? at : NSUnionRect(used, at);
+            const CGFloat low = content.isFlipped ? NSMaxY(content.bounds) - NSMaxY(at) : NSMinY(at);
+            if (edges.count < 4 && (NSMinX(at) < 12 || NSMaxX(content.bounds) - NSMaxX(at) < 12 || low < 12))
+                [edges addObject:[NSString stringWithFormat:@"%@ '%@' %.0f,%.0f %.0fx%.0f", view.className,
+                                  ((NSControl*)view).accessibilityLabel ?: @"", at.origin.x, at.origin.y, at.size.width, at.size.height]];
         }
         const NSRect box = content.bounds;
         const CGFloat left = NSMinX(used), right = NSMaxX(box) - NSMaxX(used);
@@ -1846,6 +1851,7 @@ struct PreviewHit {
         margins = [NSString stringWithFormat:@"left %.1f right %.1f bottom %.1f; content %.0fx%.0f, fitting %.0fx%.0f, screen %.0fx%.0f",
                    left, right, bottom, box.size.width, box.size.height, fitting.width, fitting.height,
                    screen.size.width, screen.size.height];
+        if (edges.count) margins = [margins stringByAppendingFormat:@"; at the edge: %@", [edges componentsJoinedByString:@", "]];
         tight = left < 12 || right < 12 || bottom < 12;
     });
     note([@"margins=" stringByAppendingString:margins]);
