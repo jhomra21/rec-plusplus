@@ -102,7 +102,8 @@ Bytes sample_table(const Track& t, bool audio, const Bytes& description) {
         for (auto k : t.keys) u32(stss, k);
         append(table, full_box("stss", 0, stss));
     }
-    append(table, boxes({full_box("stsc", 0, stsc), full_box("stsz", 0, stsz), full_box("co64", 0, co64)}));
+    // AVFoundation cannot open a fragmented movie whose empty header tables use co64.
+    append(table, boxes({full_box("stsc", 0, stsc), full_box("stsz", 0, stsz), full_box(t.chunks.empty() ? "stco" : "co64", 0, co64)}));
     if (audio && !t.sizes.empty()) {
         // Every AAC frame needs the one before it, as AVAssetWriter declares. Without this group
         // AVFoundation also drops the encoder delay from the clip's first frames and plays the
