@@ -32,6 +32,7 @@
 
 #include "rec/rec.hpp"
 #include "core/mixer.hpp"
+#include "core/mp4.hpp"
 #include "core/overlay.hpp"
 #include "core/pause.hpp"
 #include "core/sync.hpp"
@@ -809,6 +810,11 @@ public:
             }
             writing_ = false;
             writer_.Reset();
+            // Media Foundation's reader ends some fragmented files early: when a 512 KiB read
+            // boundary falls in a fragment's video header, the movie stops at that fragment.
+            // A finished recording becomes a regular movie, as on macOS; if that fails, the
+            // fragmented file is still complete.
+            if (result && fragmented_) core::consolidate_fragments(options_.output);
         }
         if (live_) live_->stop();
         if (allocator_) { allocator_->UninitializeSampleAllocator(); allocator_.Reset(); }
@@ -1261,6 +1267,7 @@ private:
         const bool hevc = options_.codec == Codec::hevc ||
             (options_.codec == Codec::automatic && size_.height > 1080);
         attributes->SetGUID(MF_TRANSCODE_CONTAINERTYPE, hevc ? MFTranscodeContainerType_MPEG4 : MFTranscodeContainerType_FMPEG4);
+        fragmented_ = !hevc;
         if (manager_) attributes->SetUnknown(MF_SINK_WRITER_D3D_MANAGER, manager_.Get());
         HRESULT hr = MFCreateSinkWriterFromURL(wide(options_.output).c_str(), nullptr, attributes.Get(), &writer_);
         if (FAILED(hr)) return {failed("could not create output movie", hr)};
@@ -1605,6 +1612,7 @@ private:
     std::string failure_;
     bool mf_started_ = false;
     bool writing_ = false;
+    bool fragmented_ = false;
 
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;

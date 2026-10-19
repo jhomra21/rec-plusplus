@@ -26,7 +26,7 @@ if(APPLE)
 elseif(WIN32)
     target_sources(rec PRIVATE src/platform/windows/recorder.cpp src/platform/windows/stream.cpp src/platform/windows/tls.cpp
         src/platform/windows/overlay.cpp
-        src/core/net.cpp src/core/rtmp.cpp src/core/replay.cpp)
+        src/core/mp4.cpp src/core/net.cpp src/core/rtmp.cpp src/core/replay.cpp)
     target_compile_definitions(rec PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
     target_compile_options(rec PRIVATE /permissive- /utf-8 /bigobj /EHsc)
     target_link_libraries(rec PUBLIC d3d11 dxgi d3dcompiler mf mfplat mfreadwrite mfuuid ole32 windowscodecs windowsapp

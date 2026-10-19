@@ -60,7 +60,7 @@ While recording in a terminal, press `p` or space to pause and resume, and `q` o
 { sleep 5; echo pause; sleep 3; echo resume; } | ./build/rec record -t 10 -o demo.mov
 ```
 
-Recordings are written in fragments, so a crash, kill or power loss keeps everything up to the last fragment (about 1 s on macOS). On macOS a normal stop turns the fragments into a regular movie. On Windows, H.264 files stay fragmented MP4, which players read normally. Windows HEVC uses the regular MP4 writer and is **not** crash-safe, because Windows' fragmented MP4 writer rejects HEVC.
+Recordings are written in fragments, so a crash, kill or power loss keeps everything up to the last fragment (about 1 s on macOS). A normal stop turns the fragments into a regular movie. On Windows this also works around Media Foundation's reader, which ends some fragmented files early (when a 512 KiB read boundary falls in a fragment's video header, playback stops at that fragment); a kill leaves the file fragmented and exposed to that. Windows HEVC uses the regular MP4 writer and is **not** crash-safe, because Windows' fragmented MP4 writer rejects HEVC.
 
 ### Cameras and images
 
