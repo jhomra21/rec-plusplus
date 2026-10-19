@@ -1033,7 +1033,24 @@ struct PreviewHit {
     _server.stringValue = ns(custom ? _settings.server : rec::app::server_url(_settings));
     _server.editable = custom;
     _server.selectable = YES;
-    _key.stringValue = ns(load_key(rec::app::server_url(_settings)));
+    [self loadKey];
+}
+
+// Off the main thread: a keychain prompt (a rebuilt app no longer matches the item's access
+// list) would otherwise keep the window from appearing at launch until it is answered.
+- (void)loadKey {
+    const std::string server = rec::app::server_url(_settings);
+    _key.stringValue = @"";
+    __weak RecController* weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSString* key = ns(load_key(server));
+        dispatch_async(dispatch_get_main_queue(), ^{
+            RecController* me = weakSelf;
+            // A key typed meanwhile, or another server chosen, wins.
+            if (!me || me->_key.stringValue.length || rec::app::server_url(me->_settings) != server) return;
+            me->_key.stringValue = key;
+        });
+    });
 }
 
 - (void)readSettings {
@@ -1330,7 +1347,7 @@ struct PreviewHit {
     if (notification.object == _sceneName) rec::app::save_settings(_settingsPath, _settings);
     if (notification.object == _server && _settings.destination == "custom") {
         [self readSettings];
-        _key.stringValue = ns(load_key(rec::app::server_url(_settings)));
+        [self loadKey];
     }
 }
 
