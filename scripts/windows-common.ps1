@@ -75,16 +75,20 @@ function Expect-Color($probe, [string]$key, [string]$color) {
     if (-not $ok) { throw "$key=$value is not $color" }
 }
 
-# Presses or releases a mouse button at x,y in physical pixels of the desktop, as a user would.
-function Set-MouseButton([int]$x, [int]$y, [string]$button, [bool]$down) {
-    if (-not ('Native.Mouse' -as [type])) {
-        Add-Type -Name Mouse -Namespace Native -MemberDefinition @'
+# Compiles the mouse helper, which takes a second or more; call it before timed presses start.
+function Initialize-Mouse {
+    if ('Native.Mouse' -as [type]) { return }
+    Add-Type -Name Mouse -Namespace Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
 [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
 [DllImport("user32.dll")] public static extern void mouse_event(uint flags, int dx, int dy, uint data, UIntPtr extra);
 [DllImport("user32.dll")] public static extern bool GetPhysicalCursorPos(out System.Drawing.Point point);
 '@ -ReferencedAssemblies System.Drawing
-    }
+}
+
+# Presses or releases a mouse button at x,y in physical pixels of the desktop, as a user would.
+function Set-MouseButton([int]$x, [int]$y, [string]$button, [bool]$down) {
+    Initialize-Mouse
     $previous = [Native.Mouse]::SetThreadDpiAwarenessContext([IntPtr]-4)  # Per-monitor aware v2.
     [Native.Mouse]::SetCursorPos($x, $y) | Out-Null
     $at = New-Object System.Drawing.Point

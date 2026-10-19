@@ -201,6 +201,7 @@ try {
     $fit = [Math]::Min(1920 / $screenW, 1080 / $screenH)
     $frameAt = { param($x, $y) "$([int]((1920 - $screenW * $fit) / 2 + $x * $fit) - 6),$([int]((1080 - $screenH * $fit) / 2 + $y * $fit) - 6),12,12" }
     $pad = Show-ColorWindow 'rec-click-pad' 100 100 800 600 'Gray' $tmp
+    Initialize-Mouse
     try {
         $clicksPath = Join-Path $artifacts 'clicks.mp4'
         $run = Start-RecProcess $rec @('record', '--test-pattern', '--clicks', '-r', '1080p', '-f', '30', '-t', '9', '-o', $clicksPath)
@@ -225,7 +226,8 @@ try {
     Expect-Color $left 'sample_2' 'yellow'
     Expect-Color $left 'sample_8' 'white'
     Expect-Color $right 'sample_2' 'white'
-    Expect-Color $right 'sample_6' 'light blue'    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
+    Expect-Color $right 'sample_6' 'light blue'
+    # Volume and mute act on the program audio. A lone tone, its only track, starts muted and
     # is unmuted 3.5 s in: no beep with the first flash. Mixed with the mic, the tone is turned
     # down 6 dB, then muted 2.5 s in: the mix has no beeps after that.
     $unmutePath = Join-Path $artifacts 'unmute.mp4'
