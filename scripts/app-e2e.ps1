@@ -281,7 +281,7 @@ try {
     $consentBefore = (Get-ItemProperty -Path $consent -Name Value -ErrorAction SilentlyContinue).Value
     $offText = 'Microphone access is off for desktop apps.'
     try {
-        if (-not $hadKey) { New-Item -Path $consent | Out-Null }
+        if (-not $hadKey) { New-Item -Path $consent -Force | Out-Null }
         Set-ItemProperty -Path $consent -Name Value -Value 'Deny'
         Set-Check $ui 'Microphone' $true
         $deadline = (Get-Date).AddSeconds(5)
