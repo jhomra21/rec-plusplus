@@ -67,7 +67,7 @@ enum Control : int {
     // Each destination's row: kDestination + 10 * index + one of DestinationField.
     kDestination = 400,
 };
-enum DestinationField : int { kOn, kService, kVertical, kRemove, kServer, kKey };
+enum DestinationField : int { kOn, kService, kVertical, kRemove, kServer, kKey, kGetKey };
 constexpr int destination_id(std::size_t index, DestinationField field) { return kDestination + 10 * static_cast<int>(index) + field; }
 constexpr std::size_t kMaxDestinations = rec::app::kMaxDestinations;
 
@@ -661,6 +661,9 @@ private:
         case kSessionChanged:
             refresh();
             return 0;
+        case WM_CLIPBOARDUPDATE:
+            clipboard_changed();
+            return 0;
         case WM_ACTIVATE:
             // Returning from Settings may have changed a permission.
             if (LOWORD(w) != WA_INACTIVE) PostMessageW(window_, kSessionChanged, 0, 0);
@@ -814,12 +817,13 @@ private:
         check(kStream, L"&Go live while recording");
         label(kBitrateLabel, L"&Bitrate (kb/s)");
         edit(kBitrate, ES_NUMBER);
-        // Each destination: on, its service, Vertical and Remove, then its server and key.
+        // Each destination: on, its service, Vertical, Get Key and Remove, then its server and key.
         std::array<HWND, kMaxDestinations> services{};
         for (std::size_t i = 0; i < kMaxDestinations; ++i) {
             check(destination_id(i, kOn), L"");
             services[i] = combo(destination_id(i, kService));
             check(destination_id(i, kVertical), L"Vertical");
+            button(destination_id(i, kGetKey), L"Get Key");
             button(destination_id(i, kRemove), L"Remove");
             edit(destination_id(i, kServer));
             edit(destination_id(i, kKey), ES_PASSWORD);
@@ -1017,15 +1021,19 @@ private:
         header(kStreamHeader);
         line(kStream, px(22));
         pair(kBitrateLabel, kBitrate, row);
-        const int on_box = px(26), vertical_box = px(76), remove = px(76);
+        const int on_box = px(26), vertical_box = px(76), remove = px(76), get_key = px(76);
         for (std::size_t i = 0; i < kMaxDestinations; ++i) {
             const bool shown = i < settings_.destinations.size();
             for (auto field : {kOn, kService, kVertical, kRemove, kServer, kKey})
                 ShowWindow(get(destination_id(i, field)), shown ? SW_SHOWNA : SW_HIDE);
+            const bool has_page = shown && *rec::app::key_page(settings_.destinations[i].service);
+            ShowWindow(get(destination_id(i, kGetKey)), has_page ? SW_SHOWNA : SW_HIDE);
             if (!shown) continue;
+            const int buttons = remove + (has_page ? get_key + gap : 0);
             place(destination_id(i, kOn), x, y + px(2), on_box, px(22));
-            place(destination_id(i, kService), x + on_box, y, width - on_box - vertical_box - remove - 2 * gap, px(240));
-            place(destination_id(i, kVertical), x + width - vertical_box - remove - gap, y + px(2), vertical_box, px(22));
+            place(destination_id(i, kService), x + on_box, y, width - on_box - vertical_box - buttons - 2 * gap, px(240));
+            place(destination_id(i, kVertical), x + width - vertical_box - buttons - gap, y + px(2), vertical_box, px(22));
+            if (has_page) place(destination_id(i, kGetKey), x + width - remove - gap - get_key, y, get_key, row);
             place(destination_id(i, kRemove), x + width - remove, y, remove, row);
             y += row + gap;
             const int half = (width - on_box - gap) / 2;
@@ -1309,10 +1317,95 @@ private:
             const std::pair<DestinationField, std::wstring> names[] = {
                 {kOn, L"Stream to " + name}, {kService, L"Destination " + std::to_wstring(i + 1) + L" service"},
                 {kVertical, L"Send the vertical video to " + name}, {kRemove, L"Remove " + name},
+                {kGetKey, L"Get the " + name + L" stream key"},
                 {kServer, name + L" server URL"}, {kKey, name + L" stream key"}};
             for (const auto& [field, text] : names)
                 access_->SetHwndPropStr(get(destination_id(i, field)), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, text.c_str());
         }
+    }
+
+    // A pasted server finds the key kept for it, unless the key field holds one to keep. The
+    // row's key moves to the new server: TikTok hands out a new server and key for each LIVE,
+    // and the old pair is dead.
+    void server_changed(std::size_t i, bool keep_field) {
+        const auto old_name = rec::app::key_name(settings_, i);
+        remember();
+        const auto name = rec::app::key_name(settings_, i);
+        if (name == old_name) return;
+        const auto stored = keep_field ? std::string() : load_key(name);
+        if (!stored.empty()) SetWindowTextW(get(destination_id(i, kKey)), wide(stored).c_str());
+        else keep_key(i);
+        if (!old_name.empty() && !rec::app::uses_key_name(settings_, old_name)) delete_key(old_name);
+    }
+
+    // Opens the service's key page and, for ten minutes, fills the row's server and key from
+    // what is copied there. The clipboard is read only while this waits.
+    void get_key(std::size_t i) {
+        remember();
+        const auto& service = settings_.destinations[i].service;
+        // A test home (the app E2E) opens no web page.
+        if (home_.empty()) ShellExecuteW(window_, L"open", wide(rec::app::key_page(service)).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (capture_row_ == kNoCapture) AddClipboardFormatListener(window_);
+        capture_row_ = i;
+        capture_service_ = service;
+        capture_until_ = GetTickCount64() + 10 * 60 * 1000;
+        captured_server_ = captured_key_ = false;
+        note_ = rec::app::typed_server(service) ? L"Copy the server URL and the stream key; Rec fills them in."
+                                                : L"Copy the stream key; Rec fills it in.";
+        note_attention_ = false;
+        note_until_ = GetTickCount64() + 15000;
+        refresh();
+    }
+
+    void stop_capture() {
+        if (capture_row_ == kNoCapture) return;
+        capture_row_ = kNoCapture;
+        RemoveClipboardFormatListener(window_);
+    }
+
+    std::string clipboard_text() {
+        std::string text;
+        if (!OpenClipboard(window_)) return text;
+        if (HANDLE data = GetClipboardData(CF_UNICODETEXT)) {
+            if (const auto* chars = static_cast<const wchar_t*>(GlobalLock(data))) {
+                text = narrow(chars);
+                GlobalUnlock(data);
+            }
+        }
+        CloseClipboard();
+        return text;
+    }
+
+    void clipboard_changed() {
+        const auto i = capture_row_;
+        if (i >= settings_.destinations.size() || settings_.destinations[i].service != capture_service_ ||
+            GetTickCount64() > capture_until_ || session_.status().state != State::idle) {
+            stop_capture();
+            return;
+        }
+        const auto pasted = rec::app::read_pasted(clipboard_text());
+        const bool typed = rec::app::typed_server(capture_service_);
+        if (!pasted.server.empty() && typed) {
+            SetWindowTextW(get(destination_id(i, kServer)), wide(pasted.server).c_str());
+            server_changed(i, captured_key_);
+            captured_server_ = true;
+        } else if (!pasted.key.empty()) {
+            SetWindowTextW(get(destination_id(i, kKey)), wide(pasted.key).c_str());
+            keep_key(i);
+            captured_key_ = true;
+        } else {
+            return;
+        }
+        const auto name = wide(rec::app::destination_name(settings_, i));
+        if (captured_key_ && (captured_server_ || !typed)) {
+            stop_capture();
+            note_ = name + (typed ? L" server and stream key filled in." : L" stream key filled in.");
+        } else {
+            note_ = name + (captured_key_ ? L" stream key filled in; now copy the server URL." : L" server filled in; now copy the stream key.");
+        }
+        note_attention_ = false;
+        note_until_ = GetTickCount64() + 8000;
+        refresh();
     }
 
     std::vector<std::string> stream_keys() const {
@@ -1563,12 +1656,10 @@ private:
             }
             return;
         case kServer:
-            // A pasted server finds the key kept for it.
-            if (code == EN_KILLFOCUS && rec::app::typed_server(settings_.destinations[i].service)) {
-                remember();
-                if (const auto key = load_key(rec::app::key_name(settings_, i)); !key.empty())
-                    SetWindowTextW(get(destination_id(i, kKey)), wide(key).c_str());
-            }
+            if (code == EN_KILLFOCUS && rec::app::typed_server(settings_.destinations[i].service)) server_changed(i, false);
+            return;
+        case kGetKey:
+            if (code == BN_CLICKED) get_key(i);
             return;
         case kKey:
             if (code == EN_KILLFOCUS) keep_key(i);
@@ -2072,7 +2163,7 @@ private:
                        kBitrate, kReplay, kReplayLength, kChangeFolder, kAddDestination})
             EnableWindow(get(id), editable);
         for (std::size_t i = 0; i < kMaxDestinations; ++i) {
-            for (auto field : {kOn, kService, kVertical, kServer, kKey}) EnableWindow(get(destination_id(i, field)), editable);
+            for (auto field : {kOn, kService, kVertical, kServer, kKey, kGetKey}) EnableWindow(get(destination_id(i, field)), editable);
             EnableWindow(get(destination_id(i, kRemove)), editable && settings_.destinations.size() > 1);
         }
         EnableWindow(get(kMicDevice), editable && checked(kMicrophone));
@@ -2177,6 +2268,11 @@ private:
     std::wstring note_;  // A message that replaces the detail line for a few seconds.
     ULONGLONG note_until_ = 0;
     bool note_attention_ = false;
+    static constexpr std::size_t kNoCapture = static_cast<std::size_t>(-1);
+    std::size_t capture_row_ = kNoCapture;  // The destination Get Key fills from the clipboard.
+    std::string capture_service_;
+    ULONGLONG capture_until_ = 0;
+    bool captured_server_ = false, captured_key_ = false;
     bool polling_ = false;
     bool previewing_ = false;
     rec::app::AreaDrag drag_;

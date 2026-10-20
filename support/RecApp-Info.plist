@@ -32,5 +32,8 @@
     <string>Rec records your microphone when Microphone is on.</string>
     <key>NSCameraUsageDescription</key>
     <string>Rec shows your camera over the recording when Camera is on.</string>
+    <!-- Without this, macOS hides Continuity Camera (a nearby iPhone) from the camera list. -->
+    <key>NSCameraUseContinuityCameraDeviceType</key>
+    <true/>
 </dict>
 </plist>

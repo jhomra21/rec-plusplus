@@ -270,9 +270,20 @@ std::string server_url(const std::string& service, const std::string& server);
 bool typed_server(const std::string& service);
 // Where to find the server URL and key for a service, as a placeholder; empty for presets.
 const char* server_hint(const std::string& service);
+// The service's page that shows the stream key (and, for TikTok and X, the server); empty for
+// custom servers.
+const char* key_page(const std::string& service);
+// What copied text is to a destination: an RTMP server URL, a stream key (one token, no
+// scheme), or neither. Lets the app fill both from the clipboard after Get Key.
+struct Pasted {
+    std::string server, key;
+};
+Pasted read_pasted(const std::string& text);
 // The name a destination's key is kept under: its server URL, then "#2", "#3" ... for later
 // destinations with the same server (two YouTube channels). Empty without a server.
 std::string key_name(const Settings& settings, std::size_t destination);
+// Whether any destination's key is kept under this name.
+bool uses_key_name(const Settings& settings, const std::string& name);
 // "YouTube", or "YouTube 2" when an earlier destination uses the same service.
 std::string destination_name(const Settings& settings, std::size_t destination);
 // Adds a destination after the others: the first service none of them uses. False at

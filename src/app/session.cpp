@@ -411,6 +411,12 @@ std::string key_name(const Settings& s, std::size_t index) {
     return same == 1 ? url : url + "#" + std::to_string(same);
 }
 
+bool uses_key_name(const Settings& s, const std::string& name) {
+    for (std::size_t i = 0; i < s.destinations.size(); ++i)
+        if (key_name(s, i) == name) return true;
+    return false;
+}
+
 std::string destination_name(const Settings& s, std::size_t index) {
     if (index >= s.destinations.size()) return {};
     const auto& service = s.destinations[index].service;
@@ -457,6 +463,28 @@ const char* server_hint(const std::string& destination) {
     if (destination == "custom") return "rtmp://host/app, rtmps://host:443/app or a WHIP https:// URL";
     return "";
 }
+const char* key_page(const std::string& destination) {
+    if (destination == "twitch") return "https://dashboard.twitch.tv/settings/stream";
+    if (destination == "youtube") return "https://studio.youtube.com/";
+    if (destination == "x") return "https://studio.x.com/producer";
+    if (destination == "tiktok") return "https://livecenter.tiktok.com/producer";
+    return "";
+}
+
+Pasted read_pasted(const std::string& text) {
+    const auto space = [](unsigned char c) { return std::isspace(c) != 0; };
+    const auto first = std::find_if_not(text.begin(), text.end(), space);
+    const auto last = std::find_if_not(text.rbegin(), text.rend(), space).base();
+    if (first >= last) return {};
+    const std::string token(first, last);
+    if (token.size() > 1024 || std::any_of(token.begin(), token.end(), space)) return {};
+    std::string lower = token;
+    std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lower.rfind("rtmp://", 0) == 0 || lower.rfind("rtmps://", 0) == 0) return {token, {}};
+    if (token.size() >= 8 && token.find("://") == std::string::npos) return {{}, token};
+    return {};
+}
+
 std::string server_url(const std::string& destination, const std::string& server) {
     if (destination == "twitch") return "rtmps://live.twitch.tv:443/app";
     if (destination == "youtube") return "rtmps://a.rtmps.youtube.com:443/live2";

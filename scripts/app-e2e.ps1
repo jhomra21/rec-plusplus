@@ -8,6 +8,8 @@
 #   2. Start and stop with the global hotkey Ctrl+Alt+R.
 #   3. Go live to two paths of a local MediaMTX server at once while recording; both copies decode.
 #      The second gets the vertical video (1080x1920), which is also saved beside the movie.
+#      Get Key on a TikTok row fills its server and key from the clipboard; a new server takes
+#      the key with it and the old one is forgotten.
 #   4. Closing the window while recording keeps recording; the tray menu stops and saves it.
 #   5. With the replay buffer on, Save Replay writes the last seconds while recording goes on.
 #   6. A camera and an image are drawn; the scene moves the camera while recording. The
@@ -147,6 +149,27 @@ function Choose-Item($ui, [string]$name, [int]$index) {
     [AppWindow]::SendMessage($combo, 0x014E, [IntPtr]$index, [IntPtr]::Zero) | Out-Null  # CB_SETCURSEL
     $id = [AppWindow]::GetDlgCtrlID($combo)
     [AppWindow]::SendMessage($ui.Window, 0x0111, [IntPtr]((1 -shl 16) -bor $id), $combo) | Out-Null  # WM_COMMAND, CBN_SELCHANGE
+}
+# cmdkey echoes the name it was asked for even when nothing is stored; only a Target line counts.
+function Has-Key([string]$url) {
+    return (cmdkey "/list:rec/stream/$url" | Out-String) -match "(?m)Target: (LegacyGeneric:target=)?$([regex]::Escape("rec/stream/$url"))\s*$"
+}
+function Wait-Until([scriptblock]$done, [string]$failure, [int]$seconds = 5) {
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while (-not (& $done)) {
+        if ((Get-Date) -gt $deadline) { throw $failure }
+        Start-Sleep -Milliseconds 100
+    }
+}
+# The press arrives as a posted message; text copied before the app handles it is not seen.
+function Get-Key($ui, [string]$name) {
+    Press $ui "Get the $name stream key"
+    Wait-Until { (Text-Of $ui 101) -match '^Copy the ' } "Get Key did not ask for the server and key: $(Text-Of $ui 101)"
+}
+# Copies text the way a browser does; the app sees the clipboard change.
+function Copy-To-Rec([string]$text) {
+    Set-Clipboard -Value $text
+    Start-Sleep -Milliseconds 300
 }
 function Text-Of($ui, [int]$id) { return [AppWindow]::Of([AppWindow]::GetDlgItem($ui.Window, $id)).accName(0) }
 function Wait-Status($ui, [string]$prefix, [int]$seconds = 20) {
@@ -416,9 +439,27 @@ try {
     Press $ui 'Remove Twitch'
     Set-Check $ui 'Also save a vertical video (9:16, MP4)' $false
     foreach ($url in $server, $server2) {
-        $stored = cmdkey "/list:rec/stream/$url" | Out-String
-        if ($stored -notmatch [regex]::Escape("rec/stream/$url")) { throw "the stream key for $url was not stored in Credential Manager" }
+        if (-not (Has-Key $url)) { throw "the stream key for $url was not stored in Credential Manager" }
     }
+    # Get Key, then copying TikTok's server and key, fills the row. (A test home opens no page.)
+    Add-Destination $ui 3
+    Choose-Item $ui 'Destination 3 service' 3
+    $tiktok = 'rtmp://127.0.0.1:1935/tiktok-a', 'rtmp://127.0.0.1:1935/tiktok-b'
+    foreach ($url in $tiktok) { cmdkey "/delete:rec/stream/$url" 2>&1 | Out-Null }
+    Get-Key $ui 'TikTok'
+    Copy-To-Rec $tiktok[0]
+    Wait-Until { (Find $ui 'TikTok server URL' $Text).Item.accValue(0) -eq $tiktok[0] } 'the copied TikTok server was not filled in'
+    Copy-To-Rec 'tiktokkey-a'
+    Wait-Until { Has-Key $tiktok[0] } 'the copied TikTok key was not kept'
+    # The next LIVE: a new server and key. The old pair is forgotten.
+    Get-Key $ui 'TikTok'
+    Copy-To-Rec $tiktok[1]
+    Wait-Until { (Has-Key $tiktok[1]) -and -not (Has-Key $tiktok[0]) } "the TikTok key did not move to the new server (server field '$((Find $ui 'TikTok server URL' $Text).Item.accValue(0))', old key kept $(Has-Key $tiktok[0]), new key kept $(Has-Key $tiktok[1]); $(Text-Of $ui 101))"
+    Copy-To-Rec 'tiktokkey-b'
+    Wait-Until { (Text-Of $ui 101) -match 'server and stream key filled in' } "no note that both were filled in: $(Text-Of $ui 101)"
+    Press $ui 'Remove TikTok'
+    cmdkey "/delete:rec/stream/$($tiktok[1])" 2>&1 | Out-Null
+    Write-Host '3. Get Key: the TikTok server and key came from the clipboard and moved together'
 
     # 4. Close the window mid-recording: it hides and keeps recording.
     Set-Check $ui 'Go live while recording' $false

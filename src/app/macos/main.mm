@@ -279,9 +279,17 @@ struct PreviewHit {
     NSTextField* _permission;
     NSButton* _openPrivacy;
     std::optional<rec::Permission> _missing;
-    // Each destination's row: on, service, Vertical and Remove, then its server and key.
+    // Each destination's row: on, service, Vertical, Get Key and Remove, then its server and key.
     NSStackView* _destRow[kMaxDestinations];
     NSButton *_destOn[kMaxDestinations], *_destVertical[kMaxDestinations], *_destRemove[kMaxDestinations];
+    NSButton* _destGetKey[kMaxDestinations];
+    // After Get Key, the destination filled from what is copied, until _captureUntil.
+    NSTimer* _captureTimer;
+    std::size_t _captureRow;
+    std::string _captureService;
+    NSInteger _captureChange;
+    NSDate* _captureUntil;
+    bool _capturedServer, _capturedKey;
     NSPopUpButton* _destService[kMaxDestinations];
     NSTextField* _destServer[kMaxDestinations];
     NSSecureTextField* _destKey[kMaxDestinations];
@@ -914,12 +922,14 @@ struct PreviewHit {
         _destVertical[i] = [self check:@"Vertical"];
         _destRemove[i] = [self button:@"Remove" action:@selector(removeDestination:)];
         _destRemove[i].tag = static_cast<NSInteger>(i);
+        _destGetKey[i] = [self button:@"Get Key" action:@selector(getKey:)];
+        _destGetKey[i].tag = static_cast<NSInteger>(i);
         _destServer[i] = [self field:@"" secure:NO];
         _destKey[i] = (NSSecureTextField*)[self field:@"" secure:YES];
         _destKey[i].placeholderString = @"Stream key";
-        NSStackView* top = [NSStackView stackViewWithViews:@[_destOn[i], _destService[i], _destVertical[i], _destRemove[i]]];
+        NSStackView* top = [NSStackView stackViewWithViews:@[_destOn[i], _destService[i], _destVertical[i], _destGetKey[i], _destRemove[i]]];
         top.distribution = NSStackViewDistributionFill;
-        for (NSView* view in @[_destOn[i], _destVertical[i], _destRemove[i]])
+        for (NSView* view in @[_destOn[i], _destVertical[i], _destGetKey[i], _destRemove[i]])
             [view setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
         NSStackView* bottom = [NSStackView stackViewWithViews:@[_destServer[i], _destKey[i]]];
         bottom.distribution = NSStackViewDistributionFillEqually;
@@ -1181,6 +1191,7 @@ struct PreviewHit {
         _destOn[i].state = d.on ? NSControlStateValueOn : NSControlStateValueOff;
         [_destService[i] selectItemAtIndex:choice_index(kServices, d.service)];
         _destVertical[i].state = d.vertical ? NSControlStateValueOn : NSControlStateValueOff;
+        _destGetKey[i].hidden = !*rec::app::key_page(d.service);
         [self showServer:i];
         _destKey[i].stringValue = ns(keys[i]);
         if (keys[i].empty()) [self loadKey:i];
@@ -1194,6 +1205,7 @@ struct PreviewHit {
         _destService[i].accessibilityLabel = [NSString stringWithFormat:@"Destination %zu service", i + 1];
         _destVertical[i].accessibilityLabel = [@"Send the vertical video to " stringByAppendingString:name];
         _destRemove[i].accessibilityLabel = [@"Remove " stringByAppendingString:name];
+        _destGetKey[i].accessibilityLabel = [NSString stringWithFormat:@"Get the %@ stream key", name];
         _destServer[i].accessibilityLabel = [name stringByAppendingString:@" server URL"];
         _destKey[i].accessibilityLabel = [name stringByAppendingString:@" stream key"];
     }
@@ -1227,6 +1239,87 @@ struct PreviewHit {
             field.stringValue = key;
         });
     });
+}
+
+// A pasted server finds the key kept for it, unless one is typed. The row's key moves to the
+// new server: TikTok hands out a new server and key for each LIVE, and the old pair is dead.
+- (void)serverChanged:(std::size_t)i {
+    const auto oldName = rec::app::key_name(_settings, i);
+    [self remember];
+    if (rec::app::key_name(_settings, i) == oldName) return;
+    if (_destKey[i].stringValue.length) [self keepKey:i];
+    else [self loadKey:i];
+    if (!oldName.empty() && !rec::app::uses_key_name(_settings, oldName)) delete_key(oldName);
+}
+
+// Opens the service's key page and, for ten minutes, fills the row's server and key from what
+// is copied there. The pasteboard is read only while this waits, and only when it changes.
+- (void)getKey:(NSButton*)sender {
+    const auto i = static_cast<std::size_t>(sender.tag);
+    if (i >= _settings.destinations.size()) return;
+    [_window makeFirstResponder:nil];
+    [self remember];
+    const auto& service = _settings.destinations[i].service;
+    // A test home (the app E2E) opens no web page.
+    if (environment("REC_APP_HOME").empty())
+        [NSWorkspace.sharedWorkspace openURL:[NSURL URLWithString:ns(rec::app::key_page(service))]];
+    _captureRow = i;
+    _captureService = service;
+    _captureChange = NSPasteboard.generalPasteboard.changeCount;
+    _captureUntil = [NSDate dateWithTimeIntervalSinceNow:10 * 60];
+    _capturedServer = _capturedKey = false;
+    if (!_captureTimer) {
+        _captureTimer = [NSTimer timerWithTimeInterval:0.5 target:self selector:@selector(checkPasteboard:) userInfo:nil repeats:YES];
+        [NSRunLoop.mainRunLoop addTimer:_captureTimer forMode:NSRunLoopCommonModes];
+    }
+    _note = rec::app::typed_server(service) ? @"Copy the server URL and the stream key; Rec fills them in."
+                                            : @"Copy the stream key; Rec fills it in.";
+    _noteAttention = false;
+    _noteUntil = [NSDate dateWithTimeIntervalSinceNow:15];
+    [self refresh];
+}
+
+- (void)stopCapture {
+    [_captureTimer invalidate];
+    _captureTimer = nil;
+}
+
+- (void)checkPasteboard:(NSTimer*)timer {
+    const auto i = _captureRow;
+    if (i >= _settings.destinations.size() || _settings.destinations[i].service != _captureService ||
+        _captureUntil.timeIntervalSinceNow < 0 || _session->status().state != State::idle) {
+        [self stopCapture];
+        return;
+    }
+    NSPasteboard* board = NSPasteboard.generalPasteboard;
+    if (board.changeCount == _captureChange) return;
+    _captureChange = board.changeCount;
+    NSString* copied = [board stringForType:NSPasteboardTypeString];
+    if (!copied) return;
+    const auto pasted = rec::app::read_pasted(utf8(copied));
+    const bool typed = rec::app::typed_server(_captureService);
+    if (!pasted.server.empty() && typed) {
+        _destServer[i].stringValue = ns(pasted.server);
+        [self serverChanged:i];
+        _capturedServer = true;
+    } else if (!pasted.key.empty()) {
+        _destKey[i].stringValue = ns(pasted.key);
+        [self keepKey:i];
+        _capturedKey = true;
+    } else {
+        return;
+    }
+    NSString* name = ns(rec::app::destination_name(_settings, i));
+    if (_capturedKey && (_capturedServer || !typed)) {
+        [self stopCapture];
+        _note = [name stringByAppendingString:typed ? @" server and stream key filled in." : @" stream key filled in."];
+    } else {
+        _note = [name stringByAppendingString:_capturedKey ? @" stream key filled in; now copy the server URL."
+                                                           : @" server filled in; now copy the stream key."];
+    }
+    _noteAttention = false;
+    _noteUntil = [NSDate dateWithTimeIntervalSinceNow:8];
+    [self refresh];
 }
 
 - (std::vector<std::string>)streamKeys {
@@ -1613,11 +1706,8 @@ struct PreviewHit {
 - (void)controlTextDidEndEditing:(NSNotification*)notification {
     if (notification.object == _sceneName) rec::app::save_settings(_settingsPath, _settings);
     for (std::size_t i = 0; i < _settings.destinations.size(); ++i) {
-        // A pasted server finds the key kept for it.
-        if (notification.object == _destServer[i] && rec::app::typed_server(_settings.destinations[i].service)) {
-            [self remember];
-            [self loadKey:i];
-        }
+        if (notification.object == _destServer[i] && rec::app::typed_server(_settings.destinations[i].service))
+            [self serverChanged:i];
         if (notification.object == _destKey[i]) [self keepKey:i];
     }
 }
@@ -2021,7 +2111,8 @@ struct PreviewHit {
                                  _stream, _bitrate, _replay, _replayLength, _changeFolder, _addDestination, _verticalMovie])
         control.enabled = editable;
     for (std::size_t i = 0; i < kMaxDestinations; ++i) {
-        for (NSControl* control in @[_destOn[i], _destService[i], _destVertical[i], _destServer[i], _destKey[i]]) control.enabled = editable;
+        for (NSControl* control in @[_destOn[i], _destService[i], _destVertical[i], _destServer[i], _destKey[i], _destGetKey[i]])
+            control.enabled = editable;
         _destRemove[i].enabled = editable && _settings.destinations.size() > 1;
     }
     _micDevice.enabled = editable && _microphone.state == NSControlStateValueOn;
