@@ -2043,8 +2043,12 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
             ++probe.audio_tracks;
             if (audio < 0) {
                 audio = static_cast<int>(i);
-                // Without an Opus decoder installed, the MP4 source may name Opus by its FourCC.
-                const bool opus = subtype == MFAudioFormat_Opus || subtype.Data1 == FCC('Opus') || subtype.Data1 == FCC('opus');
+                // Without an Opus decoder installed, the MP4 source names Opus by its FourCC, and
+                // Windows Server stores it big-endian (0x4F707573).
+                const auto d = subtype.Data1;
+                const DWORD swapped = d >> 24 | (d >> 8 & 0xFF00) | (d << 8 & 0xFF0000) | d << 24;
+                const bool opus = subtype == MFAudioFormat_Opus || d == FCC('Opus') || d == FCC('opus') ||
+                                  swapped == FCC('Opus') || swapped == FCC('opus');
                 probe.audio_codec = subtype == MFAudioFormat_AAC ? "aac" : opus ? "opus" : "other";
                 audio_subtype = subtype.Data1;
             }
