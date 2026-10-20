@@ -210,10 +210,20 @@ try {
     $address = $route.Client.LocalEndPoint.Address.ToString()
     $route.Dispose()
     $phonePath = Join-Path $artifacts 'phone.mp4'
-    $run = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '14', '--camera', "phone:$token", '-o', $phonePath)
+    # A cold browser on a CI runner can take many seconds to connect, so the recording runs
+    # until 10 s after the page is live.
+    $run = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '120', '--camera', "phone:$token", '-o', $phonePath)
+    $started = Get-Date
     $phone = Start-Phone "https://${address}:47110/#$token"
-    try { $phoneStatus = Wait-PhoneStatus $phone 'Live in Rec' 20 }
-    finally { $phoneRun = Stop-RecProcess $run; Stop-Phone $phone }
+    try {
+        $phoneStatus = Wait-PhoneStatus $phone 'Live in Rec' 45
+        Write-Host "phone page: '$phoneStatus' after $([int]((Get-Date) - $started).TotalSeconds) s"
+        if ($phoneStatus -eq 'Live in Rec') { Start-Sleep -Seconds 10 }
+    } finally {
+        try { Send-RecCommand $run 'stop' } catch { }
+        $phoneRun = Stop-RecProcess $run
+        Stop-Phone $phone
+    }
     $phoneLog = $phoneRun.Text -replace [regex]::Escape($token), 'TOKEN'
     Set-Content -Path (Join-Path $artifacts 'phone.record.log') -Value $phoneLog
     Write-Host $phoneLog
@@ -222,7 +232,9 @@ try {
     Expect-Text $phoneLog "Phone camera: on a phone on this network, open https://${address}:47110/#TOKEN"
     if (-not ($phoneLog -match 'Camera frames (\d+)') -or [int]$Matches[1] -lt 90) { throw 'the phone camera delivered too few frames' }
     $phoneProbe = Get-Probe $rec $phonePath (Join-Path $artifacts 'phone-camera.probe') @('--sample', '1420,940,120,80')
-    foreach ($second in 11..13) { Expect-Color $phoneProbe "sample_$second" 'green' }
+    $last = 0
+    while ($phoneProbe.ContainsKey("sample_$($last + 1)")) { $last++ }
+    foreach ($second in ($last - 3)..($last - 1)) { Expect-Color $phoneProbe "sample_$second" 'green' }
     # Overlays: a camera and an image drawn into every frame on the GPU; "hide 1" removes the
     # camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
     $png = Join-Path $PSScriptRoot 'overlay-test.png'
