@@ -2,7 +2,8 @@
 """A stand-in phone for the phone camera E2E on macOS.
 
 A headless Chromium-family browser with a synthetic camera (green, with a moving circle)
-opens rec's page and sends its picture over WebRTC, as a phone would. This prints
+opens rec's page and sends its picture over WebRTC, as a phone would, accepting only the
+certificate key the page has when it starts. This prints
 "status=TEXT" each time the page's status line changes, read through the DevTools protocol,
 until it is stopped with SIGTERM or SIGINT, or its parent process ends; then it closes the
 browser and removes its profile. Exits 3 when no browser is found; REC_E2E_BROWSER names
@@ -12,15 +13,18 @@ Usage: phone.py URL | --find
 """
 import base64
 import glob
+import hashlib
 import json
 import os
 import shutil
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 import urllib.request
 
 
@@ -87,6 +91,35 @@ def evaluate(port, expression):
                 return reply.get("result", {}).get("result", {}).get("value")
 
 
+# The start of a P-256 SubjectPublicKeyInfo in a certificate; the 65-byte point follows it.
+SPKI_P256 = bytes.fromhex("3059301306072a8648ce3d020106082a8648ce3d030107034200")
+
+
+def key_pin(url, seconds=15):
+    """The base64 SHA-256 of the page's public key, as --ignore-certificate-errors-spki-list takes.
+
+    A browser pinned to it refuses any other key, as a real phone does after its person
+    confirmed the certificate warning once.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    deadline = time.monotonic() + seconds
+    while True:
+        try:
+            with socket.create_connection((parsed.hostname, parsed.port), timeout=3) as raw:
+                with context.wrap_socket(raw, server_hostname=parsed.hostname) as tls:
+                    der = tls.getpeercert(binary_form=True)
+            at = der.index(SPKI_P256)
+            spki = der[at:at + len(SPKI_P256) + 65]
+            return base64.b64encode(hashlib.sha256(spki).digest()).decode()
+        except (OSError, ValueError):
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.25)
+
+
 def main():
     if len(sys.argv) != 2:
         print(__doc__, file=sys.stderr)
@@ -99,11 +132,12 @@ def main():
         print(os.path.basename(browser))
         return 0
     parent = os.getppid()
+    pin = key_pin(sys.argv[1])
     port = free_port()
     profile = tempfile.mkdtemp(prefix="rec-phone-")
     process = subprocess.Popen(
         [browser, "--headless=new", "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
-         "--ignore-certificate-errors", "--incognito", "--no-first-run", "--no-default-browser-check",
+         f"--ignore-certificate-errors-spki-list={pin}", "--incognito", "--no-first-run", "--no-default-browser-check",
          "--use-mock-keychain", "--disable-sync", f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
          sys.argv[1]],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

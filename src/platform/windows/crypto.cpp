@@ -137,6 +137,34 @@ std::unique_ptr<P256> P256::generate(Use use) {
 
 const Bytes& P256::public_point() const noexcept { return impl_->point; }
 
+std::unique_ptr<P256> P256::import_private(const Bytes& key) {
+    if (!ecdsa() || key.size() != 97 || key[0] != 4) return nullptr;
+    std::vector<std::uint8_t> blob(sizeof(BCRYPT_ECCKEY_BLOB) + 96);
+    auto* header = reinterpret_cast<BCRYPT_ECCKEY_BLOB*>(blob.data());
+    header->dwMagic = BCRYPT_ECDSA_PRIVATE_P256_MAGIC;
+    header->cbKey = 32;
+    std::memcpy(blob.data() + sizeof(BCRYPT_ECCKEY_BLOB), key.data() + 1, 96);
+    auto impl = std::make_unique<Impl>();
+    const bool imported = ok(BCryptImportKeyPair(ecdsa(), nullptr, BCRYPT_ECCPRIVATE_BLOB, &impl->key, blob.data(),
+                                                 static_cast<ULONG>(blob.size()), 0));
+    SecureZeroMemory(blob.data(), blob.size());
+    if (!imported) return nullptr;
+    impl->point.assign(key.begin(), key.begin() + 65);
+    return std::make_unique<P256>(std::move(impl));
+}
+
+Bytes P256::private_key() const {
+    if (impl_->use != Use::sign) return {};
+    std::uint8_t blob[sizeof(BCRYPT_ECCKEY_BLOB) + 96];
+    ULONG size = 0;
+    Bytes out;
+    if (ok(BCryptExportKey(impl_->key, nullptr, BCRYPT_ECCPRIVATE_BLOB, blob, sizeof blob, &size, 0)) && size == sizeof blob) {
+        out.push_back(4);
+        out.insert(out.end(), blob + sizeof(BCRYPT_ECCKEY_BLOB), blob + sizeof blob);
+    }
+    SecureZeroMemory(blob, sizeof blob);
+    return out;
+}
 Bytes P256::sign(const std::uint8_t* data, std::size_t size) const {
     if (impl_->use != Use::sign) return {};
     auto hash = sha256(data, size);

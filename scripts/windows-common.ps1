@@ -376,14 +376,38 @@ public static class RecOutputMeter {
     return [RecOutputMeter]::Peak([int]($seconds * 1000))
 }
 
+# The base64 SHA-256 of the phone server's public key (its SubjectPublicKeyInfo), which is what
+# Chrome's --ignore-certificate-errors-spki-list takes. A browser pinned to it refuses any other
+# key, as a real phone does after its person confirmed the certificate warning once.
+function Get-PhoneKeyPin([string]$url, [int]$seconds = 15) {
+    $uri = [Uri]$url
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while ($true) {
+        $tcp = New-Object Net.Sockets.TcpClient
+        try {
+            $tcp.Connect($uri.Host, $uri.Port)
+            $ssl = New-Object Net.Security.SslStream($tcp.GetStream(), $false, { $true })
+            $ssl.AuthenticateAsClient($uri.Host, $null, [Security.Authentication.SslProtocols]::Tls12, $false)
+            $certificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2 $ssl.RemoteCertificate
+            # SubjectPublicKeyInfo of a P-256 key: the algorithm, then the point as a bit string.
+            $spki = [byte[]](0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x08, 0x2A,
+                             0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00) + $certificate.PublicKey.EncodedKeyValue.RawData
+            return [Convert]::ToBase64String([Security.Cryptography.SHA256]::Create().ComputeHash([byte[]]$spki))
+        } catch {
+            if ((Get-Date) -gt $deadline) { throw "no TLS answer from $($uri.Authority): $($_.Exception.Message)" }
+            Start-Sleep -Milliseconds 250
+        } finally { $tcp.Dispose() }
+    }
+}
 # A headless Chrome or Edge with a synthetic camera (a green picture with a moving shape) that
-# grants camera access and accepts rec's self-signed certificate: the phone in the phone
-# camera E2E. Read the page with Get-PageText; close it with Stop-Phone.
+# grants camera access and accepts the key rec's self-signed certificate has now, and no other:
+# the phone in the phone camera E2E. Read the page with Get-PageText; close it with Stop-Phone.
 function Start-Phone([string]$url, [int]$port = 9333) {
     $browser = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
                  "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
                  "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $browser) { throw 'the phone camera E2E needs Chrome or Edge' }
+    $pin = Get-PhoneKeyPin $url
     $profile = Join-Path $env:TEMP "rec-phone-$PID"
     # Chrome and Edge ask Windows whether apps may use the camera and microphone, and that can
     # create the user's switches set to Deny (a runner's default), which then keeps rec from
@@ -392,7 +416,7 @@ function Start-Phone([string]$url, [int]$port = 9333) {
     $consent = foreach ($key in @("$store\microphone", "$store\microphone\NonPackaged", "$store\webcam", "$store\webcam\NonPackaged")) {
         @{ Key = $key; Existed = (Test-Path $key); Value = (Get-ItemProperty -Path $key -Name Value -ErrorAction SilentlyContinue).Value }
     }    $process = Start-Process -FilePath $browser -PassThru -ArgumentList @('--headless=new', '--use-fake-device-for-media-stream',
-        '--use-fake-ui-for-media-stream', '--ignore-certificate-errors', '--inprivate', '--incognito', '--no-first-run',
+        '--use-fake-ui-for-media-stream', "--ignore-certificate-errors-spki-list=$pin", '--inprivate', '--incognito', '--no-first-run',
         '--disable-sync', "--remote-debugging-port=$port", "--user-data-dir=$profile", $url)
     return @{ Process = $process; Port = $port; Profile = $profile; Consent = $consent }
 }

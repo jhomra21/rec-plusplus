@@ -2324,7 +2324,7 @@ private:
             child(kPhoneHelp, WC_STATICW,
                   L"Use a phone on the same Wi-Fi as this computer.\n"
                   L"1. Scan the code with the phone's camera, or type the address.\n"
-                  L"2. The browser warns about the certificate, since Rec makes its own: continue to the page.\n"
+                  L"2. The first time, the browser warns about Rec's own certificate: continue to the page.\n"
                   L"3. Allow the camera, and keep the page open. Switch camera picks the front or back one.\n"
                   L"If the phone cannot connect, allow Rec through Windows Firewall on private networks.",
                   SS_LEFT | SS_NOPREFIX);

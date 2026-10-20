@@ -121,8 +121,9 @@ private:
     std::string failure_;
 };
 
-// A self-signed X.509 certificate (CN=rec, valid for 30 days) for key, in DER; empty on failure.
-crypto::Bytes self_signed_certificate(const crypto::P256& key);
+// A self-signed X.509 certificate (CN=rec, valid from a day ago for days more) for key, in DER;
+// empty on failure.
+crypto::Bytes self_signed_certificate(const crypto::P256& key, int days = 30);
 // "AB:CD:...", hex bytes with colons, as SDP fingerprints are written.
 std::string hex_colons(const std::uint8_t* data, std::size_t size);
 

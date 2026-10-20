@@ -138,7 +138,7 @@ Bytes tls_prf(const std::uint8_t* secret, std::size_t secret_size, const std::st
 DtlsClient::DtlsClient() = default;
 DtlsClient::~DtlsClient() = default;
 
-Bytes self_signed_certificate(const crypto::P256& key) {
+Bytes self_signed_certificate(const crypto::P256& key, int days) {
     Bytes serial(8);
     crypto::random(serial.data(), serial.size());
     serial[0] = (serial[0] & 0x7F) | 0x40;
@@ -152,7 +152,7 @@ Bytes self_signed_certificate(const crypto::P256& key) {
         der(0x02, serial),
         algorithm,
         name,
-        der_seq({utc_time(now - 86400), utc_time(now + 30 * 86400)}),
+        der_seq({utc_time(now - 86400), utc_time(now + std::time_t{days} * 86400)}),
         name,
         der_seq({der_seq({der(0x06, kOidEcPublicKey), der(0x06, kOidPrime256v1)}), der(0x03, point)}),
     });

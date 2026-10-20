@@ -127,6 +127,27 @@ std::unique_ptr<P256> P256::generate(Use) {
 
 const Bytes& P256::public_point() const noexcept { return impl_->point; }
 
+std::unique_ptr<P256> P256::import_private(const Bytes& key) {
+    if (key.size() != 97 || key[0] != 4) return nullptr;
+    auto data = data_of(key.data(), key.size());
+    const int bits = 256;
+    Ref<CFNumberRef> number(CFNumberCreate(kCFAllocatorDefault, kCFNumberIntType, &bits));
+    const void* keys[] = {kSecAttrKeyType, kSecAttrKeyClass, kSecAttrKeySizeInBits};
+    const void* values[] = {kSecAttrKeyTypeECSECPrimeRandom, kSecAttrKeyClassPrivate, number.value};
+    Ref<CFDictionaryRef> attributes(CFDictionaryCreate(kCFAllocatorDefault, keys, values, 3,
+                                                       &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks));
+    auto impl = std::make_unique<Impl>();
+    impl->key = SecKeyCreateWithData(data.value, attributes.value, nullptr);
+    if (!impl->key) return nullptr;
+    impl->point.assign(key.begin(), key.begin() + 65);
+    return std::make_unique<P256>(std::move(impl));
+}
+
+Bytes P256::private_key() const {
+    Ref<CFDataRef> external(SecKeyCopyExternalRepresentation(impl_->key, nullptr));
+    Bytes out = bytes_of(external.value);
+    return out.size() == 97 ? out : Bytes{};
+}
 Bytes P256::sign(const std::uint8_t* data, std::size_t size) const {
     auto message = data_of(data, size);
     Ref<CFDataRef> signature(SecKeyCreateSignature(impl_->key, kSecKeyAlgorithmECDSASignatureMessageX962SHA256,

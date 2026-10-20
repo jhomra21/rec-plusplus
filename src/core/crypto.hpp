@@ -43,7 +43,10 @@ public:
     ~P256();
     P256(const P256&) = delete;
     P256& operator=(const P256&) = delete;
+    // A signing key saved with private_key(); null if the bytes are not one.
+    static std::unique_ptr<P256> import_private(const Bytes& key);
     const Bytes& public_point() const noexcept;  // 65 bytes: 0x04, X, Y.
+    Bytes private_key() const;                   // 97 bytes: 0x04, X, Y, then the secret. Empty on failure.
     Bytes sign(const std::uint8_t* data, std::size_t size) const;  // ECDSA with SHA-256, DER. Empty on failure.
     Bytes agree(const Bytes& peer_point) const;                    // The shared X coordinate. Empty on failure.
 

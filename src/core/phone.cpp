@@ -12,8 +12,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <map>
+#include <optional>
+#include <string_view>
 #include <vector>
 
 namespace rec::core {
@@ -368,8 +374,111 @@ struct PhoneCamera::Session {
 
 // --- The HTTPS server ---------------------------------------------------------------------
 
-struct PhoneCamera::Server {
-    std::unique_ptr<TcpListener> listener;
+namespace {
+
+// The phone page's TLS key and certificate. One per user, kept in a file beside the background
+// engine's socket, so the preview, a recording in the engine and later runs all show a phone the
+// certificate its person already confirmed (a browser asks again for any other one).
+struct Identity {
+    std::unique_ptr<crypto::P256> key;
+    Bytes certificate;
+};
+
+constexpr std::string_view kIdentityMagic = "rec phone identity 1\n";
+constexpr int kIdentityDays = 365;
+constexpr std::int64_t kRenewBefore = 30 * 86400;  // Seconds before the certificate expires.
+
+std::filesystem::path identity_path() {
+#ifdef _WIN32
+    const char* local = std::getenv("LOCALAPPDATA");
+    if (local && *local) return std::filesystem::path(local) / "rec" / "phone-identity";
+#else
+    const char* home = std::getenv("HOME");
+    if (home && *home) return std::filesystem::path(home) / "Library" / "Application Support" / "rec" / "phone-identity";
+#endif
+    return {};
+}
+
+// The kept identity, unless it is missing, damaged or expires within kRenewBefore.
+std::optional<Identity> load_identity(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    const std::string data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::size_t key_at = kIdentityMagic.size() + 8, certificate_at = key_at + 97;
+    if (data.size() <= certificate_at || data.compare(0, kIdentityMagic.size(), kIdentityMagic) != 0) return std::nullopt;
+    std::int64_t expires = 0;
+    for (std::size_t i = kIdentityMagic.size(); i < key_at; ++i) expires = expires << 8 | static_cast<std::uint8_t>(data[i]);
+    if (expires - kRenewBefore < static_cast<std::int64_t>(std::time(nullptr))) return std::nullopt;
+    Identity kept;
+    Bytes key(data.begin() + key_at, data.begin() + certificate_at);
+    kept.key = crypto::P256::import_private(key);
+    std::fill(key.begin(), key.end(), std::uint8_t{0});
+    kept.certificate.assign(data.begin() + certificate_at, data.end());
+    if (!kept.key) return std::nullopt;
+    return kept;
+}
+
+// Saves made unless another process saved one first; false if made was not saved.
+bool save_identity(const std::filesystem::path& path, const Identity& made, std::int64_t expires) {
+    Bytes key = made.key->private_key();
+    if (key.empty()) return false;
+    std::string data(kIdentityMagic);
+    for (int shift = 56; shift >= 0; shift -= 8) data.push_back(static_cast<char>(expires >> shift));
+    data.append(key.begin(), key.end());
+    data.append(made.certificate.begin(), made.certificate.end());
+    std::fill(key.begin(), key.end(), std::uint8_t{0});
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    std::uint8_t suffix[8];
+    crypto::random(suffix, sizeof suffix);
+    auto temporary = path;
+    temporary += ".";
+    for (const auto byte : suffix) {
+        char digits[3];
+        std::snprintf(digits, sizeof digits, "%02x", byte);
+        temporary += digits;
+    }
+    // Only its owner reads the private key: made empty and restricted before it is written.
+    std::ofstream(temporary, std::ios::binary).close();
+    std::filesystem::permissions(temporary, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                 std::filesystem::perm_options::replace, error);
+    bool written = !error;
+    if (written) {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        out.write(data.data(), static_cast<std::streamsize>(data.size()));
+        written = static_cast<bool>(out);
+    }
+    std::fill(data.begin(), data.end(), '\0');
+    // A link fails when the file exists, so of two processes starting at once only one saves.
+    if (written) std::filesystem::create_hard_link(temporary, path, error);
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    return written && !error;
+}
+
+const Identity* identity() {
+    static const Identity id = [] {
+        const auto path = identity_path();
+        if (!path.empty()) {
+            if (auto kept = load_identity(path)) return std::move(*kept);
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+        }
+        Identity made;
+        made.key = crypto::P256::generate(crypto::P256::Use::sign);
+        if (made.key) made.certificate = self_signed_certificate(*made.key, kIdentityDays);
+        if (!path.empty() && made.key && !made.certificate.empty()) {
+            const auto expires = static_cast<std::int64_t>(std::time(nullptr)) + std::int64_t{kIdentityDays} * 86400;
+            if (!save_identity(path, made, expires))
+                if (auto kept = load_identity(path)) return std::move(*kept);
+        }
+        return made;
+    }();
+    return id.key && !id.certificate.empty() ? &id : nullptr;
+}
+
+} // namespace
+
+struct PhoneCamera::Server {    std::unique_ptr<TcpListener> listener;
     std::thread thread;
     std::atomic_bool stop{false};
     std::mutex mutex;
@@ -378,21 +487,6 @@ struct PhoneCamera::Server {
     ~Server() {
         stop.store(true);
         if (thread.joinable()) thread.join();
-    }
-
-    // One self-signed identity per process, so a phone confirms the certificate once per run.
-    struct Identity {
-        std::unique_ptr<crypto::P256> key;
-        Bytes certificate;
-    };
-    static const Identity* identity() {
-        static const Identity id = [] {
-            Identity made;
-            made.key = crypto::P256::generate(crypto::P256::Use::sign);
-            if (made.key) made.certificate = self_signed_certificate(*made.key);
-            return made;
-        }();
-        return id.key && !id.certificate.empty() ? &id : nullptr;
     }
 
     static std::shared_ptr<Server> shared(std::string& error) {

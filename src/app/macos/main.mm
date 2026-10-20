@@ -1554,7 +1554,7 @@ struct PreviewHit {
         NSTextField* help = [NSTextField wrappingLabelWithString:
             @"Use a phone on the same Wi-Fi as this Mac.\n"
             @"1. Scan the code with the phone's camera, or type the address.\n"
-            @"2. The browser warns about the certificate, since Rec makes its own: continue to the page.\n"
+            @"2. The first time, the browser warns about Rec's own certificate: continue to the page.\n"
             @"3. Allow the camera, and keep the page open. Switch camera picks the front or back one.\n"
             @"If macOS asks whether Rec may accept incoming network connections, allow it. With the firewall on, "
             @"Rec must be allowed in System Settings > Network > Firewall > Options."];
