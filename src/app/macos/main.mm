@@ -2325,7 +2325,7 @@ struct PreviewHit {
                                      self->_image, self->_imageFile, self->_chooseImage, self->_source, self->_systemAudio, self->_microphone,
                                      self->_micDevice, self->_cursor, self->_clicks, self->_resolution, self->_fps, self->_codec,
                                      self->_format, self->_stream, self->_destOn[0], self->_destService[0], self->_destServer[0],
-                                     self->_destKey[0], self->_destVertical[0], self->_destRemove[0], self->_addDestination,
+                                     self->_destKey[0], self->_destVertical[0], self->_destRemove[0], self->_destGetKey[0], self->_addDestination,
                                      self->_verticalMovie, self->_verticalLayout,
                                      self->_bitrate, self->_changeFolder, self->_openFolder, self->_showLast,
                                      self->_systemMeter, self->_micMeter, self->_systemVolume, self->_micVolume,
@@ -2514,7 +2514,72 @@ struct PreviewHit {
         delete_key(server2);
         if (stored != "appkey" || stored2 != "appkey2") fail(@"the stream keys were not stored in the keychain");
         note(@"keychain=ok");
-        set_check(_stream, false);
+        // Get Key on a TikTok row fills its server and key from what is copied; a new server
+        // takes the key with it and the old one is forgotten. The copied text is put back after.
+        {
+            NSPasteboard* board = NSPasteboard.generalPasteboard;
+            NSString* const kept = [&] {
+                __block NSString* text;
+                ui(^{ text = [board stringForType:NSPasteboardTypeString]; });
+                return text;
+            }();
+            const auto copy = [&](NSString* text) {
+                ui(^{
+                    [board clearContents];
+                    if (text) [board setString:text forType:NSPasteboardTypeString];
+                });
+            };
+            const auto until = [&](auto done, NSString* why) {
+                for (int i = 0; i < 100; ++i) {
+                    if (done()) return;
+                    usleep(100000);
+                }
+                copy(kept);
+                fail(why);
+            };
+            const std::string tiktokA = "rtmp://127.0.0.1:1935/tiktok-a", tiktokB = "rtmp://127.0.0.1:1935/tiktok-b";
+            delete_key(tiktokA);
+            delete_key(tiktokB);
+            press(_addDestination);
+            ui(^{
+                [self->_destService[2] selectItemAtIndex:choice_index(kServices, "tiktok")];
+                [self->_destService[2] sendAction:self->_destService[2].action to:self->_destService[2].target];
+            });
+            const auto getKey = [&] {
+                __block BOOL shown = NO;
+                ui(^{ shown = !self->_destGetKey[2].hidden; });
+                if (!shown) fail(@"getkey: TikTok has no Get Key button");
+                press(_destGetKey[2]);
+                until([&] { return [detail() hasPrefix:@"Copy the server URL"]; },
+                      [@"getkey: Get Key did not ask for the server and key: " stringByAppendingString:detail()]);
+            };
+            getKey();
+            copy(ns(tiktokA));
+            until([&] {
+                __block NSString* shown;
+                ui(^{ shown = self->_destServer[2].stringValue; });
+                return [shown isEqualToString:ns(tiktokA)];
+            }, @"getkey: the copied TikTok server was not filled in");
+            copy(@"tiktokkey-a");
+            until([&] { return load_key(tiktokA) == "tiktokkey-a"; }, @"getkey: the copied TikTok key was not kept");
+            // The next LIVE: a new server and key.
+            getKey();
+            copy(ns(tiktokB));
+            until([&] { return load_key(tiktokB) == "tiktokkey-a" && load_key(tiktokA).empty(); },
+                  @"getkey: the TikTok key did not move to the new server");
+            copy(@"tiktokkey-b");
+            until([&] { return [detail() containsString:@"server and stream key filled in"]; },
+                  [@"getkey: no note that both were filled in: " stringByAppendingString:detail()]);
+            const bool storedB = load_key(tiktokB) == "tiktokkey-b";
+            copy(kept);
+            if (!storedB) fail(@"getkey: the second TikTok key was not kept");
+            press(_destRemove[2]);
+            __block std::size_t left = 0;
+            ui(^{ left = self->_settings.destinations.size(); });
+            delete_key(tiktokB);
+            if (left != 2) fail(@"getkey: Remove did not remove the TikTok destination");
+            note(@"getkey=ok");
+        }        set_check(_stream, false);
     }
 
     // 4. Closing the window keeps recording; the menu bar item's menu stops it.

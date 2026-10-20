@@ -7,7 +7,8 @@
 #   2. record with system audio and microphone, pause, resume, stop: the movie keeps sync;
 #   3. start and stop through the Shift-Command-R hotkey handler;
 #   4. Go Live to two paths of a local MediaMTX server: both copies decode, the keys are in the
-#      keychain; the second gets the vertical video (1080x1920), which is also saved;
+#      keychain; the second gets the vertical video (1080x1920), which is also saved; Get Key on
+#      a TikTok row fills its server and key from the pasteboard, and a new server takes the key;
 #   5. closing the window keeps recording, and the menu bar item's menu stops it;
 #   6. with the replay buffer on, Save Replay writes the last seconds while recording goes on;
 #   7. a camera and an image are drawn, and the scene moves the camera while recording; the
@@ -107,6 +108,7 @@ run_app "$report" "$artifacts/app.log"
 grep -qx 'accessibility=ok' "$report"
 grep '^margins=' "$report"
 grep -qx 'keychain=ok' "$report"
+grep -qx 'getkey=ok' "$report"
 grep -qx 'quit=started' "$report"
 grep -qx 'idle-preview=ok' "$report"
 grep -qx 'preview=ok' "$report"
