@@ -368,7 +368,7 @@ struct PreviewHit {
     NSGridRow* _phoneCodeRow;  // Shown only with the phone camera chosen.
     NSWindow* _phoneWindow;
     QRView* _phoneQR;
-    NSTextField *_phoneAddress, *_phoneStatus;
+    NSTextField *_phoneHelp, *_phoneAddress, *_phoneStatus, *_phoneLocal;
     NSButton* _phoneClose;
     NSTimer* _phoneTimer;
     std::uint64_t _phoneFrames;
@@ -1551,15 +1551,9 @@ struct PreviewHit {
         _phoneWindow.title = @"Phone camera";
         _phoneWindow.releasedWhenClosed = NO;
         _phoneQR = [[QRView alloc] init];
-        NSTextField* help = [NSTextField wrappingLabelWithString:
-            @"Use a phone on the same Wi-Fi as this Mac.\n"
-            @"1. Scan the code with the phone's camera, or type the address.\n"
-            @"2. The first time, the browser warns about Rec's own certificate: continue to the page.\n"
-            @"3. Allow the camera, and keep the page open. Switch camera picks the front or back one.\n"
-            @"If macOS asks whether Rec may accept incoming network connections, allow it. With the firewall on, "
-            @"Rec must be allowed in System Settings > Network > Firewall > Options."];
-        help.accessibilityLabel = @"How to connect a phone";
-        help.preferredMaxLayoutWidth = 368;
+        _phoneHelp = [NSTextField wrappingLabelWithString:@""];
+        _phoneHelp.accessibilityLabel = @"How to connect a phone";
+        _phoneHelp.preferredMaxLayoutWidth = 368;
         _phoneAddress = [NSTextField textFieldWithString:@""];
         _phoneAddress.editable = NO;
         _phoneAddress.selectable = YES;
@@ -1567,19 +1561,24 @@ struct PreviewHit {
         _phoneStatus = [NSTextField wrappingLabelWithString:@""];
         _phoneStatus.accessibilityLabel = @"Phone camera status";
         _phoneStatus.preferredMaxLayoutWidth = 368;
+        _phoneLocal = [NSTextField wrappingLabelWithString:@""];
+        _phoneLocal.accessibilityLabel = @"Phone camera address without internet";
+        _phoneLocal.preferredMaxLayoutWidth = 368;
+        _phoneLocal.selectable = YES;
+        _phoneLocal.textColor = NSColor.secondaryLabelColor;
         _phoneClose = [self button:@"Close" action:@selector(performClose:)];
         _phoneClose.target = _phoneWindow;
         _phoneClose.keyEquivalent = @"\r";
         NSStackView* buttons = [[NSStackView alloc] init];
         [buttons addView:_phoneClose inGravity:NSStackViewGravityTrailing];
-        NSStackView* stack = [NSStackView stackViewWithViews:@[_phoneQR, help, _phoneAddress, _phoneStatus, buttons]];
+        NSStackView* stack = [NSStackView stackViewWithViews:@[_phoneQR, _phoneHelp, _phoneAddress, _phoneStatus, _phoneLocal, buttons]];
         stack.orientation = NSUserInterfaceLayoutOrientationVertical;
         stack.alignment = NSLayoutAttributeCenterX;
         stack.spacing = 10;
         stack.edgeInsets = NSEdgeInsetsMake(16, 16, 16, 16);
         [_phoneQR.widthAnchor constraintEqualToConstant:240].active = YES;
         [_phoneQR.heightAnchor constraintEqualToConstant:240].active = YES;
-        for (NSView* view in @[help, _phoneAddress, _phoneStatus, buttons]) [view.widthAnchor constraintEqualToConstant:368].active = YES;
+        for (NSView* view in @[_phoneHelp, _phoneAddress, _phoneStatus, _phoneLocal, buttons]) [view.widthAnchor constraintEqualToConstant:368].active = YES;
         stack.translatesAutoresizingMaskIntoConstraints = NO;
         NSView* content = _phoneWindow.contentView;
         [content addSubview:stack];
@@ -1589,13 +1588,34 @@ struct PreviewHit {
             [stack.topAnchor constraintEqualToAnchor:content.topAnchor],
             [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
         ]];
-        [_phoneWindow setContentSize:stack.fittingSize];
-        [_phoneWindow center];
     }
     const std::string url = rec::core::PhoneCamera::url(_settings.phone_token);
+    const bool relayed = !rec::core::PhoneCamera::relay().empty();
+    const std::string local = relayed ? rec::core::PhoneCamera::local_url(_settings.phone_token) : std::string();
     [_phoneQR show:rec::core::qr_code(url)];
     _phoneAddress.stringValue = url.empty() ? @"No network" : ns(url);
+    NSString* firewall = @"If macOS asks whether Rec may accept incoming network connections, allow it. With the firewall on, "
+                         @"Rec must be allowed in System Settings > Network > Firewall > Options.";
+    _phoneHelp.stringValue =
+        relayed ? [@"Use a phone on the same Wi-Fi as this Mac.\n"
+                   @"1. Scan the code with the phone's camera, or type the address.\n"
+                   @"2. Allow the camera, and keep the page open. Switch camera picks the front or back one.\n"
+                   @"The page comes from Rec's website; the video goes straight from the phone to this Mac. "
+                   stringByAppendingString:firewall]
+                : [@"Use a phone on the same Wi-Fi as this Mac.\n"
+                   @"1. Scan the code with the phone's camera, or type the address.\n"
+                   @"2. The first time, the browser warns about Rec's own certificate: continue to the page.\n"
+                   @"3. Allow the camera, and keep the page open. Switch camera picks the front or back one.\n"
+                   stringByAppendingString:firewall];
+    _phoneLocal.stringValue = local.empty() ? @""
+                                            : [NSString stringWithFormat:@"Without internet: open %@ and continue past the browser's "
+                                                                         @"warning about Rec's own certificate.", ns(local)];
+    _phoneLocal.hidden = local.empty();
     [self showPhoneStatus:nil];
+    if (!_phoneWindow.visible) {
+        [_phoneWindow setContentSize:_phoneWindow.contentView.fittingSize];
+        [_phoneWindow center];
+    }
     [_phoneWindow makeKeyAndOrderFront:nil];
     if (!_phoneTimer) {
         _phoneTimer = [NSTimer timerWithTimeInterval:0.5 target:self selector:@selector(showPhoneStatus:) userInfo:nil repeats:YES];
@@ -3067,13 +3087,32 @@ struct PreviewHit {
         }, 5);
         if (!opened) fail(@"the phone code window did not open");
         // The address carries the token, so it is checked here and never written to the report.
-        if (![[NSPredicate predicateWithFormat:@"SELF MATCHES %@", @"https://[0-9.]+:47110/#[A-Za-z0-9]{22}"] evaluateWithObject:address])
-            fail(@"the phone address is not https://IP:47110/#TOKEN");
+        // With a relay (app-e2e.sh runs one) the address is on it, and the window also shows
+        // rec's own page for use without internet.
+        const auto matches = [](NSString* text, NSString* pattern) {
+            return text && [[NSPredicate predicateWithFormat:@"SELF MATCHES %@", pattern] evaluateWithObject:text];
+        };
+        NSString* localPattern = @"https://[0-9.]+:47110/#[A-Za-z0-9]{22}";
+        const std::string relay = rec::core::PhoneCamera::relay();
+        if (relay.empty() ? !matches(address, localPattern)
+                          : !matches(address, [[NSRegularExpression escapedPatternForString:ns(relay)] stringByAppendingString:@"/#[A-Za-z0-9]{22}"]))
+            fail(relay.empty() ? @"the phone address is not https://IP:47110/#TOKEN" : @"the phone address is not RELAY/#TOKEN");
+        __block NSString* localLine;
+        __block BOOL localShown = NO;
+        ui(^{
+            localLine = self->_phoneLocal.stringValue;
+            localShown = !self->_phoneLocal.hidden;
+        });
+        if (!relay.empty() &&
+            (!localShown || !matches(localLine, [NSString stringWithFormat:@"Without internet: open %@ and continue past the browser's "
+                                                                            @"warning about Rec's own certificate\\.", localPattern])))
+            fail(@"the phone window does not show rec's own address for use without internet");
+        if (relay.empty() && localShown) fail(@"the phone window shows an address without internet while the relay is off");
         __block NSString* unnamedPhone = nil;
         __block BOOL codeButton = NO;
         ui(^{
             codeButton = !self->_phoneCodeRow.hidden && self->_phoneCode.accessibilityTitle.length;
-            for (NSView* view in @[self->_phoneQR, self->_phoneAddress, self->_phoneStatus])
+            for (NSView* view in @[self->_phoneQR, self->_phoneHelp, self->_phoneAddress, self->_phoneStatus, self->_phoneLocal])
                 if (!view.accessibilityLabel.length) unnamedPhone = view.className;
             if (!self->_phoneClose.title.length) unnamedPhone = @"Close";
         });

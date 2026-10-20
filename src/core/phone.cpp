@@ -603,7 +603,8 @@ std::string PhoneCamera::url(const std::string& token) {
     return address.empty() ? local_url(token) : address + "/#" + token;
 }
 
-std::string PhoneCamera::local_url(const std::string& token) {    // Routing toward a public address picks the interface on the home network; nothing is sent.
+std::string PhoneCamera::local_url(const std::string& token) {
+    // Routing toward a public address picks the interface on the home network; nothing is sent.
     const std::string ip = local_address_toward("8.8.8.8");
     if (ip.empty()) return {};
     return "https://" + ip + ":" + std::to_string(port()) + "/#" + token;

@@ -7,8 +7,9 @@ trap 'echo "smoke.sh: line $LINENO failed: $BASH_COMMAND" >&2' ERR
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 source "$root/scripts/mediamtx.sh"
+source "$root/scripts/relay.sh"
 tmp="$(mktemp -d)"
-trap 'stop_mediamtx; rm -rf "$tmp"' EXIT
+trap 'stop_mediamtx; stop_relay; rm -rf "$tmp"' EXIT
 artifacts="${REC_E2E_ARTIFACT_DIR:-$tmp}"
 mkdir -p "$artifacts"
 
@@ -146,44 +147,75 @@ else
   grep -q 'Camera frames 30' "$artifacts/camera-lost.record.log"
   "$rec" probe "$artifacts/camera-lost.mov" | tee "$artifacts/camera-lost.probe"
   grep -qx 'frames=90' "$artifacts/camera-lost.probe"
-  # A phone camera: a headless browser with a synthetic camera opens the page rec serves and
+  # A phone camera: a headless browser with a synthetic camera opens the camera page and
   # sends its green picture over WebRTC; rec decodes the H.264 into the camera's area. The
-  # page is opened on this computer's network address, as a phone would (browsers do not
-  # pair their candidates with a loopback one). scripts/phone.py runs the browser.
+  # page comes from the relay (support/phone-relay, run here with scripts/relay.sh), which
+  # passes the offer and answer on, or without a relay from rec itself. The video goes to this
+  # computer's network address, as from a phone (browsers do not pair their candidates with a
+  # loopback one). scripts/phone.py runs the browser.
   if ! browser="$(python3 "$root/scripts/phone.py" --find 2>&1)"; then
     echo "phone camera: not checked, $browser"
   else
-    token="$(python3 -c 'import secrets, string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(22)))')"
     address="$(python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 53)); print(s.getsockname()[0])')"
-    # A cold browser on a CI runner can take many seconds to connect, so the recording runs
-    # until 10 s after the page is live; SIGTERM stops and saves it.
-    "$rec" record --test-pattern -r 1080p -f 30 -t 120 --camera "phone:$token" -o "$artifacts/phone.mp4" \
-      </dev/null >"$tmp/phone.record.log" 2>&1 &
-    phone_rec=$!
-    python3 "$root/scripts/phone.py" "https://$address:47110/#$token" >"$artifacts/phone.page.log" 2>&1 &
-    phone=$!
-    phone_started=$SECONDS
-    for _ in $(seq 180); do
-      grep -qx 'status=Live in Rec' "$artifacts/phone.page.log" && break
-      sleep 0.25
-    done
-    echo "phone page: $(tail -1 "$artifacts/phone.page.log") after $((SECONDS - phone_started)) s"
-    grep -qx 'status=Live in Rec' "$artifacts/phone.page.log" && sleep 10
-    kill -TERM "$phone_rec" 2>/dev/null || true
-    phone_code=0
-    wait "$phone_rec" || phone_code=$?
-    kill "$phone" 2>/dev/null || true
-    wait "$phone" || true
-    sed "s/$token/TOKEN/g" "$tmp/phone.record.log" | tee "$artifacts/phone.record.log"
-    [[ "$phone_code" == 0 ]] || { echo 'the phone camera recording failed' >&2; exit 1; }
-    grep -qx 'status=Live in Rec' "$artifacts/phone.page.log" || { cat "$artifacts/phone.page.log" >&2; echo 'the phone page never went live' >&2; exit 1; }
-    grep -q "Phone camera: on a phone on this network, open https://$address:47110/#TOKEN" "$artifacts/phone.record.log"
-    within "$(awk '/^Camera frames/ { print $3 }' "$artifacts/phone.record.log")" 90 100000
-    "$rec" probe "$artifacts/phone.mp4" --sample 1420,940,120,80 | tee "$artifacts/phone-camera.probe"
-    last="$(awk -F= '/^sample_[0-9]+=/ { n = substr($1, 8) + 0; if (n > m) m = n } END { print m }' "$artifacts/phone-camera.probe")"
-    for second in $((last - 3)) $((last - 2)) $((last - 1)); do color "sample_$second" "$artifacts/phone-camera.probe" green; done
-  fi
-  # Overlays: a camera and an image composited into every frame on the GPU; "hide 1" removes
+    # test_phone NAME [RELAY]: records the phone camera through RELAY, or rec's own page without one.
+    test_phone() {
+      local name="$1" relay="${2:-}" token page local_page started code=0 forged
+      token="$(python3 -c 'import secrets, string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(22)))')"
+      export REC_PHONE_RELAY="${relay:-off}"
+      local_page="https://$address:47110/#"
+      page="${relay:+$relay/#}"
+      page="${page:-$local_page}"
+      # A cold browser on a CI runner can take many seconds to connect, so the recording runs
+      # until 10 s after the page is live; SIGTERM stops and saves it.
+      "$rec" record --test-pattern -r 1080p -f 30 -t 120 --camera "phone:$token" -o "$artifacts/$name.mp4" \
+        </dev/null >"$tmp/$name.record.log" 2>&1 &
+      local recording=$!
+      python3 "$root/scripts/phone.py" "$page$token" >"$artifacts/$name.page.log" 2>&1 &
+      local phone=$!
+      started=$SECONDS
+      for _ in $(seq 180); do
+        grep -qx 'status=Live in Rec' "$artifacts/$name.page.log" && break
+        sleep 0.25
+      done
+      echo "$name page: $(tail -1 "$artifacts/$name.page.log") after $((SECONDS - started)) s"
+      if grep -qx 'status=Live in Rec' "$artifacts/$name.page.log"; then
+        if [[ -n "$relay" ]]; then
+          forged="$(forged_offer "$relay" "$token")"
+          echo "$name forged offer: $forged"
+          [[ "$forged" == 'This link is old. Scan the code in Rec again. [403]' ]] \
+            || { kill -TERM "$recording" "$phone" 2>/dev/null; echo "rec did not refuse a forged offer: $forged" >&2; exit 1; }
+        fi
+        sleep 10
+      fi
+      kill -TERM "$recording" 2>/dev/null || true
+      wait "$recording" || code=$?
+      kill "$phone" 2>/dev/null || true
+      wait "$phone" || true
+      sed "s/$token/TOKEN/g" "$tmp/$name.record.log" | tee "$artifacts/$name.record.log"
+      [[ "$code" == 0 ]] || { echo "the $name recording failed" >&2; exit 1; }
+      grep -qx 'status=Live in Rec' "$artifacts/$name.page.log" || { cat "$artifacts/$name.page.log" >&2; echo "the $name page never went live" >&2; exit 1; }
+      grep -qF "Phone camera: on a phone on this network, open ${page}TOKEN" "$artifacts/$name.record.log"
+      if [[ -n "$relay" ]]; then
+        grep -qF "Without internet, open ${local_page}TOKEN and confirm the certificate warning once" "$artifacts/$name.record.log"
+      elif grep -q 'Without internet' "$artifacts/$name.record.log"; then
+        echo 'rec offered a relay that is off' >&2; exit 1
+      fi
+      within "$(awk '/^Camera frames/ { print $3 }' "$artifacts/$name.record.log")" 90 100000
+      "$rec" probe "$artifacts/$name.mp4" --sample 1420,940,120,80 | tee "$artifacts/$name-camera.probe"
+      local last second
+      last="$(awk -F= '/^sample_[0-9]+=/ { n = substr($1, 8) + 0; if (n > m) m = n } END { print m }' "$artifacts/$name-camera.probe")"
+      for second in $((last - 3)) $((last - 2)) $((last - 1)); do color "sample_$second" "$artifacts/$name-camera.probe" green; done
+    }
+    test_phone phone
+    if ! command -v npx >/dev/null; then
+      # The app E2E then uses rec's own page too.
+      echo 'phone camera through the relay: not checked, it needs npx (Node.js)'
+    else
+      start_relay "$root/support/phone-relay" "$artifacts/relay.log"
+      # The relay stays set for the rest, so the app's phone camera uses it too.
+      test_phone phone-relay "$relay_url"
+    fi
+  fi  # Overlays: a camera and an image composited into every frame on the GPU; "hide 1" removes
   # the camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
   png="$root/scripts/overlay-test.png"
   expect_failure 'could not open the image' record --test-pattern -t 1 --image "$artifacts/missing.png" -o "$artifacts/missing.mov"
@@ -303,7 +335,8 @@ else
     # Over the white flash: half yellow, then the pattern once the mark has faded.
     color sample_2 "$artifacts/clicks.probe" yellow
     color sample_5 "$artifacts/clicks.probe" white
-  fi  # Volume and mute act on the program audio. A lone tone, its only track, starts muted and is
+  fi
+  # Volume and mute act on the program audio. A lone tone, its only track, starts muted and is
   # unmuted 3.5 s in: no beep with the first flash. Mixed with the mic, the tone is turned down
   # 6 dB, then muted 2.5 s in: the mix has no beeps after that.
   { sleep 3.5; echo 'unmute system'; sleep 5; } |
@@ -549,7 +582,7 @@ else
   # Engine: `rec start` launches the background engine, which keeps recording after each
   # client exits; other clients pause, change and stop it. A short recording ends by itself.
   export REC_ENGINE_SOCKET="$tmp/engine.sock"
-  trap '"$rec" shutdown >/dev/null 2>&1 || true; cp "$tmp/engine.log" "$artifacts/engine.log" 2>/dev/null || true; stop_mediamtx; rm -rf "$tmp"' EXIT
+  trap '"$rec" shutdown >/dev/null 2>&1 || true; cp "$tmp/engine.log" "$artifacts/engine.log" 2>/dev/null || true; stop_mediamtx; stop_relay; rm -rf "$tmp"' EXIT
   engine() {
     echo "> rec $*" >>"$artifacts/engine.client.log"
     "$rec" "$@" 2>&1 | tee -a "$artifacts/engine.client.log"

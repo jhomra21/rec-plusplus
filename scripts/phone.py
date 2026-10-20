@@ -2,8 +2,9 @@
 """A stand-in phone for the phone camera E2E on macOS.
 
 A headless Chromium-family browser with a synthetic camera (green, with a moving circle)
-opens rec's page and sends its picture over WebRTC, as a phone would, accepting only the
-certificate key the page has when it starts. This prints
+opens the camera page and sends its picture over WebRTC, as a phone would. On rec's own page
+(https://IP:port) it accepts only the certificate key the page has when it starts; a relay's
+page has a real certificate, or is plain http: on this computer. This prints
 "status=TEXT" each time the page's status line changes, read through the DevTools protocol,
 until it is stopped with SIGTERM or SIGINT, or its parent process ends; then it closes the
 browser and removes its profile. Exits 3 when no browser is found; REC_E2E_BROWSER names
@@ -16,6 +17,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -49,10 +51,10 @@ def free_port():
 
 
 def evaluate(port, expression):
-    """The value of expression in the page rec serves, or None before it has loaded."""
+    """The value of expression in the camera page, or None before it has loaded."""
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2) as response:
         targets = json.load(response)
-    page = next((t for t in targets if t.get("type") == "page" and t.get("url", "").startswith("https:")), None)
+    page = next((t for t in targets if t.get("type") == "page" and t.get("url", "").startswith(("https:", "http:"))), None)
     if not page:
         return None
     address, path = page["webSocketDebuggerUrl"][len("ws://"):].split("/", 1)
@@ -132,12 +134,14 @@ def main():
         print(os.path.basename(browser))
         return 0
     parent = os.getppid()
-    pin = key_pin(sys.argv[1])
+    # Rec's own page needs its key pinned; a relay's page has a real certificate, or none.
+    own_page = re.match(r"https://[0-9.]+:", sys.argv[1])
+    pin = [f"--ignore-certificate-errors-spki-list={key_pin(sys.argv[1])}"] if own_page else []
     port = free_port()
     profile = tempfile.mkdtemp(prefix="rec-phone-")
     process = subprocess.Popen(
         [browser, "--headless=new", "--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream",
-         f"--ignore-certificate-errors-spki-list={pin}", "--incognito", "--no-first-run", "--no-default-browser-check",
+         *pin, "--incognito", "--no-first-run", "--no-default-browser-check",
          "--use-mock-keychain", "--disable-sync", f"--remote-debugging-port={port}", f"--user-data-dir={profile}",
          sys.argv[1]],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

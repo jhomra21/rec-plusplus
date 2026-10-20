@@ -17,8 +17,8 @@
 #      the camera's shape, border and shadow show before Start and change while recording;
 #      a new scene places the screen by dragging and hides the camera, and is switched away
 #      from while recording; a phone camera (a headless browser with a synthetic camera, run
-#      by scripts/phone.py) opens the address in the phone code window, shows in the preview,
-#      and stays in a recording started from there;
+#      by scripts/phone.py) opens the address in the phone code window (the relay's page),
+#      shows in the preview, and stays in a recording started from there;
 #   8. volume and mute change the mix while recording, from the window and the menu bar item;
 #   9. quitting during a recording saves the movie; settings persist without the stream key;
 #  10. with Keep Recording After Quit, the background engine records on after quitting; the
@@ -31,6 +31,7 @@ app="$2"
 artifacts="$3"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 source "$root/scripts/mediamtx.sh"
+source "$root/scripts/relay.sh"
 home="$artifacts/app-home"
 report="$artifacts/self-test.txt"
 rm -rf "$home" "$report"
@@ -73,11 +74,22 @@ finish() {
   cp "$engine_dir/engine.log" "$artifacts/app-engine.log" 2>/dev/null || true
   rm -rf "$engine_dir"
   stop_mediamtx
+  stop_relay
 }
 trap finish EXIT
 # The phone camera step needs a Chromium-family browser.
 if browser="$(python3 "$root/scripts/phone.py" --find 2>&1)"; then
   export REC_APP_SELF_TEST_PHONE="$root/scripts/phone.py"
+  # The phone camera's page comes from the relay: smoke.sh runs one, or this runs its own.
+  if [[ -z "${REC_PHONE_RELAY:-}" ]]; then
+    if command -v npx >/dev/null; then
+      start_relay "$root/support/phone-relay" "$artifacts/app-relay.log"
+      export REC_PHONE_RELAY="$relay_url"
+    else
+      echo '6p. phone camera through the relay: not checked, it needs npx (Node.js); using rec'"'"'s own page'
+      export REC_PHONE_RELAY=off
+    fi
+  fi
 else
   echo "6p. phone camera: not checked, $browser"
 fi
