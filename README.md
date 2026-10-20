@@ -92,6 +92,14 @@ Recordings are written in fragments, so a crash, kill or power loss keeps everyt
 ./build/rec record --camera default@0.7,0.6,0.28,0.35 --camera-style circle,border=6,shadow -t 0 -o talk.mov
 ```
 
+#### A phone as a camera
+
+`--camera phone` uses a phone (or any device with a browser) on the same network. rec prints an address and a QR code; open it on the phone, continue past the certificate warning (rec makes its own certificate each run), and allow the camera. The page sends the back camera (Switch camera picks the front one) over WebRTC: rec serves the page over HTTPS on port 47110 (`REC_PHONE_PORT` changes it), answers the page's offer as an ICE-lite, DTLS-client peer, takes H.264, asks again for lost packets and for keyframes, and decodes the picture with Media Foundation. The address holds a random token, so only someone who saw it can send. In the Windows app, choose Phone over Wi-Fi as the camera: Show Phone Code shows the QR code, the address and whether the picture is arriving. The app keeps its token, so a phone's open page reconnects by itself when the preview or a recording opens the camera. Windows asks once to let rec through the firewall; allow private networks. The phone camera is not yet on macOS.
+
+```sh
+./build/rec record --camera phone -t 0 -o talk.mp4
+```
+
 While recording, keys `1` to `9`, or `show N|screen` and `hide N|screen` on stdin, show and hide each layer, `move N|screen X,Y,W,H` moves one, and `style N SPEC` restyles a camera. `rec probe FILE --sample X,Y,WIDTH,HEIGHT` prints the mean colour of a pixel rectangle at the start of each second (`sample_0=R,G,B`), which the smoke scripts use to check where overlays landed. On macOS the first use asks for camera access.
 
 `--clicks` marks mouse presses on the recorded screen: a circle at the pointer, yellow for the left button and blue for the right, which grows in over 0.1 s, stays while the button is held and fades out over 0.35 s after release. It is drawn into the screen's picture before the other layers, so it follows `--screen-area`, and a press outside the recorded display, region or window shows nothing. On Windows a low-level mouse hook on its own thread records presses; on macOS the compositor reads the system's mouse-down counters each frame, so a press shorter than a frame still shows and no extra permission is needed.
@@ -274,6 +282,7 @@ The live mean moved from about −12 ms on the first day to about −24 ms the n
 
 - One display, window or region is captured at a time; cameras and images are the only other sources.
 - Camera overlays have been checked only with the synthetic camera, not a real one.
+- The phone camera has been checked with a browser's synthetic camera on the same computer, not yet with a real phone, and only on Windows.
 - Pausing a live recording on macOS cuts audio per capture buffer (about 10–20 ms), so a sound that spans the pause can leave up to one buffer at the cut. Windows cuts at the exact sample. Neither has been tested with a sound playing at the pause instant.
 - Windows HEVC recordings are not crash-safe (see above).
 - Streaming to Twitch works over RTMPS and RTMP from Windows and over RTMPS from macOS, including the Mac app (bandwidth-test mode; evidence for [Windows](docs/evidence/2026-10-18-twitch/README.md) and [macOS](docs/evidence/2026-10-18-twitch-mac/README.md)). Streaming to YouTube works over RTMPS from the CLI on Windows and macOS at about 6 Mb/s, and from both apps' YouTube preset; YouTube rated the Windows app's stream "excellent" ([evidence](docs/evidence/2026-10-19-youtube/README.md)). 4K and slow networks have not been tested. Reconnecting has been tested against a local server restart on both and a 5 s Wi-Fi drop on macOS, which cost about 8 s of stream. The app's Twitch and YouTube destinations use RTMPS (`rtmps://live.twitch.tv:443/app`, `rtmps://a.rtmps.youtube.com:443/live2`).

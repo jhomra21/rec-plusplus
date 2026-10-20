@@ -20,6 +20,8 @@
 
 #include "app/session.hpp"
 #include "cli/engine.hpp"
+#include "core/phone.hpp"
+#include "core/qr.hpp"
 #include "core/shape.hpp"
 
 #include <algorithm>
@@ -58,7 +60,7 @@ enum Control : int {
     kReplayHeader, kReplay, kReplayLength,
     kCameraHeader, kCamera, kCameraDevice, kPositionLabel, kCorner, kSizeLabel, kCameraSize, kSceneLabel, kScene,
     kShapeLabel, kShape, kRoundnessLabel, kRoundness, kBorderLabel, kBorder, kShadow,
-    kImage, kImageFile, kBrowseImage,
+    kImage, kImageFile, kBrowseImage, kPhoneCode,
     kFolderHeader, kFolder, kChangeFolder, kOpenFolder, kShowLast, kPreview, kShowPreview,
     kScenesHeader, kNewScene, kDeleteScene, kSceneNameLabel, kSceneName, kSourcesLabel, kSceneSources, kSourceShown,
     kAddDisplay, kAddWindow, kRemoveSource,
@@ -374,6 +376,7 @@ public:
             for (auto& camera : rec::list_cameras(error)) cameras_.push_back(std::move(camera));
         }).join();
         if (test_pattern_) cameras_.push_back({"test", "Test camera"});
+        cameras_.push_back({rec::app::phone_camera_id(settings_), "Phone over Wi-Fi"});
         if (std::none_of(cameras_.begin(), cameras_.end(), [this](const rec::Camera& c) { return c.id == settings_.camera_device; }))
             cameras_.push_back({settings_.camera_device, settings_.camera_device + " (not connected)"});
 
@@ -405,6 +408,7 @@ public:
         refresh();
         MSG message;
         while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+            if (phone_window_ && IsDialogMessageW(phone_window_, &message)) continue;
             if (IsDialogMessageW(window_, &message)) continue;
             TranslateMessage(&message);
             DispatchMessageW(&message);
@@ -865,6 +869,7 @@ private:
         label(kBorderLabel, L"Border");
         HWND border = combo(kBorder);
         check(kShadow, L"Drop shadow");
+        button(kPhoneCode, L"Show Phone Code...");
         check(kImage, L"Image overla&y");
         label(kImageFile, L"");
         button(kBrowseImage, L"Bro&wse...");
@@ -1082,6 +1087,12 @@ private:
         place(kCamera, x, y, box - gap, px(22));
         place(kCameraDevice, x + box, y, width - box, px(240));
         y += row + gap;
+        const bool phone = rec::app::is_phone_camera(settings_.camera_device);
+        ShowWindow(get(kPhoneCode), phone ? SW_SHOWNA : SW_HIDE);
+        if (phone) {
+            place(kPhoneCode, x + box, y, width - box, row);
+            y += row + gap;
+        }
         row_of(kPositionLabel, kCorner, true);
         row_of(kSizeLabel, kCameraSize, true);
         row_of(kShapeLabel, kShape, true);
@@ -1580,6 +1591,17 @@ private:
                 read_settings();
                 show_scene_sources();
             }
+            return;
+        case kCameraDevice:
+            if (code == CBN_SELCHANGE) {
+                read_settings();
+                layout();
+                fit();
+                if (rec::app::is_phone_camera(settings_.camera_device)) show_phone_code();
+            }
+            return;
+        case kPhoneCode:
+            if (code == BN_CLICKED) show_phone_code();
             return;
         case kMicrophone:
             if (code == BN_CLICKED) refresh();
@@ -2252,6 +2274,147 @@ private:
         }
     }
 
+    // The phone camera's code: its address as a QR code and as text, how to connect, and
+    // whether the phone's picture is arriving. Closing it hides it.
+    enum PhoneControl : int { kPhoneHelp = 101, kPhoneAddress, kPhoneStatus };
+    static constexpr UINT_PTR kPhoneTimer = 1;
+
+    void show_phone_code() {
+        static const ATOM kind = [this] {
+            WNDCLASSEXW wc{sizeof wc};
+            wc.lpfnWndProc = &App::phone_procedure;
+            wc.hInstance = instance_;
+            wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+            wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+            wc.lpszClassName = L"RecPhoneCode";
+            return RegisterClassExW(&wc);
+        }();
+        if (!kind) return;
+        phone_url_ = rec::core::PhoneCamera::url(settings_.phone_token);
+        phone_qr_ = rec::core::qr_code(phone_url_);
+        if (!phone_window_) {
+            RECT frame{0, 0, px(400), px(560)};
+            AdjustWindowRectExForDpi(&frame, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_CONTROLPARENT, dpi_);
+            phone_window_ = CreateWindowExW(WS_EX_CONTROLPARENT, L"RecPhoneCode", L"Phone camera", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
+                                            CW_USEDEFAULT, CW_USEDEFAULT, frame.right - frame.left, frame.bottom - frame.top,
+                                            window_, nullptr, instance_, this);
+            if (!phone_window_) return;
+        }
+        SetWindowTextW(GetDlgItem(phone_window_, kPhoneAddress), phone_url_.empty() ? L"No network" : wide(phone_url_).c_str());
+        update_phone_status();
+        InvalidateRect(phone_window_, nullptr, TRUE);
+        ShowWindow(phone_window_, SW_SHOW);
+        SetForegroundWindow(phone_window_);
+        SetTimer(phone_window_, kPhoneTimer, 500, nullptr);
+    }
+
+    static LRESULT CALLBACK phone_procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
+        if (message == WM_NCCREATE)
+            SetWindowLongPtrW(window, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams));
+        auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        if (!app) return DefWindowProcW(window, message, w, l);
+        switch (message) {
+        case WM_CREATE: {
+            const auto child = [&](int id, const wchar_t* type, const wchar_t* text, DWORD style, DWORD extended = 0) {
+                HWND hwnd = CreateWindowExW(extended, type, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, window,
+                                            reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), app->instance_, nullptr);
+                SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(app->font_), FALSE);
+                return hwnd;
+            };
+            child(kPhoneHelp, WC_STATICW,
+                  L"Use a phone on the same Wi-Fi as this computer.\n"
+                  L"1. Scan the code with the phone's camera, or type the address.\n"
+                  L"2. The browser warns about the certificate, since Rec makes its own: continue to the page.\n"
+                  L"3. Allow the camera, and keep the page open. Switch camera picks the front or back one.\n"
+                  L"If the phone cannot connect, allow Rec through Windows Firewall on private networks.",
+                  SS_LEFT | SS_NOPREFIX);
+            child(kPhoneAddress, WC_EDITW, L"", ES_READONLY | ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE);
+            child(kPhoneStatus, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX);
+            child(IDCANCEL, WC_BUTTONW, L"Close", BS_DEFPUSHBUTTON | WS_TABSTOP);
+            const int margin = app->px(16), width = app->px(400) - 2 * margin, code = app->px(240);
+            int y = margin + code + app->px(12);
+            const auto place = [&](int id, int height) {
+                SetWindowPos(GetDlgItem(window, id), nullptr, margin, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+                y += height + app->px(8);
+            };
+            place(kPhoneHelp, app->px(150));
+            place(kPhoneAddress, app->px(24));
+            place(kPhoneStatus, app->px(40));
+            SetWindowPos(GetDlgItem(window, IDCANCEL), nullptr, app->px(400) - margin - app->px(96), app->px(560) - margin - app->px(28),
+                         app->px(96), app->px(28), SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
+        case WM_CTLCOLORSTATIC:
+            SetBkColor(reinterpret_cast<HDC>(w), GetSysColor(COLOR_WINDOW));
+            SetTextColor(reinterpret_cast<HDC>(w), GetSysColor(COLOR_WINDOWTEXT));
+            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+        case WM_PAINT: {
+            PAINTSTRUCT paint;
+            HDC dc = BeginPaint(window, &paint);
+            app->paint_phone_code(window, dc);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        case WM_TIMER:
+            if (w == kPhoneTimer) app->update_phone_status();
+            return 0;
+        case WM_COMMAND:
+            if (LOWORD(w) == IDCANCEL) SendMessageW(window, WM_CLOSE, 0, 0);
+            return 0;
+        case WM_CLOSE:
+            KillTimer(window, kPhoneTimer);
+            ShowWindow(window, SW_HIDE);
+            return 0;
+        case WM_DESTROY:
+            app->phone_window_ = nullptr;
+            return 0;
+        default:
+            return DefWindowProcW(window, message, w, l);
+        }
+    }
+
+    // Black modules on white with the four-module quiet zone, centered at the top.
+    void paint_phone_code(HWND window, HDC dc) {
+        if (!phone_qr_.size) return;
+        RECT client;
+        GetClientRect(window, &client);
+        const int modules = phone_qr_.size + 8, scale = std::max(1, px(240) / modules), side = modules * scale;
+        const int left = (client.right - side) / 2, top = px(16) + (px(240) - side) / 2;
+        RECT all{left, top, left + side, top + side};
+        FillRect(dc, &all, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+        const auto black = static_cast<HBRUSH>(GetStockObject(BLACK_BRUSH));
+        for (int y = 0; y < phone_qr_.size; ++y)
+            for (int x = 0; x < phone_qr_.size; ++x)
+                if (phone_qr_.dark(x, y)) {
+                    RECT module{left + (x + 4) * scale, top + (y + 4) * scale, left + (x + 5) * scale, top + (y + 5) * scale};
+                    FillRect(dc, &module, black);
+                }
+    }
+
+    void update_phone_status() {
+        if (!phone_window_) return;
+        const Status s = session_.status();
+        const ULONGLONG now = GetTickCount64();
+        if (s.camera_frames != phone_frames_) {
+            phone_frames_ = s.camera_frames;
+            phone_seen_ = now;
+        }
+        const bool running = s.previewing || s.state == State::recording || s.state == State::paused;
+        const std::wstring text =
+            !settings_.camera || !rec::app::is_phone_camera(settings_.camera_device)
+                ? L"Turn on Camera, with Phone over Wi-Fi chosen, to use the phone."
+            : !running ? L"Rec connects to the phone while the preview shows or while recording."
+            : phone_frames_ && now - phone_seen_ < 2000 ? L"Connected: the phone's picture is in Rec."
+                                                        : L"Waiting for the phone...";
+        if (text_of(GetDlgItem(phone_window_, kPhoneStatus)) != text) SetWindowTextW(GetDlgItem(phone_window_, kPhoneStatus), text.c_str());
+    }
+
+    HWND phone_window_ = nullptr;
+    std::string phone_url_;
+    rec::core::Qr phone_qr_;
+    std::uint64_t phone_frames_ = 0;
+    ULONGLONG phone_seen_ = 0;
+
     HINSTANCE instance_ = nullptr;
     HWND window_ = nullptr;
     UINT dpi_ = 96;
@@ -2292,7 +2455,7 @@ private:
     std::optional<rec::Permission> missing_permission() const {
         if (checked(kMicrophone) && rec::permission_status(rec::Permission::microphone) != rec::Access::granted)
             return rec::Permission::microphone;
-        if (settings_.camera && settings_.camera_device != "test" &&
+        if (settings_.camera && settings_.camera_device != "test" && !rec::app::is_phone_camera(settings_.camera_device) &&
             rec::permission_status(rec::Permission::camera) != rec::Access::granted)
             return rec::Permission::camera;
         return std::nullopt;

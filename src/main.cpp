@@ -1,6 +1,10 @@
 #include "cli/engine.hpp"
 #include "cli/options.hpp"
 #include "rec/rec.hpp"
+#if defined(_WIN32) || defined(__APPLE__)
+#include "core/phone.hpp"
+#include "core/qr.hpp"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -248,7 +252,8 @@ void usage() {
                  "  --stream-bitrate KBPS          Stream video kilobits/second (default: 6000)\n"
                  "  --replay SECONDS               Keep the last 5 to 300 seconds in memory; s saves them as an MP4\n"
                  "  --camera DEVICE[@X,Y,W,H]      Show a camera (default, or an ID or name from devices; test for a\n"
-                 "                                 synthetic one) over the capture, by default in the bottom-right corner\n"
+                 "                                 synthetic one) over the capture, by default in the bottom-right corner;\n"
+                 "                                 phone serves a page that sends a phone's camera over the network\n"
                  "  --image FILE[@X,Y,W,H]         Show a PNG or JPEG over the capture (default: the whole frame)\n"
                  "  --camera-style SHAPE[:ROUNDNESS][,border=PIXELS[:RRGGBB]][,shadow]\n"
                  "                                 Cut the camera before it to rectangle, rounded, circle, square, pill or\n"
@@ -291,6 +296,30 @@ bool terminal() {
     return isatty(STDOUT_FILENO) != 0;
 #endif
 }
+
+#if defined(_WIN32) || defined(__APPLE__)
+// text as a QR code, two module rows per line, dark modules as blocks. On a terminal it is
+// black on white whatever the terminal's colors, since a quiet zone must be light.
+void print_qr(const std::string& text, bool colored) {
+    const auto qr = rec::core::qr_code(text);
+    if (!qr.size) return;
+    constexpr int quiet = 2;
+    const int size = qr.size + quiet * 2;
+    const auto dark = [&](int x, int y) {
+        x -= quiet;
+        y -= quiet;
+        return x >= 0 && y >= 0 && x < qr.size && y < qr.size && qr.dark(x, y);
+    };
+    for (int y = 0; y < size; y += 2) {
+        std::string line = colored ? "\x1b[30;107m" : "";
+        for (int x = 0; x < size; ++x) {
+            const bool top = dark(x, y), bottom = y + 1 < size && dark(x, y + 1);
+            line += top && bottom ? "\u2588" : top ? "\u2580" : bottom ? "\u2584" : " ";
+        }
+        std::cout << line << (colored ? "\x1b[0m\n" : "\n");
+    }
+}
+#endif
 
 // One rewritten line: elapsed time and anything that needs attention.
 void show_status(const rec::Stats& stats, double recorded, bool audio, bool streaming, const std::string& muted,
@@ -475,6 +504,15 @@ int main(int argc, char** argv) {
                                            : " (p: pause/resume, q or Ctrl-C: stop)\n");
     if (options.replay_seconds)
         std::cout << "Keeping the last " << options.replay_seconds << " s for replays at " << options.stream_kbps << " kb/s\n";
+#if defined(_WIN32) || defined(__APPLE__)
+    for (const auto& overlay : options.overlays)
+        if (overlay.kind == rec::Overlay::Kind::camera && overlay.source.rfind("phone:", 0) == 0) {
+            const auto url = rec::core::PhoneCamera::url(overlay.source.substr(6));
+            std::cout << "Phone camera: on a phone on this network, open " << (url.empty() ? "(no network)" : url)
+                      << " and confirm the certificate warning once\n";
+            if (!url.empty()) print_qr(url, live);
+        }
+#endif
     if (options.canvas2.width)
         std::cout << "Second canvas " << options.canvas2.width << 'x' << options.canvas2.height
                   << (options.canvas2.output.empty() ? std::string() : " to " + options.canvas2.output) << '\n';

@@ -1,5 +1,7 @@
 #include "core/whip.hpp"
 
+#include "core/stun.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -24,7 +26,6 @@ constexpr std::uint32_t kQueueMs = 2000;
 constexpr std::size_t kMaxQueue = 4000;
 constexpr std::size_t kMaxPayload = 1200;
 constexpr std::size_t kHistory = 1024;  // Sent video packets kept for retransmission on NACK.
-constexpr std::uint32_t kStunMagic = 0x2112A442;
 
 // --- URL and HTTP ---------------------------------------------------------------------
 
@@ -145,64 +146,10 @@ std::string http(const Url& url, const std::string& method, const std::string& p
 
 // --- STUN (RFC 8489, ICE attributes from RFC 8445) -----------------------------------
 
-std::uint32_t crc32(const std::uint8_t* data, std::size_t size) {
-    static const auto table = [] {
-        std::array<std::uint32_t, 256> t{};
-        for (std::uint32_t i = 0; i < 256; ++i) {
-            std::uint32_t c = i;
-            for (int k = 0; k < 8; ++k) c = c & 1 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-            t[i] = c;
-        }
-        return t;
-    }();
-    std::uint32_t c = 0xFFFFFFFFu;
-    for (std::size_t i = 0; i < size; ++i) c = table[(c ^ data[i]) & 0xFF] ^ (c >> 8);
-    return c ^ 0xFFFFFFFFu;
-}
-
 void put16(Bytes& b, std::uint32_t v) { b.push_back(static_cast<std::uint8_t>(v >> 8)); b.push_back(static_cast<std::uint8_t>(v)); }
 void put32(Bytes& b, std::uint32_t v) { put16(b, v >> 16); put16(b, v); }
 std::uint16_t get16(const std::uint8_t* p) { return static_cast<std::uint16_t>(p[0] << 8 | p[1]); }
 std::uint32_t get32(const std::uint8_t* p) { return static_cast<std::uint32_t>(get16(p)) << 16 | get16(p + 2); }
-
-class Stun {
-public:
-    Stun(std::uint16_t type, const std::uint8_t* txid) {
-        put16(m_, type);
-        put16(m_, 0);
-        put32(m_, kStunMagic);
-        m_.insert(m_.end(), txid, txid + 12);
-    }
-    void attribute(std::uint16_t type, const std::uint8_t* data, std::size_t size) {
-        put16(m_, type);
-        put16(m_, static_cast<std::uint32_t>(size));
-        m_.insert(m_.end(), data, data + size);
-        while (m_.size() % 4) m_.push_back(0);
-    }
-    void attribute(std::uint16_t type, const std::string& text) {
-        attribute(type, reinterpret_cast<const std::uint8_t*>(text.data()), text.size());
-    }
-    // MESSAGE-INTEGRITY then FINGERPRINT, each over the message with its length so far.
-    Bytes finish(const std::string& password) {
-        set_length(m_.size() - 20 + 24);
-        const auto mac = crypto::hmac_sha1(reinterpret_cast<const std::uint8_t*>(password.data()), password.size(),
-                                           m_.data(), m_.size());
-        attribute(0x0008, mac.data(), mac.size());
-        set_length(m_.size() - 20 + 8);
-        const std::uint32_t fingerprint = crc32(m_.data(), m_.size()) ^ 0x5354554Eu;
-        std::uint8_t value[4] = {static_cast<std::uint8_t>(fingerprint >> 24), static_cast<std::uint8_t>(fingerprint >> 16),
-                                 static_cast<std::uint8_t>(fingerprint >> 8), static_cast<std::uint8_t>(fingerprint)};
-        attribute(0x8028, value, 4);
-        return m_;
-    }
-
-private:
-    void set_length(std::size_t length) {
-        m_[2] = static_cast<std::uint8_t>(length >> 8);
-        m_[3] = static_cast<std::uint8_t>(length);
-    }
-    Bytes m_;
-};
 
 // --- SDP ------------------------------------------------------------------------------
 
@@ -372,7 +319,7 @@ struct WhipPublisher::Session {
     void consent() {
         std::uint8_t txid[12];
         crypto::random(txid, 12);
-        Stun m(0x0001, txid);
+        stun::Message m(0x0001, txid);
         m.attribute(0x0006, remote_ufrag + ":" + local_ufrag);
         m.attribute(0x802A, tiebreak.data(), 8);
         const std::uint8_t priority[4] = {0x6E, 0xFF, 0xFF, 0xFF};
@@ -519,7 +466,7 @@ std::string WhipPublisher::connect(int timeout_ms) {
                 std::uint8_t txid[12];
                 crypto::random(txid, 12);
                 checks[std::string(reinterpret_cast<char*>(txid), 12)] = i;
-                Stun m(0x0001, txid);
+                stun::Message m(0x0001, txid);
                 m.attribute(0x0006, s->remote_ufrag + ":" + s->local_ufrag);
                 m.attribute(0x802A, s->tiebreak.data(), 8);
                 const std::uint8_t priority[4] = {0x6E, 0xFF, 0xFF, 0xFF};
@@ -538,7 +485,7 @@ std::string WhipPublisher::connect(int timeout_ms) {
         Endpoint from;
         const std::size_t got = s->socket->receive(buffer, sizeof buffer, 10, from);
         if (!got) continue;
-        if (buffer[0] < 4 && got >= 20 && get32(buffer + 4) == kStunMagic) {
+        if (buffer[0] < 4 && got >= 20 && get32(buffer + 4) == stun::kMagic) {
             const auto type = get16(buffer);
             if (type == 0x0101 && !selected) {
                 const auto found = checks.find(std::string(reinterpret_cast<char*>(buffer + 8), 12));
@@ -834,17 +781,11 @@ void WhipPublisher::send_audio(Session& s, const Media& item) {
 
 void WhipPublisher::handle_datagram(Session& s, const std::uint8_t* data, std::size_t size, const Endpoint& from) {
     if (data[0] < 4) {
-        if (size < 20 || get32(data + 4) != kStunMagic) return;
+        if (size < 20 || get32(data + 4) != stun::kMagic) return;
         if (get16(data) != 0x0001) return;  // Responses only refresh consent.
         // Success response with XOR-MAPPED-ADDRESS, signed with our password.
-        Stun m(0x0101, data + 8);
-        Bytes mapped{0, static_cast<std::uint8_t>(from.v6 ? 2 : 1)};
-        put16(mapped, from.port ^ (kStunMagic >> 16));
-        std::uint8_t mask[16];
-        for (int i = 0; i < 4; ++i) mask[i] = static_cast<std::uint8_t>(kStunMagic >> (24 - 8 * i));
-        std::memcpy(mask + 4, data + 8, 12);
-        for (int i = 0; i < (from.v6 ? 16 : 4); ++i) mapped.push_back(static_cast<std::uint8_t>(from.address[i] ^ mask[i]));
-        m.attribute(0x0020, mapped.data(), mapped.size());
+        stun::Message m(stun::kBindingSuccess, data + 8);
+        m.mapped_address(from);
         const Bytes reply = m.finish(s.local_pwd);
         s.socket->send(from, reply.data(), reply.size());
         return;

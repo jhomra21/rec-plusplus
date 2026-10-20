@@ -375,3 +375,59 @@ public static class RecOutputMeter {
     }
     return [RecOutputMeter]::Peak([int]($seconds * 1000))
 }
+
+# A headless Chrome or Edge with a synthetic camera (a green picture with a moving shape) that
+# grants camera access and accepts rec's self-signed certificate: the phone in the phone
+# camera E2E. Read the page with Get-PageText; close it with Stop-Phone.
+function Start-Phone([string]$url, [int]$port = 9333) {
+    $browser = @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+                 "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+                 "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $browser) { throw 'the phone camera E2E needs Chrome or Edge' }
+    $profile = Join-Path $env:TEMP "rec-phone-$PID"
+    $process = Start-Process -FilePath $browser -PassThru -ArgumentList @('--headless=new', '--use-fake-device-for-media-stream',
+        '--use-fake-ui-for-media-stream', '--ignore-certificate-errors', '--inprivate', '--incognito', '--no-first-run',
+        '--disable-sync', "--remote-debugging-port=$port", "--user-data-dir=$profile", $url)
+    return @{ Process = $process; Port = $port; Profile = $profile }
+}
+
+function Get-PageText($phone, [string]$expression) {
+    $targets = Invoke-RestMethod "http://127.0.0.1:$($phone.Port)/json"
+    $page = $targets | Where-Object { $_.type -eq 'page' -and $_.url -like 'https:*' } | Select-Object -First 1
+    if (-not $page) { return $null }
+    $socket = New-Object System.Net.WebSockets.ClientWebSocket
+    $none = [Threading.CancellationToken]::None
+    try {
+        $socket.ConnectAsync([Uri]$page.webSocketDebuggerUrl, $none).Wait()
+        $message = @{ id = 1; method = 'Runtime.evaluate'; params = @{ expression = $expression; returnByValue = $true } } | ConvertTo-Json -Compress -Depth 5
+        $bytes = [Text.Encoding]::UTF8.GetBytes($message)
+        $socket.SendAsync([ArraySegment[byte]]$bytes, 'Text', $true, $none).Wait()
+        $buffer = New-Object byte[] 65536
+        $reply = New-Object Text.StringBuilder
+        do {
+            $read = $socket.ReceiveAsync([ArraySegment[byte]]$buffer, $none)
+            $read.Wait()
+            [void]$reply.Append([Text.Encoding]::UTF8.GetString($buffer, 0, $read.Result.Count))
+        } until ($read.Result.EndOfMessage)
+        return ($reply.ToString() | ConvertFrom-Json).result.result.value
+    } finally { $socket.Dispose() }
+}
+
+# Waits until the phone page's status reads $status; returns the last status seen.
+function Wait-PhoneStatus($phone, [string]$status, [int]$seconds = 20) {
+    $seen = $null
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while ((Get-Date) -lt $deadline) {
+        try { $seen = Get-PageText $phone "document.getElementById('status').textContent" } catch { }
+        if ($seen -eq $status) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    return $seen
+}
+
+function Stop-Phone($phone) {
+    Stop-Process -Id $phone.Process.Id -Force -ErrorAction SilentlyContinue
+    $phone.Process.WaitForExit(5000) | Out-Null
+    Start-Sleep -Milliseconds 500
+    Remove-Item -Recurse -Force $phone.Profile -ErrorAction SilentlyContinue
+}

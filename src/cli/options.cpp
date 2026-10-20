@@ -9,10 +9,20 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iomanip>
+#include <random>
 #include <sstream>
 
 namespace rec::cli {
 namespace {
+// The secret in a phone camera's link.
+std::string phone_token() {
+    static const char kAlphabet[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    std::random_device device;
+    std::string token;
+    for (int i = 0; i < 22; ++i) token += kAlphabet[device() % 62];
+    return token;
+}
+
 bool integer(std::string_view s, std::uint32_t& out) {
     const char* end = s.data() + s.size();
     const auto [p, ec] = std::from_chars(s.data(), end, out);
@@ -220,6 +230,7 @@ bool parse_options(const std::vector<std::string>& args, Options& o, std::string
             }
             o.overlays.push_back(overlay(camera ? Overlay::Kind::camera : Overlay::Kind::image, value,
                                          camera ? Area{0.73, 0.715, 0.25, 0.25} : Area{}));
+            if (camera && o.overlays.back().source == "phone") o.overlays.back().source = "phone:" + phone_token();
         } else if (arg == "--camera-style") {
             if (o.overlays.empty() || o.overlays.back().kind != Overlay::Kind::camera) {
                 error = "--camera-style follows the --camera it styles"; return false;

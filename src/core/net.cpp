@@ -119,6 +119,11 @@ public:
 #endif
     }
 
+    void adopt(Socket s) {
+        socket_ = s;
+        configure(socket_);
+    }
+
     bool connect(const std::string& host, const std::string& port, int timeout_ms, std::string& error) {
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
@@ -306,6 +311,69 @@ std::string endpoint_ip(const Endpoint& endpoint) {
     char text[INET6_ADDRSTRLEN] = {};
     inet_ntop(endpoint.v6 ? AF_INET6 : AF_INET, endpoint.address.data(), text, sizeof text);
     return text;
+}
+
+TcpListener::~TcpListener() {
+    if (socket_ != -1) close_socket(as_socket(socket_));
+#ifdef _WIN32
+    if (winsock_) WSACleanup();
+#endif
+}
+
+std::unique_ptr<TcpListener> TcpListener::listen(std::uint16_t port, std::string& error) {
+    std::unique_ptr<TcpListener> listener(new TcpListener);
+#ifdef _WIN32
+    WSADATA data;
+    listener->winsock_ = WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    if (!listener->winsock_) { error = "could not start Windows networking"; return nullptr; }
+#endif
+    const Socket s = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == kNoSocket) { error = "could not open a TCP socket"; return nullptr; }
+    listener->socket_ = static_cast<std::intptr_t>(s);
+    int one = 1;
+#ifdef _WIN32
+    // Another program cannot take over the port while rec holds it.
+    setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&one), sizeof one);
+#else
+    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+#endif
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = htons(port);
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (::bind(s, reinterpret_cast<sockaddr*>(&address), sizeof address) != 0 || ::listen(s, 8) != 0) {
+        error = "port " + std::to_string(port) + " is in use";
+        return nullptr;
+    }
+    return listener;
+}
+
+std::unique_ptr<Transport> TcpListener::accept(int timeout_ms, Endpoint& peer) {
+    const Socket s = as_socket(socket_);
+#ifdef _WIN32
+    fd_set set;
+    FD_ZERO(&set);
+    FD_SET(s, &set);
+    timeval wait{timeout_ms / 1000, (timeout_ms % 1000) * 1000};
+    if (select(0, &set, nullptr, nullptr, &wait) <= 0) return nullptr;
+#else
+    pollfd wait{s, POLLIN, 0};
+    if (poll(&wait, 1, timeout_ms) <= 0) return nullptr;
+#endif
+    sockaddr_storage from{};
+    socklen_t length = sizeof from;
+    const Socket client = ::accept(s, reinterpret_cast<sockaddr*>(&from), &length);
+    if (client == kNoSocket) return nullptr;
+    from_sockaddr(reinterpret_cast<sockaddr*>(&from), peer);
+    auto transport = std::make_unique<TcpTransport>();
+    transport->adopt(client);
+    return transport;
+}
+
+std::string local_address_toward(const std::string& host) {
+    std::string error;
+    auto socket = UdpSocket::toward(host, error);
+    return socket ? endpoint_ip(socket->local()) : std::string();
 }
 
 UdpSocket::~UdpSocket() {

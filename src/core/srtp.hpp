@@ -20,6 +20,9 @@ public:
     bool protect_rtcp(crypto::Bytes& packet);
     // Checks and decrypts an SRTCP packet in place, removing the index and tag.
     bool unprotect_rtcp(crypto::Bytes& packet);
+    // Checks and decrypts an SRTP packet in place, removing the tag. The rollover counter is
+    // guessed from the highest sequence number seen (RFC 3711 appendix A).
+    bool unprotect_rtp(crypto::Bytes& packet);
 
 private:
     struct Keys {
@@ -39,7 +42,7 @@ private:
         bool started = false;
     };
     Keys rtp_, rtcp_;
-    std::map<std::uint32_t, Sender> senders_;
+    std::map<std::uint32_t, Sender> senders_, receivers_;
     std::uint32_t rtcp_index_ = 0;
     crypto::Bytes stream_;  // Counter blocks, then keystream.
     bool valid_ = false;

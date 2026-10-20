@@ -16,7 +16,8 @@ if(APPLE)
     enable_language(OBJCXX)
     target_sources(rec PRIVATE src/platform/macos/recorder.mm src/platform/macos/overlay.mm src/platform/macos/stream.cpp
         src/platform/macos/permissions.mm src/platform/macos/tls.cpp src/platform/macos/crypto.cpp src/platform/macos/opus.cpp
-        src/core/net.cpp src/core/rtmp.cpp src/core/replay.cpp src/core/dtls.cpp src/core/srtp.cpp src/core/whip.cpp)
+        src/core/net.cpp src/core/rtmp.cpp src/core/replay.cpp src/core/dtls.cpp src/core/srtp.cpp src/core/whip.cpp
+        src/core/tls_server.cpp src/core/phone.cpp src/core/qr.cpp)
     set_source_files_properties(src/platform/macos/recorder.mm src/platform/macos/overlay.mm src/platform/macos/permissions.mm
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_compile_definitions(rec PRIVATE GL_SILENCE_DEPRECATION)
@@ -28,12 +29,13 @@ if(APPLE)
 elseif(WIN32)
     target_sources(rec PRIVATE src/platform/windows/recorder.cpp src/platform/windows/stream.cpp src/platform/windows/tls.cpp
         src/platform/windows/overlay.cpp src/platform/windows/scaler.cpp src/platform/windows/permissions.cpp
-        src/platform/windows/crypto.cpp src/platform/windows/opus.cpp
-        src/core/mp4.cpp src/core/net.cpp src/core/rtmp.cpp src/core/replay.cpp src/core/dtls.cpp src/core/srtp.cpp src/core/whip.cpp)
+        src/platform/windows/crypto.cpp src/platform/windows/opus.cpp src/platform/windows/h264_decoder.cpp
+        src/core/mp4.cpp src/core/net.cpp src/core/rtmp.cpp src/core/replay.cpp src/core/dtls.cpp src/core/srtp.cpp src/core/whip.cpp
+        src/core/tls_server.cpp src/core/phone.cpp src/core/qr.cpp)
     target_compile_definitions(rec PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
     target_compile_options(rec PRIVATE /permissive- /utf-8 /bigobj /EHsc)
     target_link_libraries(rec PUBLIC d3d11 dxgi d3dcompiler mf mfplat mfreadwrite mfuuid ole32 windowscodecs windowsapp
-        ws2_32 secur32 crypt32 dwmapi advapi32 shell32 bcrypt)
+        ws2_32 secur32 crypt32 dwmapi advapi32 shell32 bcrypt wmcodecdspuuid)
     # Windows has no Opus encoder, and WHIP servers take Opus audio: libopus (BSD), pinned
     # and checksum-verified, built into the engine.
     include(FetchContent)

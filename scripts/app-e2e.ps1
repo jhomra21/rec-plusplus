@@ -17,6 +17,8 @@
 #      Dragging the camera in the preview moves and resizes it, before Start and while recording.
 #      The camera's shape, border and shadow show before Start and change while recording.
 #      A new scene with a display layer, placed by dragging, is switched away from while recording.
+#      A phone camera (a headless browser with a synthetic camera) opens the address in the
+#      phone code window, shows in the preview, and stays in a recording started from there.
 #   7. Volume and mute change the mix while recording, from the window and the menu.
 #   8. Settings persist without the stream key, which Credential Manager holds.
 #   9. Quit Rec from the notification-area menu while recording saves the movie, then exits.
@@ -167,8 +169,12 @@ function Get-Key($ui, [string]$name) {
     Wait-Until { (Text-Of $ui 101) -match '^Copy the ' } "Get Key did not ask for the server and key: $(Text-Of $ui 101)"
 }
 # Copies text the way a browser does; the app sees the clipboard change.
+# The app (or a clipboard manager) may hold the clipboard open for a moment as it reads it.
 function Copy-To-Rec([string]$text) {
-    Set-Clipboard -Value $text
+    for ($try = 1; ; $try++) {
+        try { Set-Clipboard -Value $text; break }
+        catch { if ($try -ge 10) { throw } Start-Sleep -Milliseconds 100 }
+    }
     Start-Sleep -Milliseconds 300
 }
 function Text-Of($ui, [int]$id) { return [AppWindow]::Of([AppWindow]::GetDlgItem($ui.Window, $id)).accName(0) }
@@ -655,6 +661,72 @@ try {
     Start-Sleep -Milliseconds 300
     Expect-Text ([IO.File]::ReadAllText((Join-Path $appHome 'settings.conf'))) "camera_style=rectangle`n"
     Write-Host "6c. camera look: $($center['frames']) frames; circle, border and shadow before Start, a rectangle while recording"
+
+    # 6p. Phone camera: choosing Phone over Wi-Fi opens its code window with the address. A
+    # headless browser with a synthetic camera (green) opens it; the window reports the phone
+    # connected and the preview shows its picture in the camera's place (top right since 6b).
+    # A recording takes the phone over from the preview. Then back to the test camera.
+    $cameraList = $null
+    foreach ($id in 100..199) {
+        $control = [AppWindow]::GetDlgItem($ui.Window, $id)
+        if ($control -eq [IntPtr]::Zero) { continue }
+        $item = [AppWindow]::Of($control)
+        if ($item.accRole(0) -eq $ComboBox -and $item.accValue(0) -eq 'Test camera') { $cameraList = $control; break }
+    }
+    if (-not $cameraList) { throw 'no camera list showing the test camera' }
+    $cameraCount = [int][AppWindow]::SendMessage($cameraList, 0x0146, [IntPtr]::Zero, [IntPtr]::Zero)  # CB_GETCOUNT
+    $chooseCamera = {
+        param([int]$index)
+        [AppWindow]::SendMessage($cameraList, 0x014E, [IntPtr]$index, [IntPtr]::Zero) | Out-Null  # CB_SETCURSEL
+        [AppWindow]::SendMessage($ui.Window, 0x0111, [IntPtr]((1 -shl 16) -bor [AppWindow]::GetDlgCtrlID($cameraList)), $cameraList) | Out-Null
+    }
+    & $chooseCamera ($cameraCount - 1)
+    if ([AppWindow]::Of($cameraList).accValue(0) -ne 'Phone over Wi-Fi') { throw "the last camera is $([AppWindow]::Of($cameraList).accValue(0))" }
+    $code = [IntPtr]::Zero
+    Wait-Until { $script:code = [AppWindow]::FindWindow('RecPhoneCode', 'Phone camera'); $script:code -ne [IntPtr]::Zero -and [AppWindow]::IsWindowVisible($script:code) } 'the phone code window did not open'
+    $address = [AppWindow]::Of([AppWindow]::GetDlgItem($code, 102)).accValue(0)
+    if ($address -notmatch '^https://[0-9.]+:47110/#[A-Za-z0-9]{22}$') { throw "the phone address is '$address'" }
+    $phoneStatus = { [AppWindow]::Of([AppWindow]::GetDlgItem($code, 103)).accName(0) }
+    Wait-Until { (& $phoneStatus) -eq 'Waiting for the phone...' } "the phone window says '$(& $phoneStatus)'" 15
+    $phoneArea = @(0.75, 0.12, 0.16, 0.14)
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-phone-waiting.png') $phoneArea 'green' -Not
+    $phone = Start-Phone $address
+    try {
+        $page = Wait-PhoneStatus $phone 'Live in Rec' 20
+        if ($page -ne 'Live in Rec') { throw "the phone page says '$page'" }
+        Wait-Until { (& $phoneStatus) -like 'Connected*' } "the phone window says '$(& $phoneStatus)'" 15
+        $codeRect = New-Object AppWindow+RECT
+        [AppWindow]::GetClientRect($code, [ref]$codeRect) | Out-Null
+        $codePicture = New-Object System.Drawing.Bitmap $codeRect.Right, $codeRect.Bottom
+        $codeGraphics = [System.Drawing.Graphics]::FromImage($codePicture)
+        $codeDc = $codeGraphics.GetHdc()
+        [AppWindow]::PrintWindow($code, $codeDc, 3) | Out-Null  # PW_CLIENTONLY | PW_RENDERFULLCONTENT
+        $codeGraphics.ReleaseHdc($codeDc)
+        $codeGraphics.Dispose()
+        $codePicture.Save((Join-Path $Artifacts 'app-phone-code.png'), [System.Drawing.Imaging.ImageFormat]::Png)
+        $codePicture.Dispose()
+        Wait-PreviewColor $ui (Join-Path $Artifacts 'app-phone-preview.png') $phoneArea 'green'
+        Press $ui 'Start Recording'
+        Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+        Wait-Recorded $ui 8
+        Press $ui 'Stop Recording'
+        Wait-Status $ui 'Ready to record' | Out-Null
+    } finally { Stop-Phone $phone }
+    $movie = Newest-Movie
+    Copy-Item $movie (Join-Path $Artifacts 'app-phone.mp4')
+    $phoneMovie = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-phone.probe') @('--sample', '1460,140,300,150')
+    $first = 0
+    while ($phoneMovie.ContainsKey("sample_$first")) {
+        try { Expect-Color $phoneMovie "sample_$first" 'green'; break } catch { $first++ }
+    }
+    if ($first -gt 4) { throw "the phone's picture reached the recording only at $first s" }
+    $last = $first
+    while ($phoneMovie.ContainsKey("sample_$($last + 1)")) { $last++; Expect-Color $phoneMovie "sample_$last" 'green' }
+    [AppWindow]::SendMessage($code, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_CLOSE
+    if ([AppWindow]::IsWindowVisible($code)) { throw 'the phone code window did not close' }
+    & $chooseCamera ($cameraCount - 2)
+    if ([AppWindow]::Of($cameraList).accValue(0) -ne 'Test camera') { throw 'the test camera was not chosen again' }
+    Write-Host "6p. phone camera: connected in the preview; in the recording from $first s to $last s"
 
     # 6d. Scenes: a new scene gets display 1 (covered by a blue window) as a layer over the
     # whole frame; dragging the layer's top-left corner makes it the bottom-right quarter, and

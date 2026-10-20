@@ -3,6 +3,7 @@
 #include "cli/engine.hpp"
 
 #include "core/overlay.hpp"
+#include "core/phone.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -159,6 +160,9 @@ Settings load_settings(const std::string& path) {
             if (std::find(kReplayLengths.begin(), kReplayLengths.end(), seconds) != kReplayLengths.end()) s.replay_seconds = seconds;
         } else if (key == "camera") s.camera = yes;
         else if (key == "camera_device" && !value.empty()) s.camera_device = value;
+        else if (key == "phone_token" && value.size() >= 16 && value.size() <= 64 &&
+                 std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isalnum(c); }))
+            s.phone_token = value;
         else if (key == "camera_style") {
             Style style;
             std::string error;
@@ -257,8 +261,14 @@ Settings load_settings(const std::string& path) {
     }
     for (auto& scene : s.scenes) scene.layers.resize(s.layers.size(), hidden);
     if (s.scene >= s.scenes.size()) s.scene = 0;
+    if (s.phone_token.empty()) s.phone_token = core::PhoneCamera::new_token();
+    // A phone camera from another token is no longer reachable; the current one replaces it.
+    if (is_phone_camera(s.camera_device)) s.camera_device = phone_camera_id(s);
     return s;
 }
+
+std::string phone_camera_id(const Settings& settings) { return "phone:" + settings.phone_token; }
+bool is_phone_camera(const std::string& device) { return device.rfind("phone:", 0) == 0; }
 
 bool save_settings(const std::string& path, const Settings& s) {
     std::error_code error;
@@ -280,6 +290,7 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\nstream=" << s.stream << "\nvertical_movie=" << s.vertical_movie
             << "\nstream_kbps=" << s.stream_kbps << "\nreplay=" << s.replay << "\nreplay_seconds=" << s.replay_seconds
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
+            << "\nphone_token=" << s.phone_token
             << "\ncamera_style=" << core::style_text(s.camera_style)
             << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
             << "\nkeep_recording=" << s.keep_recording
@@ -1334,6 +1345,7 @@ Status Session::status() {
             idle_wake_.notify_all();
         }
         s.previewing = idle_ != nullptr && !idle_->finished();
+        if (s.previewing && state_ == State::idle) s.camera_frames = idle_->stats().camera_frames;
         s.preview_error = idle_error_;
     }
     if (ended) stop();

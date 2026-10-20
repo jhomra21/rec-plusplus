@@ -25,11 +25,15 @@
 #include <winrt/Windows.Graphics.DirectX.h>
 
 #include "platform/windows/displays.hpp"
+#include "platform/windows/h264_decoder.hpp"
 #include "platform/windows/overlay.hpp"
 #include "core/clicks.hpp"
 #include "core/overlay.hpp"
+#include "core/phone.hpp"
 
 #include <algorithm>
+#include <condition_variable>
+#include <deque>
 #include <future>
 #include <atomic>
 #include <chrono>
@@ -193,12 +197,20 @@ HRESULT enumerate(DeviceList& list) {
 
 // The newest frame of one camera, BGRA, top-down. A device camera reads on its own thread
 // through a Media Foundation source reader that converts to RGB32; the test camera draws
-// core::test_camera_frame at 30 fps.
+// core::test_camera_frame at 30 fps; a phone ("phone:TOKEN") is decoded on its own thread
+// and has no size until its first picture.
 class CameraFeed {
 public:
     ~CameraFeed() { stop(); }
 
     Result open(const std::string& wanted) {
+        if (wanted.rfind("phone:", 0) == 0) {
+            std::string error;
+            phone_ = core::PhoneCamera::open(wanted.substr(6), error);
+            if (!phone_) return {error};
+            name_ = "phone";
+            return {};
+        }
         if (wanted == "test") {
             width_ = core::kTestCameraWidth;
             height_ = core::kTestCameraHeight;
@@ -272,12 +284,31 @@ public:
 
     void start() {
         stop_ = false;
-        thread_ = std::thread([this] { reader_ ? read() : generate(); });
+        if (phone_) {
+            phone_->set_sink([this](const std::uint8_t* data, std::size_t size, bool key) {
+                {
+                    std::lock_guard lock(units_mutex_);
+                    // The decoder fell behind by two seconds: start again at the next keyframe.
+                    if (units_.size() >= 60) {
+                        units_.clear();
+                        skip_to_key_ = true;
+                    }
+                    if (skip_to_key_ && !key) { phone_->request_keyframe(); return; }
+                    skip_to_key_ = false;
+                    units_.emplace_back(data, data + size);
+                }
+                units_ready_.notify_one();
+            });
+        }
+        thread_ = std::thread([this] { phone_ ? decode() : reader_ ? read() : generate(); });
     }
 
     void stop() {
+        if (phone_) phone_->set_sink(nullptr);
         stop_ = true;
+        units_ready_.notify_all();
         if (thread_.joinable()) thread_.join();
+        phone_.reset();
         reader_.Reset();
         if (source_) { source_->Shutdown(); source_.Reset(); }
     }
@@ -287,12 +318,14 @@ public:
     std::uint64_t frames() const { return frames_.load(); }
     bool lost() const { return lost_.load(); }
 
-    // Copies the newest frame to a mapped texture when it is newer than seen.
+    // Copies the newest frame to a mapped texture when it is newer than seen: map(pixels, row
+    // bytes, width, height).
     template <class Map> bool upload(std::uint64_t& seen, Map&& map) {
         if (frames_.load() == seen) return false;
         std::lock_guard lock(mutex_);
         seen = frames_.load();
-        return map(pixels_.data(), static_cast<std::size_t>(width_) * 4);
+        if (!width_ || !height_) return false;
+        return map(pixels_.data(), static_cast<std::size_t>(width_) * 4, width_, height_);
     }
 
 private:
@@ -316,6 +349,32 @@ private:
                 frames_.fetch_add(1);
             }
             std::this_thread::sleep_until(begin + std::chrono::microseconds((n + 1) * 1000000 / core::kTestCameraFps));
+        }
+    }
+
+    void decode() {
+        H264Decoder decoder;
+        if (auto error = decoder.start(); !error.empty()) {
+            lost_.store(true);
+            return;
+        }
+        const auto picture = [this](const std::uint8_t* bgra, std::uint32_t w, std::uint32_t h) {
+            std::lock_guard lock(mutex_);
+            width_ = w;
+            height_ = h;
+            pixels_.assign(bgra, bgra + static_cast<std::size_t>(w) * h * 4);
+            frames_.fetch_add(1);
+        };
+        for (;;) {
+            std::vector<std::uint8_t> unit;
+            {
+                std::unique_lock lock(units_mutex_);
+                units_ready_.wait(lock, [this] { return stop_.load() || !units_.empty(); });
+                if (stop_) return;
+                unit = std::move(units_.front());
+                units_.pop_front();
+            }
+            if (!decoder.decode(unit.data(), unit.size(), picture)) phone_->request_keyframe();
         }
     }
 
@@ -371,6 +430,11 @@ private:
     std::atomic<std::uint64_t> frames_{0};
     std::atomic_bool stop_{false}, lost_{false};
     std::thread thread_;
+    std::shared_ptr<core::PhoneCamera> phone_;
+    std::mutex units_mutex_;
+    std::condition_variable units_ready_;
+    std::deque<std::vector<std::uint8_t>> units_;  // Access units waiting for the decoder.
+    bool skip_to_key_ = false;
 };
 
 // The newest frame of a display or window, captured with Windows.Graphics.Capture on the
@@ -719,20 +783,8 @@ public:
             case Overlay::Kind::camera: {
                 layer.camera = std::make_unique<CameraFeed>();
                 if (auto opened = layer.camera->open(overlay.source); !opened) return opened;
-                layer.width = layer.camera->width();
-                layer.height = layer.camera->height();
-                D3D11_TEXTURE2D_DESC desc{};
-                desc.Width = layer.width;
-                desc.Height = layer.height;
-                desc.MipLevels = 1;
-                desc.ArraySize = 1;
-                desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-                desc.SampleDesc.Count = 1;
-                desc.Usage = D3D11_USAGE_DYNAMIC;
-                desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-                desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-                const HRESULT hr = device->CreateTexture2D(&desc, nullptr, &layer.texture);
-                if (FAILED(hr)) return {failed("could not allocate the camera picture", hr)};
+                if (layer.camera->width() && layer.camera->height())
+                    if (auto made = camera_texture(layer, layer.camera->width(), layer.camera->height()); !made) return made;
                 break;
             }
             case Overlay::Kind::display:
@@ -742,7 +794,7 @@ public:
                 if (auto opened = layer.screen->open(winrt_device_, overlay, options.cursor); !opened) return opened;
                 break;
             }
-            if (layer.texture) {
+            if (layer.texture && !layer.view) {
                 const HRESULT hr = device->CreateShaderResourceView(layer.texture.Get(), nullptr, &layer.view);
                 if (FAILED(hr)) return {failed("could not use an overlay picture", hr)};
             }
@@ -975,9 +1027,37 @@ private:
         return click_rect_;
     }
 
+    // A camera's picture; a phone's is made again when its size changes.
+    Result camera_texture(Layer& layer, UINT width, UINT height) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = width;
+        desc.Height = height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DYNAMIC;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        layer.texture.Reset();
+        layer.view.Reset();
+        HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &layer.texture);
+        if (SUCCEEDED(hr)) hr = device_->CreateShaderResourceView(layer.texture.Get(), nullptr, &layer.view);
+        if (FAILED(hr)) {
+            layer.texture.Reset();
+            layer.view.Reset();
+            return {failed("could not allocate the camera picture", hr)};
+        }
+        layer.width = width;
+        layer.height = height;
+        return {};
+    }
+
     void draw_layer(ID3D11DeviceContext* context, Target& target, Layer& layer, const Layout& layout, const Style& style) {
         if (layer.camera) {
-            layer.camera->upload(layer.seen, [&](const std::uint8_t* pixels, std::size_t row) {
+            layer.camera->upload(layer.seen, [&](const std::uint8_t* pixels, std::size_t row, UINT width, UINT height) {
+                if ((width != layer.width || height != layer.height || !layer.texture) && !camera_texture(layer, width, height))
+                    return false;
                 D3D11_MAPPED_SUBRESOURCE mapped{};
                 if (FAILED(context->Map(layer.texture.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
                 for (UINT y = 0; y < layer.height; ++y)

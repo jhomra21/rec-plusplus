@@ -49,6 +49,27 @@ struct Endpoint {
 bool parse_endpoint(const std::string& ip, std::uint16_t port, Endpoint& out);
 std::string endpoint_ip(const Endpoint& endpoint);
 
+// A TCP socket listening on every IPv4 interface. One thread accepts; the connections it
+// returns are plain TCP transports with the same 10 s waits.
+class TcpListener {
+public:
+    ~TcpListener();
+    TcpListener(const TcpListener&) = delete;
+    TcpListener& operator=(const TcpListener&) = delete;
+    static std::unique_ptr<TcpListener> listen(std::uint16_t port, std::string& error);
+    // Waits up to timeout_ms for a connection. Null when none came.
+    std::unique_ptr<Transport> accept(int timeout_ms, Endpoint& peer);
+
+private:
+    TcpListener() = default;
+    std::intptr_t socket_ = -1;
+    bool winsock_ = false;
+};
+
+// The local address the system would use to reach host, as text; nothing is sent. Empty when
+// there is no route.
+std::string local_address_toward(const std::string& host);
+
 // A UDP socket for WebRTC media, bound to the local address that routes to a server. One
 // thread sends and receives.
 class UdpSocket {

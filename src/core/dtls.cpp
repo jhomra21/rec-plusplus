@@ -1,5 +1,7 @@
 #include "core/dtls.hpp"
 
+#include "core/gcm.hpp"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -103,61 +105,8 @@ Bytes utc_time(std::time_t t) {
     return der(0x17, Bytes(text, text + 13));
 }
 
-// GCM on AES-128 (NIST SP 800-38D), for the two Finished messages.
-std::uint64_t load64(const std::uint8_t* p) {
-    std::uint64_t v = 0;
-    for (int i = 0; i < 8; ++i) v = v << 8 | p[i];
-    return v;
-}
-void store64(std::uint8_t* p, std::uint64_t v) {
-    for (int i = 7; i >= 0; --i) { p[i] = static_cast<std::uint8_t>(v); v >>= 8; }
-}
-void gf_multiply(std::uint8_t* x, const std::uint8_t* h) {
-    std::uint64_t zh = 0, zl = 0, vh = load64(h), vl = load64(h + 8);
-    for (int i = 0; i < 128; ++i) {
-        if (x[i / 8] & (0x80 >> (i % 8))) { zh ^= vh; zl ^= vl; }
-        const bool low = vl & 1;
-        vl = vl >> 1 | vh << 63;
-        vh >>= 1;
-        if (low) vh ^= 0xE100000000000000ULL;
-    }
-    store64(x, zh);
-    store64(x + 8, zl);
-}
-void ghash(const std::uint8_t* h, const Bytes& aad, const std::uint8_t* text, std::size_t size, std::uint8_t* out) {
-    std::memset(out, 0, 16);
-    auto absorb = [&](const std::uint8_t* data, std::size_t n) {
-        for (std::size_t i = 0; i < n; i += 16) {
-            for (std::size_t j = 0; j < 16 && i + j < n; ++j) out[j] ^= data[i + j];
-            gf_multiply(out, h);
-        }
-    };
-    absorb(aad.data(), aad.size());
-    absorb(text, size);
-    std::uint8_t lengths[16];
-    store64(lengths, aad.size() * 8);
-    store64(lengths + 8, size * 8);
-    absorb(lengths, 16);
-}
-// Counter mode from J0 + 1; returns E(K, J0) for the tag.
-std::array<std::uint8_t, 16> gcm_crypt(const crypto::Aes128& aes, const std::uint8_t* iv12, const std::uint8_t* in,
-                                       std::uint8_t* out, std::size_t size) {
-    std::uint8_t block[16], stream[16];
-    std::memcpy(block, iv12, 12);
-    std::array<std::uint8_t, 16> tag_mask{};
-    for (std::uint32_t counter = 1;; ++counter) {
-        block[12] = static_cast<std::uint8_t>(counter >> 24);
-        block[13] = static_cast<std::uint8_t>(counter >> 16);
-        block[14] = static_cast<std::uint8_t>(counter >> 8);
-        block[15] = static_cast<std::uint8_t>(counter);
-        aes.encrypt(block, stream, 16);
-        if (counter == 1) { std::memcpy(tag_mask.data(), stream, 16); continue; }
-        const std::size_t at = (counter - 2) * 16;
-        if (at >= size) break;
-        for (std::size_t i = 0; i < 16 && at + i < size; ++i) out[at + i] = in[at + i] ^ stream[i];
-    }
-    return tag_mask;
-}
+
+} // namespace
 
 std::string hex_colons(const std::uint8_t* data, std::size_t size) {
     std::string out;
@@ -168,7 +117,6 @@ std::string hex_colons(const std::uint8_t* data, std::size_t size) {
     }
     return out;
 }
-} // namespace
 
 Bytes tls_prf(const std::uint8_t* secret, std::size_t secret_size, const std::string& label, const Bytes& seed,
               std::size_t size) {
@@ -190,9 +138,7 @@ Bytes tls_prf(const std::uint8_t* secret, std::size_t secret_size, const std::st
 DtlsClient::DtlsClient() = default;
 DtlsClient::~DtlsClient() = default;
 
-std::string DtlsClient::init() {
-    identity_ = crypto::P256::generate(crypto::P256::Use::sign);
-    if (!identity_) return "could not make a DTLS key";
+Bytes self_signed_certificate(const crypto::P256& key) {
     Bytes serial(8);
     crypto::random(serial.data(), serial.size());
     serial[0] = (serial[0] & 0x7F) | 0x40;
@@ -200,7 +146,7 @@ std::string DtlsClient::init() {
     const Bytes name = der_seq({der(0x31, der_seq({der(0x06, kOidCommonName), der(0x0C, Bytes{'r', 'e', 'c'})}))});
     const std::time_t now = std::time(nullptr);
     Bytes point{0};
-    append(point, identity_->public_point());
+    append(point, key.public_point());
     const Bytes tbs = der_seq({
         der(0xA0, der(0x02, Bytes{2})),
         der(0x02, serial),
@@ -211,10 +157,17 @@ std::string DtlsClient::init() {
         der_seq({der_seq({der(0x06, kOidEcPublicKey), der(0x06, kOidPrime256v1)}), der(0x03, point)}),
     });
     Bytes signature{0};
-    const Bytes signed_tbs = identity_->sign(tbs.data(), tbs.size());
-    if (signed_tbs.empty()) return "could not sign the DTLS certificate";
+    const Bytes signed_tbs = key.sign(tbs.data(), tbs.size());
+    if (signed_tbs.empty()) return {};
     append(signature, signed_tbs);
-    certificate_ = der_seq({tbs, algorithm, der(0x03, signature)});
+    return der_seq({tbs, algorithm, der(0x03, signature)});
+}
+
+std::string DtlsClient::init() {
+    identity_ = crypto::P256::generate(crypto::P256::Use::sign);
+    if (!identity_) return "could not make a DTLS key";
+    certificate_ = self_signed_certificate(*identity_);
+    if (certificate_.empty()) return "could not sign the DTLS certificate";
     fingerprint_ = crypto::sha256(certificate_.data(), certificate_.size());
     if (!crypto::random(client_random_.data(), client_random_.size())) return "no random numbers";
     return {};
@@ -661,15 +614,7 @@ Bytes DtlsClient::seal(std::uint8_t type, std::uint64_t seq, const Bytes& plain)
     put16(aad, plain.size());
     Bytes out = explicit_nonce;
     out.resize(8 + plain.size() + 16);
-    const auto mask = gcm_crypt(*write_, iv, plain.data(), out.data() + 8, plain.size());
-    const auto h_zero = [&] {
-        std::array<std::uint8_t, 16> zero{}, h{};
-        write_->encrypt(zero.data(), h.data(), 16);
-        return h;
-    }();
-    std::uint8_t tag[16];
-    ghash(h_zero.data(), aad, out.data() + 8, plain.size(), tag);
-    for (int i = 0; i < 16; ++i) out[8 + plain.size() + i] = tag[i] ^ mask[i];
+    gcm::seal(*write_, iv, aad, plain.data(), out.data() + 8, plain.size());
     return out;
 }
 
@@ -686,15 +631,8 @@ bool DtlsClient::open(std::uint8_t type, std::uint16_t epoch, std::uint64_t seq,
     put8(aad, type);
     put16(aad, 0xFEFD);
     put16(aad, length);
-    std::array<std::uint8_t, 16> zero{}, h{};
-    read_->encrypt(zero.data(), h.data(), 16);
-    std::uint8_t tag[16];
-    ghash(h.data(), aad, data + 8, length, tag);
     plain.resize(length);
-    const auto mask = gcm_crypt(*read_, iv, data + 8, plain.data(), length);
-    std::uint8_t differ = 0;
-    for (int i = 0; i < 16; ++i) differ |= static_cast<std::uint8_t>((tag[i] ^ mask[i]) ^ data[8 + length + i]);
-    return differ == 0;
+    return gcm::open(*read_, iv, aad, data + 8, plain.data(), length);
 }
 
 } // namespace rec::core

@@ -110,6 +110,40 @@ bool Srtp::protect_rtcp(crypto::Bytes& packet) {
     return true;
 }
 
+bool Srtp::unprotect_rtp(crypto::Bytes& packet) {
+    if (!valid_ || packet.size() < 12 + kTag) return false;
+    const std::size_t signed_size = packet.size() - kTag;
+    std::size_t header = 12 + 4 * (packet[0] & 0x0F);
+    if (packet[0] & 0x10) {
+        if (signed_size < header + 4) return false;
+        header += 4 + 4 * (static_cast<std::size_t>(packet[header + 2]) << 8 | packet[header + 3]);
+    }
+    if (signed_size < header) return false;
+    const auto seq = static_cast<std::uint16_t>(packet[2] << 8 | packet[3]);
+    const std::uint32_t ssrc = load32(packet.data() + 8);
+    auto& r = receivers_[ssrc];
+    std::uint32_t roc = r.roc;
+    if (r.started) {
+        if (r.last < 0x8000) { if (seq > r.last && seq - r.last > 0x8000) roc = r.roc - 1; }
+        else if (seq < r.last - 0x8000) roc = r.roc + 1;
+    }
+    crypto::Bytes check(packet.begin(), packet.begin() + static_cast<std::ptrdiff_t>(signed_size));
+    check.resize(signed_size + 4);
+    store32(check.data() + signed_size, roc);
+    const auto tag = crypto::hmac_sha1(rtp_.auth, 20, check.data(), check.size());
+    std::uint8_t differ = 0;
+    for (std::size_t i = 0; i < kTag; ++i) differ |= static_cast<std::uint8_t>(tag[i] ^ packet[signed_size + i]);
+    if (differ) return false;
+    if (!r.started || roc == r.roc + 1 || (roc == r.roc && seq > r.last)) {
+        r.roc = roc;
+        r.last = seq;
+        r.started = true;
+    }
+    crypt(rtp_, ssrc, static_cast<std::uint64_t>(roc) << 16 | seq, packet.data() + header, signed_size - header);
+    packet.resize(signed_size);
+    return true;
+}
+
 bool Srtp::unprotect_rtcp(crypto::Bytes& packet) {
     if (!valid_ || packet.size() < 8 + 4 + kTag) return false;
     const std::size_t signed_size = packet.size() - kTag;

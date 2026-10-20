@@ -97,7 +97,8 @@ struct Settings {
     bool replay = false;              // Keep the last replay_seconds for Save Replay.
     std::uint32_t replay_seconds = 30;
     bool camera = false;              // Use a camera in the scenes.
-    std::string camera_device = "default";  // default, test, or a camera ID.
+    std::string camera_device = "default";  // default, test, phone_camera_id(), or a camera ID.
+    std::string phone_token;          // The secret in the phone camera's address; made once, kept.
     rec::Style camera_style;          // The camera's shape, border and shadow in every scene; changeable while recording.
     bool image = false;               // Use an image (PNG, JPEG) in the scenes, drawn over everything, fitted.
     std::string image_path;
@@ -110,6 +111,11 @@ struct Settings {
     std::string keep_recording = "ask";
     std::string last_recording;
 };
+
+// The phone camera in camera lists, "phone:" and settings.phone_token: the same each run, so
+// a phone's open page reconnects by itself.
+std::string phone_camera_id(const Settings& settings);
+bool is_phone_camera(const std::string& device);
 
 // The choices both interfaces offer, as a settings value and its label.
 struct Choice {

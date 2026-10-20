@@ -121,6 +121,11 @@ private:
     std::string failure_;
 };
 
+// A self-signed X.509 certificate (CN=rec, valid for 30 days) for key, in DER; empty on failure.
+crypto::Bytes self_signed_certificate(const crypto::P256& key);
+// "AB:CD:...", hex bytes with colons, as SDP fingerprints are written.
+std::string hex_colons(const std::uint8_t* data, std::size_t size);
+
 // TLS 1.2 PRF with SHA-256 (RFC 5246 section 5).
 crypto::Bytes tls_prf(const std::uint8_t* secret, std::size_t secret_size, const std::string& label,
                       const crypto::Bytes& seed, std::size_t size);

@@ -200,6 +200,29 @@ try {
     if ($cameraLost.Log -notmatch 'Camera lost at 00:0[01]\.\d; it shows its last frame') { throw "the camera loss was not reported: $($cameraLost.Log)" }
     Expect-Text $cameraLost.Log 'Camera frames 30'
     Expect-Field $cameraLost.Probe 'frames' '90'
+    # A phone camera: a headless browser with a synthetic camera opens the page rec serves and
+    # sends its green picture over WebRTC; rec decodes the H.264 into the camera's area. The
+    # page is opened on this computer's network address, as a phone would (browsers do not
+    # pair their candidates with a loopback one).
+    $token = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 22 | ForEach-Object { [char]$_ })
+    $route = New-Object Net.Sockets.UdpClient
+    $route.Connect('8.8.8.8', 53)
+    $address = $route.Client.LocalEndPoint.Address.ToString()
+    $route.Dispose()
+    $phonePath = Join-Path $artifacts 'phone.mp4'
+    $run = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '14', '--camera', "phone:$token", '-o', $phonePath)
+    $phone = Start-Phone "https://${address}:47110/#$token"
+    try { $phoneStatus = Wait-PhoneStatus $phone 'Live in Rec' 20 }
+    finally { $phoneRun = Stop-RecProcess $run; Stop-Phone $phone }
+    $phoneLog = $phoneRun.Text -replace [regex]::Escape($token), 'TOKEN'
+    Set-Content -Path (Join-Path $artifacts 'phone.record.log') -Value $phoneLog
+    Write-Host $phoneLog
+    if ($phoneRun.Code -ne 0) { throw "the phone camera recording failed: $phoneLog" }
+    if ($phoneStatus -ne 'Live in Rec') { throw "the phone page never went live: $phoneStatus" }
+    Expect-Text $phoneLog "Phone camera: on a phone on this network, open https://${address}:47110/#TOKEN"
+    if (-not ($phoneLog -match 'Camera frames (\d+)') -or [int]$Matches[1] -lt 90) { throw 'the phone camera delivered too few frames' }
+    $phoneProbe = Get-Probe $rec $phonePath (Join-Path $artifacts 'phone-camera.probe') @('--sample', '1420,940,120,80')
+    foreach ($second in 11..13) { Expect-Color $phoneProbe "sample_$second" 'green' }
     # Overlays: a camera and an image drawn into every frame on the GPU; "hide 1" removes the
     # camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
     $png = Join-Path $PSScriptRoot 'overlay-test.png'
