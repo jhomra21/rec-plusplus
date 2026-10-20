@@ -14,12 +14,12 @@ target_include_directories(rec PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 if(APPLE)
     enable_language(OBJCXX)
-    target_sources(rec PRIVATE src/platform/macos/recorder.mm src/platform/macos/overlay.mm src/platform/macos/stream.cpp
+    target_sources(rec PRIVATE src/platform/macos/recorder.mm src/platform/macos/overlay.mm src/platform/macos/h264_decoder.mm src/platform/macos/stream.cpp
         src/platform/macos/permissions.mm src/platform/macos/tls.cpp src/platform/macos/crypto.cpp src/platform/macos/opus.cpp
         src/core/net.cpp src/core/rtmp.cpp src/core/replay.cpp src/core/dtls.cpp src/core/srtp.cpp src/core/whip.cpp
         src/core/tls_server.cpp src/core/phone.cpp src/core/qr.cpp)
     set_source_files_properties(src/platform/macos/recorder.mm src/platform/macos/overlay.mm src/platform/macos/permissions.mm
-        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        src/platform/macos/h264_decoder.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_compile_definitions(rec PRIVATE GL_SILENCE_DEPRECATION)
     target_link_libraries(rec PUBLIC
         "-framework Foundation" "-framework ScreenCaptureKit" "-framework AVFoundation"

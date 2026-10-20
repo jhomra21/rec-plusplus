@@ -16,7 +16,9 @@
 #      dragging the camera in the preview moves and resizes it, before Start and while recording;
 #      the camera's shape, border and shadow show before Start and change while recording;
 #      a new scene places the screen by dragging and hides the camera, and is switched away
-#      from while recording;
+#      from while recording; a phone camera (a headless browser with a synthetic camera, run
+#      by scripts/phone.py) opens the address in the phone code window, shows in the preview,
+#      and stays in a recording started from there;
 #   8. volume and mute change the mix while recording, from the window and the menu bar item;
 #   9. quitting during a recording saves the movie; settings persist without the stream key;
 #  10. with Keep Recording After Quit, the background engine records on after quitting; the
@@ -73,6 +75,12 @@ finish() {
   stop_mediamtx
 }
 trap finish EXIT
+# The phone camera step needs a Chromium-family browser.
+if browser="$(python3 "$root/scripts/phone.py" --find 2>&1)"; then
+  export REC_APP_SELF_TEST_PHONE="$root/scripts/phone.py"
+else
+  echo "6p. phone camera: not checked, $browser"
+fi
 # Quitting during a recording stops it until step 10 turns Keep Recording After Quit on.
 mkdir -p "$home"
 printf 'keep_recording=no\n' >"$home/settings.conf"
@@ -117,6 +125,24 @@ grep -qx 'camera-look=ok' "$report"
 grep -qx 'scene-editor=ok' "$report"
 grep -q '^live=● LIVE 2/2' "$report"
 
+# 6p: the phone camera's picture reaches the recording within 4 s of its start and stays.
+if [[ -n "${REC_APP_SELF_TEST_PHONE:-}" ]]; then
+  grep -qx 'phone-camera=ok' "$report"
+  phone="$(step phone)"
+  [[ -f "$phone" ]] || { echo "missing movie: $phone" >&2; exit 1; }
+  "$rec" probe "$phone" --sample 1460,140,300,150 | tee "$artifacts/app-phone.probe"
+  first=0
+  while grep -q "^sample_$first=" "$artifacts/app-phone.probe" && ! (color "sample_$first" "$artifacts/app-phone.probe" green 2>/dev/null); do
+    first=$((first + 1))
+  done
+  ((first <= 4)) || { echo "the phone's picture reached the recording only at $first s" >&2; exit 1; }
+  last=$first
+  while grep -q "^sample_$((last + 1))=" "$artifacts/app-phone.probe"; do
+    last=$((last + 1))
+    color "sample_$last" "$artifacts/app-phone.probe" green
+  done
+  echo "6p. phone camera: connected in the preview; in the recording from $first s to $last s"
+fi
 probe "$(step pause)" app-pause
 grep -qx 'audio_tracks=3' "$artifacts/app-pause.probe"
 within "$(value duration "$artifacts/app-pause.probe")" 3.5 4.9

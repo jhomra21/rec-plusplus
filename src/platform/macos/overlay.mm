@@ -8,18 +8,22 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 
 #include "platform/macos/overlay.hpp"
+#include "platform/macos/h264_decoder.hpp"
 #include "platform/macos/screen.h"
 #include "core/clicks.hpp"
 #include "core/overlay.hpp"
+#include "core/phone.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdlib>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace rec::mac {
 class CameraFeed;
@@ -101,12 +105,20 @@ std::vector<Camera> cameras() {
 }
 
 // The newest frame of one camera. A device camera runs an AVCaptureSession that delivers
-// BGRA on its own queue; the test camera draws core::test_camera_frame at 30 fps.
+// BGRA on its own queue; the test camera draws core::test_camera_frame at 30 fps; a phone
+// ("phone:TOKEN") is decoded with VideoToolbox on its own thread, at whatever size it sends.
 class CameraFeed {
 public:
     ~CameraFeed() { stop(); }
 
     Result open(const std::string& wanted) {
+        if (wanted.rfind("phone:", 0) == 0) {
+            std::string error;
+            phone_ = core::PhoneCamera::open(wanted.substr(6), error);
+            if (!phone_) return {error};
+            name_ = "phone";
+            return {};
+        }
         if (wanted == "test") {
             NSDictionary* attributes = @{
                 (id)kCVPixelBufferPixelFormatTypeKey: @(kCVPixelFormatType_32BGRA),
@@ -172,11 +184,20 @@ public:
     }
 
     void start() {
-        if (session_) [session_ startRunning];
-        else if (pool_) { stop_ = false; thread_ = std::thread([this] { generate(); }); }
+        if (phone_) {
+            stop_ = false;
+            phone_->set_sink([this](const std::uint8_t* data, std::size_t size, bool key) { queue_unit(data, size, key); });
+            thread_ = std::thread([this] { decode(); });
+        } else if (session_) {
+            [session_ startRunning];
+        } else if (pool_) {
+            stop_ = false;
+            thread_ = std::thread([this] { generate(); });
+        }
     }
 
     void stop() {
+        if (phone_) phone_->set_sink(nullptr);
         for (id observer in observers_) [NSNotificationCenter.defaultCenter removeObserver:observer];
         observers_ = nil;
         if (session_) {
@@ -190,8 +211,13 @@ public:
             receiver_ = nil;
             queue_ = nil;
         }
-        stop_ = true;
+        {
+            std::lock_guard lock(units_mutex_);
+            stop_ = true;
+        }
+        units_ready_.notify_all();
         if (thread_.joinable()) thread_.join();
+        phone_.reset();
         std::lock_guard lock(mutex_);
         if (latest_) { CVPixelBufferRelease(latest_); latest_ = nullptr; }
         if (pool_) { CVPixelBufferPoolRelease(pool_); pool_ = nullptr; }
@@ -219,6 +245,42 @@ public:
     bool lost() const { return lost_.load(); }
 
 private:
+    // On the phone's network thread. The slots keep their capacity as they circulate with
+    // the decoder's buffer, so a steady stream allocates nothing here.
+    void queue_unit(const std::uint8_t* data, std::size_t size, bool key) {
+        {
+            std::lock_guard lock(units_mutex_);
+            // The decoder fell behind by two seconds: start again at the next keyframe.
+            if (unit_count_ == units_.size()) {
+                unit_count_ = 0;
+                skip_to_key_ = true;
+            }
+            if (skip_to_key_ && !key) {
+                phone_->request_keyframe();
+                return;
+            }
+            skip_to_key_ = false;
+            units_[(unit_head_ + unit_count_++) % units_.size()].assign(data, data + size);
+        }
+        units_ready_.notify_one();
+    }
+
+    void decode() {
+        H264Decoder decoder([this](CVPixelBufferRef pixel) { receive(pixel); });
+        std::vector<std::uint8_t> unit;
+        for (;;) {
+            {
+                std::unique_lock lock(units_mutex_);
+                units_ready_.wait(lock, [this] { return stop_.load() || unit_count_ > 0; });
+                if (stop_) return;
+                unit.swap(units_[unit_head_]);
+                unit_head_ = (unit_head_ + 1) % units_.size();
+                --unit_count_;
+            }
+            if (!decoder.decode(unit.data(), unit.size())) phone_->request_keyframe();
+        }
+    }
+
     void generate() {
         const auto begin = std::chrono::steady_clock::now();
         // REC_E2E_LOSE_CAMERA=MS stops the test camera as an unplug would.
@@ -252,6 +314,12 @@ private:
     std::atomic<std::uint64_t> frames_{0};
     std::atomic_bool stop_{false};
     std::thread thread_;
+    std::shared_ptr<core::PhoneCamera> phone_;
+    std::mutex units_mutex_;
+    std::condition_variable units_ready_;
+    std::array<std::vector<std::uint8_t>, 60> units_;  // Access units waiting for the decoder, a ring.
+    std::size_t unit_head_ = 0, unit_count_ = 0;
+    bool skip_to_key_ = false;
 };
 
 void receive_camera(CameraFeed* feed, CMSampleBufferRef sample) { feed->receive(CMSampleBufferGetImageBuffer(sample)); }

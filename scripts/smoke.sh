@@ -146,6 +146,36 @@ else
   grep -q 'Camera frames 30' "$artifacts/camera-lost.record.log"
   "$rec" probe "$artifacts/camera-lost.mov" | tee "$artifacts/camera-lost.probe"
   grep -qx 'frames=90' "$artifacts/camera-lost.probe"
+  # A phone camera: a headless browser with a synthetic camera opens the page rec serves and
+  # sends its green picture over WebRTC; rec decodes the H.264 into the camera's area. The
+  # page is opened on this computer's network address, as a phone would (browsers do not
+  # pair their candidates with a loopback one). scripts/phone.py runs the browser.
+  if ! browser="$(python3 "$root/scripts/phone.py" --find 2>&1)"; then
+    echo "phone camera: not checked, $browser"
+  else
+    token="$(python3 -c 'import secrets, string; print("".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(22)))')"
+    address="$(python3 -c 'import socket; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.connect(("8.8.8.8", 53)); print(s.getsockname()[0])')"
+    "$rec" record --test-pattern -r 1080p -f 30 -t 14 --camera "phone:$token" -o "$artifacts/phone.mp4" \
+      </dev/null >"$tmp/phone.record.log" 2>&1 &
+    phone_rec=$!
+    python3 "$root/scripts/phone.py" "https://$address:47110/#$token" >"$artifacts/phone.page.log" 2>&1 &
+    phone=$!
+    for _ in $(seq 80); do
+      grep -qx 'status=Live in Rec' "$artifacts/phone.page.log" && break
+      sleep 0.25
+    done
+    phone_code=0
+    wait "$phone_rec" || phone_code=$?
+    kill "$phone" 2>/dev/null || true
+    wait "$phone" || true
+    sed "s/$token/TOKEN/g" "$tmp/phone.record.log" | tee "$artifacts/phone.record.log"
+    [[ "$phone_code" == 0 ]] || { echo 'the phone camera recording failed' >&2; exit 1; }
+    grep -qx 'status=Live in Rec' "$artifacts/phone.page.log" || { cat "$artifacts/phone.page.log" >&2; echo 'the phone page never went live' >&2; exit 1; }
+    grep -q "Phone camera: on a phone on this network, open https://$address:47110/#TOKEN" "$artifacts/phone.record.log"
+    within "$(awk '/^Camera frames/ { print $3 }' "$artifacts/phone.record.log")" 90 100000
+    "$rec" probe "$artifacts/phone.mp4" --sample 1420,940,120,80 | tee "$artifacts/phone-camera.probe"
+    for second in 11 12 13; do color "sample_$second" "$artifacts/phone-camera.probe" green; done
+  fi
   # Overlays: a camera and an image composited into every frame on the GPU; "hide 1" removes
   # the camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
   png="$root/scripts/overlay-test.png"

@@ -11,6 +11,8 @@
 
 #include "app/session.hpp"
 #include "cli/engine.hpp"
+#include "core/phone.hpp"
+#include "core/qr.hpp"
 #include "core/shape.hpp"
 
 #include <algorithm>
@@ -229,6 +231,45 @@ enum class Pointer { down, dragged, up, moved, exited };
 - (void)mouseExited:(NSEvent*)event { [self.delegate preview:self pointer:Pointer::exited event:event]; }
 @end
 
+// The phone camera's address as a QR code: black modules on white with the four-module quiet
+// zone, each module a whole number of pixels, centered.
+@interface QRView : NSView
+- (void)show:(const rec::core::Qr&)code;
+@end
+
+@implementation QRView {
+    rec::core::Qr _code;
+}
+- (instancetype)initWithFrame:(NSRect)frame {
+    if ((self = [super initWithFrame:frame])) {
+        self.accessibilityElement = YES;
+        self.accessibilityRole = NSAccessibilityImageRole;
+        self.accessibilityLabel = @"QR code of the phone camera's address";
+    }
+    return self;
+}
+- (void)show:(const rec::core::Qr&)code {
+    _code = code;
+    self.needsDisplay = YES;
+}
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirty {
+    if (!_code.size) return;
+    const int modules = _code.size + 8;
+    const CGFloat backing = self.window ? self.window.backingScaleFactor : 1;
+    const CGFloat bounds = std::min(self.bounds.size.width, self.bounds.size.height);
+    const CGFloat scale = std::max<CGFloat>(1, std::floor(bounds * backing / modules)) / backing, side = modules * scale;
+    const CGFloat left = std::round((self.bounds.size.width - side) / 2 * backing) / backing;
+    const CGFloat top = std::round((self.bounds.size.height - side) / 2 * backing) / backing;
+    [NSColor.whiteColor setFill];
+    NSRectFill(NSMakeRect(left, top, side, side));
+    [NSColor.blackColor setFill];
+    for (int y = 0; y < _code.size; ++y)
+        for (int x = 0; x < _code.size; ++x)
+            if (_code.dark(x, y)) NSRectFill(NSMakeRect(left + (x + 4) * scale, top + (y + 4) * scale, scale, scale));
+}
+@end
+
 // The source a press in the preview takes hold of, and how.
 struct PreviewHit {
     rec::app::SourceRef source;
@@ -322,6 +363,16 @@ struct PreviewHit {
     bool _verticalShown;
     NSTimer* _previewTimer;
     bool _previewing;
+    // The phone camera's code window, made the first time it shows.
+    NSButton* _phoneCode;
+    NSGridRow* _phoneCodeRow;  // Shown only with the phone camera chosen.
+    NSWindow* _phoneWindow;
+    QRView* _phoneQR;
+    NSTextField *_phoneAddress, *_phoneStatus;
+    NSButton* _phoneClose;
+    NSTimer* _phoneTimer;
+    std::uint64_t _phoneFrames;
+    CFAbsoluteTime _phoneSeen;  // When _phoneFrames last advanced.
 }
 
 - (void)applicationDidFinishLaunching:(NSNotification*)notification {
@@ -424,16 +475,18 @@ struct PreviewHit {
     [self refresh];
 }
 
-// The default camera, the connected ones, the test camera for self-tests, and the saved
-// camera if it is not connected.
+// The default camera, the connected ones, the test camera for self-tests, the saved camera
+// if it is not connected, and last a phone over the network.
 - (void)showCameras:(const std::vector<rec::Camera>&)cameras {
     _connected = cameras;
     _cameras = {{"default", "Default camera"}};
     _cameras.insert(_cameras.end(), _connected.begin(), _connected.end());
     if (_testPattern) _cameras.push_back({"test", "Test camera"});
     const auto& saved = _settings.camera_device;
-    if (std::none_of(_cameras.begin(), _cameras.end(), [&](const rec::Camera& c) { return c.id == saved; }))
+    if (!rec::app::is_phone_camera(saved) &&
+        std::none_of(_cameras.begin(), _cameras.end(), [&](const rec::Camera& c) { return c.id == saved; }))
         _cameras.push_back({saved, saved + " (not connected)"});
+    _cameras.push_back({rec::app::phone_camera_id(_settings), "Phone over Wi-Fi"});
     [_cameraDevice removeAllItems];
     NSInteger chosen = 0;
     for (std::size_t i = 0; i < _cameras.size(); ++i) {
@@ -572,7 +625,9 @@ struct PreviewHit {
     };
     if (!_testPattern && !CGPreflightScreenCaptureAccess()) return rec::Permission::screen;
     if (_microphone.state == NSControlStateValueOn && off(rec::Permission::microphone)) return rec::Permission::microphone;
-    if (_settings.camera && _settings.camera_device != "test" && off(rec::Permission::camera)) return rec::Permission::camera;
+    if (_settings.camera && _settings.camera_device != "test" && !rec::app::is_phone_camera(_settings.camera_device) &&
+        off(rec::Permission::camera))
+        return rec::Permission::camera;
     return std::nullopt;
 }
 
@@ -958,6 +1013,7 @@ struct PreviewHit {
 
     _camera = [self check:@"Camera"];
     _cameraDevice = [self popup:@"Camera device"];
+    _phoneCode = [self button:@"Show Phone Code…" action:@selector(showPhoneCode:)];
     _corner = [self popup:@"Camera position"];
     for (const auto& choice : kCorners) [_corner addItemWithTitle:ns(choice.label)];
     _cameraSize = [self popup:@"Camera size"];
@@ -979,11 +1035,14 @@ struct PreviewHit {
     _chooseImage = [self button:@"Choose…" action:@selector(chooseImage:)];
     NSStackView* imageRow = [NSStackView stackViewWithViews:@[_imageFile, _chooseImage]];
     imageRow.distribution = NSStackViewDistributionFill;
-    NSGridView* camera = [self grid:@[@[_camera, _cameraDevice], @[label(@"Position"), _corner], @[label(@"Size"), _cameraSize],
+    NSGridView* camera = [self grid:@[@[_camera, _cameraDevice], @[NSGridCell.emptyContentView, _phoneCode],
+                                      @[label(@"Position"), _corner], @[label(@"Size"), _cameraSize],
                                       @[label(@"Shape"), _cameraShape], @[label(@"Roundness"), _roundness],
                                       @[label(@"Border"), _cameraBorder], @[NSGridCell.emptyContentView, _shadow],
                                       @[_image, imageRow]]];
     [camera columnAtIndex:0].width = 120;
+    _phoneCodeRow = [camera rowAtIndex:1];
+    _phoneCodeRow.hidden = YES;
 
     // The scenes and the sources they arrange.
     _scene = [self popup:@"Scene"];
@@ -1471,11 +1530,99 @@ struct PreviewHit {
         [self readSettings];
         [self showSceneSources];
     }
+    if (sender == _cameraDevice) {
+        [self readSettings];
+        if (rec::app::is_phone_camera(_settings.camera_device)) [self showPhoneCode:nil];
+    }
     if (sender == _showPreview) [self remember];
     [self refresh];
 }
 
 - (void)windowChanged:(NSNotification*)notification { [self refresh]; }
+
+// The phone camera's code: its address as a QR code and as text, how to connect, and whether
+// the phone's picture is arriving. Closing it hides it.
+- (void)showPhoneCode:(id)sender {
+    if (!_phoneWindow) {
+        _phoneWindow = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 400, 520)
+                                                   styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+        _phoneWindow.title = @"Phone camera";
+        _phoneWindow.releasedWhenClosed = NO;
+        _phoneQR = [[QRView alloc] init];
+        NSTextField* help = [NSTextField wrappingLabelWithString:
+            @"Use a phone on the same Wi-Fi as this Mac.\n"
+            @"1. Scan the code with the phone's camera, or type the address.\n"
+            @"2. The browser warns about the certificate, since Rec makes its own: continue to the page.\n"
+            @"3. Allow the camera, and keep the page open. Switch camera picks the front or back one.\n"
+            @"If macOS asks whether Rec may accept incoming network connections, allow it. With the firewall on, "
+            @"Rec must be allowed in System Settings > Network > Firewall > Options."];
+        help.accessibilityLabel = @"How to connect a phone";
+        help.preferredMaxLayoutWidth = 368;
+        _phoneAddress = [NSTextField textFieldWithString:@""];
+        _phoneAddress.editable = NO;
+        _phoneAddress.selectable = YES;
+        _phoneAddress.accessibilityLabel = @"Phone camera address";
+        _phoneStatus = [NSTextField wrappingLabelWithString:@""];
+        _phoneStatus.accessibilityLabel = @"Phone camera status";
+        _phoneStatus.preferredMaxLayoutWidth = 368;
+        _phoneClose = [self button:@"Close" action:@selector(performClose:)];
+        _phoneClose.target = _phoneWindow;
+        _phoneClose.keyEquivalent = @"\r";
+        NSStackView* buttons = [[NSStackView alloc] init];
+        [buttons addView:_phoneClose inGravity:NSStackViewGravityTrailing];
+        NSStackView* stack = [NSStackView stackViewWithViews:@[_phoneQR, help, _phoneAddress, _phoneStatus, buttons]];
+        stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+        stack.alignment = NSLayoutAttributeCenterX;
+        stack.spacing = 10;
+        stack.edgeInsets = NSEdgeInsetsMake(16, 16, 16, 16);
+        [_phoneQR.widthAnchor constraintEqualToConstant:240].active = YES;
+        [_phoneQR.heightAnchor constraintEqualToConstant:240].active = YES;
+        for (NSView* view in @[help, _phoneAddress, _phoneStatus, buttons]) [view.widthAnchor constraintEqualToConstant:368].active = YES;
+        stack.translatesAutoresizingMaskIntoConstraints = NO;
+        NSView* content = _phoneWindow.contentView;
+        [content addSubview:stack];
+        [NSLayoutConstraint activateConstraints:@[
+            [stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+            [stack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+            [stack.topAnchor constraintEqualToAnchor:content.topAnchor],
+            [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
+        ]];
+        [_phoneWindow setContentSize:stack.fittingSize];
+        [_phoneWindow center];
+    }
+    const std::string url = rec::core::PhoneCamera::url(_settings.phone_token);
+    [_phoneQR show:rec::core::qr_code(url)];
+    _phoneAddress.stringValue = url.empty() ? @"No network" : ns(url);
+    [self showPhoneStatus:nil];
+    [_phoneWindow makeKeyAndOrderFront:nil];
+    if (!_phoneTimer) {
+        _phoneTimer = [NSTimer timerWithTimeInterval:0.5 target:self selector:@selector(showPhoneStatus:) userInfo:nil repeats:YES];
+        [NSRunLoop.mainRunLoop addTimer:_phoneTimer forMode:NSRunLoopCommonModes];
+    }
+}
+
+- (void)showPhoneStatus:(NSTimer*)timer {
+    if (timer && !_phoneWindow.visible) {
+        [_phoneTimer invalidate];
+        _phoneTimer = nil;
+        return;
+    }
+    const Status s = _session->status();
+    const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (s.camera_frames != _phoneFrames) {
+        _phoneFrames = s.camera_frames;
+        _phoneSeen = now;
+    }
+    const bool running = s.previewing || s.state == State::recording || s.state == State::paused;
+    NSString* text = !_settings.camera || !rec::app::is_phone_camera(_settings.camera_device)
+                         ? @"Turn on Camera, with Phone over Wi-Fi chosen, to use the phone."
+                     : !running ? @"Rec connects to the phone while the preview shows or while recording."
+                     : _phoneFrames && now - _phoneSeen < 2 ? @"Connected: the phone's picture is in Rec."
+                                                            : @"Waiting for the phone...";
+    if (![_phoneStatus.stringValue isEqualToString:text]) _phoneStatus.stringValue = text;
+}
 
 - (void)chooseScene:(NSMenuItem*)item {
     if (item.tag >= 0) [self changeScene:static_cast<std::size_t>(item.tag)];
@@ -2124,6 +2271,9 @@ struct PreviewHit {
     // Sources are fixed while recording; scenes and where they put the sources are not.
     for (NSControl* control in @[_camera, _image, _chooseImage, _addDisplay, _addWindow]) control.enabled = editable;
     _cameraDevice.enabled = editable && _camera.state == NSControlStateValueOn;
+    const NSInteger device = _cameraDevice.indexOfSelectedItem;
+    _phoneCodeRow.hidden = device < 0 || static_cast<std::size_t>(device) >= _cameras.size() ||
+                           !rec::app::is_phone_camera(_cameras[static_cast<std::size_t>(device)].id);
     const bool arranging = editable || active;
     for (NSControl* control in @[_scene, _newScene, _sceneName, _sourceShown]) control.enabled = arranging;
     _deleteScene.enabled = arranging && _settings.scenes.size() > 1;
@@ -2319,7 +2469,7 @@ struct PreviewHit {
     __block NSString* unnamed = nil;
     ui(^{
         for (NSControl* control in @[self->_record, self->_pause, self->_saveReplay, self->_replay, self->_replayLength,
-                                     self->_camera, self->_cameraDevice, self->_corner, self->_cameraSize, self->_scene,
+                                     self->_camera, self->_cameraDevice, self->_phoneCode, self->_corner, self->_cameraSize, self->_scene,
                                      self->_newScene, self->_deleteScene, self->_sceneName, self->_sourcesTable,
                                      self->_sourceShown, self->_addDisplay, self->_addWindow, self->_removeSource,
                                      self->_image, self->_imageFile, self->_chooseImage, self->_source, self->_systemAudio, self->_microphone,
@@ -2878,6 +3028,130 @@ struct PreviewHit {
     if (style_now() != "rectangle") fail([@"the camera style is " stringByAppendingString:ns(style_now())]);
     note(@"camera-look=ok");
 
+    // 6p. Phone camera: choosing Phone over Wi-Fi opens its code window with the address. A
+    // headless browser with a synthetic camera (green) opens it, run by scripts/phone.py,
+    // which app-e2e.sh names in REC_APP_SELF_TEST_PHONE when a browser is found; the window
+    // reports the phone connected and the preview shows its picture in the camera's place
+    // (top right since 6b). A recording takes the phone over from the preview. Then back to
+    // the test camera.
+    if (const std::string helper = environment("REC_APP_SELF_TEST_PHONE"); helper.empty()) {
+        note(@"phone-camera=skipped");
+    } else {
+        const auto until = [&](auto done, double seconds) {
+            for (double waited = 0; waited < seconds; waited += 0.1) {
+                if (done()) return true;
+                usleep(100000);
+            }
+            return static_cast<bool>(done());
+        };
+        __block NSInteger cameraCount = 0, testCamera = -1;
+        __block NSString* lastCamera;
+        ui(^{
+            cameraCount = self->_cameraDevice.numberOfItems;
+            lastCamera = self->_cameraDevice.lastItem.title;
+            for (std::size_t i = 0; i < self->_cameras.size(); ++i)
+                if (self->_cameras[i].id == "test") testCamera = static_cast<NSInteger>(i);
+        });
+        if (![lastCamera isEqualToString:@"Phone over Wi-Fi"]) fail([@"the last camera is " stringByAppendingString:lastCamera ?: @"missing"]);
+        choose(_cameraDevice, cameraCount - 1);
+        NSString* address = nil;
+        const bool opened = until([&] {
+            __block BOOL visible = NO;
+            __block NSString* shown;
+            ui(^{
+                visible = self->_phoneWindow.visible;
+                shown = self->_phoneAddress.stringValue;
+            });
+            address = shown;
+            return visible;
+        }, 5);
+        if (!opened) fail(@"the phone code window did not open");
+        // The address carries the token, so it is checked here and never written to the report.
+        if (![[NSPredicate predicateWithFormat:@"SELF MATCHES %@", @"https://[0-9.]+:47110/#[A-Za-z0-9]{22}"] evaluateWithObject:address])
+            fail(@"the phone address is not https://IP:47110/#TOKEN");
+        __block NSString* unnamedPhone = nil;
+        __block BOOL codeButton = NO;
+        ui(^{
+            codeButton = !self->_phoneCodeRow.hidden && self->_phoneCode.accessibilityTitle.length;
+            for (NSView* view in @[self->_phoneQR, self->_phoneAddress, self->_phoneStatus])
+                if (!view.accessibilityLabel.length) unnamedPhone = view.className;
+            if (!self->_phoneClose.title.length) unnamedPhone = @"Close";
+        });
+        if (!codeButton) fail(@"Show Phone Code… is not shown with the phone camera chosen");
+        if (unnamedPhone) fail([@"a phone window control has no accessible name: " stringByAppendingString:unnamedPhone]);
+        const auto phone_status = [&] {
+            __block NSString* text;
+            ui(^{ text = self->_phoneStatus.stringValue; });
+            return text;
+        };
+        if (!until([&] { return [phone_status() isEqualToString:@"Waiting for the phone..."]; }, 15))
+            fail([@"the phone window says " stringByAppendingString:phone_status()]);
+        const double phoneArea[4] = {0.75, 0.12, 0.16, 0.14};
+        const auto phone_shown = [&](bool green) {
+            __block rec::PreviewFrame shot;
+            ui(^{ shot = self->_frame; });
+            return shot.number &&
+                   is_color(mean_color(shot, phoneArea[0], phoneArea[1], phoneArea[2], phoneArea[3]), @"green") == green;
+        };
+        if (!until([&] { return phone_shown(false); }, 15)) fail(@"app-phone-waiting: the preview showed green before the phone connected");
+        NSString* pageLog = [artifacts stringByAppendingPathComponent:@"app-phone.page.log"];
+        [NSFileManager.defaultManager createFileAtPath:pageLog contents:nil attributes:nil];
+        NSFileHandle* pageOutput = [NSFileHandle fileHandleForWritingAtPath:pageLog];
+        NSTask* browser = [[NSTask alloc] init];
+        browser.executableURL = [NSURL fileURLWithPath:@"/usr/bin/env"];
+        browser.arguments = @[@"python3", ns(helper), address];
+        browser.standardOutput = pageOutput;
+        browser.standardError = pageOutput;
+        NSError* launchError = nil;
+        if (![browser launchAndReturnError:&launchError]) fail([@"could not start the phone's browser: " stringByAppendingString:launchError.localizedDescription]);
+        // phone.py also closes its browser when this process ends, as it does after fail().
+        const auto stop_browser = [&] {
+            if (browser.running) [browser terminate];
+            [browser waitUntilExit];
+        };
+        const auto page_live = [&] {
+            NSString* text = [NSString stringWithContentsOfFile:pageLog encoding:NSUTF8StringEncoding error:nil];
+            return [text containsString:@"status=Live in Rec\n"];
+        };
+        if (!until(page_live, 20)) {
+            stop_browser();
+            fail(@"the phone page never went live; see app-phone.page.log");
+        }
+        if (!until([&] { return [phone_status() hasPrefix:@"Connected"]; }, 15)) {
+            stop_browser();
+            fail([@"the phone window says " stringByAppendingString:phone_status()]);
+        }
+        ui(^{
+            NSView* view = self->_phoneWindow.contentView;
+            NSBitmapImageRep* rep = [view bitmapImageRepForCachingDisplayInRect:view.bounds];
+            [view cacheDisplayInRect:view.bounds toBitmapImageRep:rep];
+            [[rep representationUsingType:NSBitmapImageFileTypePNG properties:@{}]
+                writeToFile:[artifacts stringByAppendingPathComponent:@"app-phone-code.png"] atomically:YES];
+        });
+        if (!until([&] { return phone_shown(true); }, 15)) {
+            stop_browser();
+            wait_preview(@"app-phone-preview", @"green", phoneArea[0], phoneArea[1], phoneArea[2], phoneArea[3]);
+        }
+        const auto connected = preview();
+        press(_record);
+        wait_for(recording, 20);
+        recorded(8.0);
+        press(_record);
+        wait_for(@"Ready to record", 30);
+        stop_browser();
+        saved(@"phone");
+        save_png(connected, @"app-preview-phone");
+        press(_phoneClose);
+        __block BOOL stillOpen = YES;
+        ui(^{ stillOpen = self->_phoneWindow.visible; });
+        if (stillOpen) fail(@"the phone code window did not close");
+        if (testCamera < 0) fail(@"no test camera to choose again");
+        choose(_cameraDevice, testCamera);
+        __block NSString* chosenCamera;
+        ui(^{ chosenCamera = self->_cameraDevice.titleOfSelectedItem; });
+        if (![chosenCamera isEqualToString:@"Test camera"]) fail(@"the test camera was not chosen again");
+        note(@"phone-camera=ok");
+    }
     // 6d. Scenes: a new scene, renamed, puts the recorded screen in the bottom-right quarter by
     // dragging its top-left corner, and hides the camera with Show in this scene. Recording
     // starts in it and switches back to the first scene at 2 s.
