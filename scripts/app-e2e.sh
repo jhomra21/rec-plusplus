@@ -153,7 +153,8 @@ grep -qx 'height=1920' "$artifacts/app-vertical.probe"
 frames="$(value frames "$artifacts/app-stream-local.probe")"
 within "$(value frames "$artifacts/app-vertical.probe")" "$(least "$frames")" "$((frames + 2))"
 within "$(value av_sync_events "$artifacts/app-vertical.probe")" 3 6
-within "$(value av_offset_max_ms "$artifacts/app-vertical.probe")" 0 20
+# A vertical frame the runner skips moves its flash to the next 33 ms slot (31.5 ms seen).
+within "$(value av_offset_max_ms "$artifacts/app-vertical.probe")" 0 "$([[ "${GITHUB_ACTIONS:-}" == true ]] && echo 35 || echo 20)"
 
 probe "$(step hidden)" app-hidden
 within "$(value duration "$artifacts/app-hidden.probe")" 1.5 3.5
