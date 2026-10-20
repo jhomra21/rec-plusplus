@@ -541,6 +541,7 @@ try {
     Set-Check $ui 'Keep the last' $false
     # Step 4 hid the window; the preview draws only while it shows.
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1002, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Show Rec"
+    if (((Find $ui 'Camera device' $ComboBox).Item.accState(0) -band 0x1) -ne 0) { throw 'the camera menu was disabled while Camera was off' }
     Set-Check $ui 'Camera' $true
     Set-Check $ui 'Image overlay' $true
     # Before Start the preview already shows the scene; with Show preview off it stops.

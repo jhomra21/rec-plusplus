@@ -2290,7 +2290,7 @@ struct PreviewHit {
         control.enabled = editable ? _microphone.state == NSControlStateValueOn : active && s.microphone;
     // Sources are fixed while recording; scenes and where they put the sources are not.
     for (NSControl* control in @[_camera, _image, _chooseImage, _addDisplay, _addWindow]) control.enabled = editable;
-    _cameraDevice.enabled = editable && _camera.state == NSControlStateValueOn;
+    _cameraDevice.enabled = editable;
     const NSInteger device = _cameraDevice.indexOfSelectedItem;
     _phoneCodeRow.hidden = device < 0 || static_cast<std::size_t>(device) >= _cameras.size() ||
                            !rec::app::is_phone_camera(_cameras[static_cast<std::size_t>(device)].id);
@@ -2811,6 +2811,9 @@ struct PreviewHit {
         for (std::size_t i = 0; i < self->_cameras.size(); ++i)
             if (self->_cameras[i].id == "test") [self->_cameraDevice selectItemAtIndex:static_cast<NSInteger>(i)];
     });
+    __block BOOL cameraMenuAvailable = NO;
+    ui(^{ cameraMenuAvailable = self->_camera.state == NSControlStateValueOff && self->_cameraDevice.enabled; });
+    if (!cameraMenuAvailable) fail(@"the camera menu was disabled while Camera was off");
     set_check(_camera, true);
     set_check(_image, true);
     const auto scene = [&](NSInteger index) {

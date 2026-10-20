@@ -910,6 +910,7 @@ private:
             access_->SetHwndPropStr(get(kSystemVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"System audio volume");
             access_->SetHwndPropStr(get(kMicVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Microphone volume");
             access_->SetHwndPropStr(get(kRoundness), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Camera roundness");
+            access_->SetHwndPropStr(get(kCameraDevice), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Camera device");
         }
 
         show_settings();
@@ -2194,7 +2195,7 @@ private:
         for (int id : {kMicVolume, kMicMute}) EnableWindow(get(id), editable ? checked(kMicrophone) : active && s.microphone);
         // Sources are fixed while recording; scenes and where they put the sources are not.
         for (int id : {kCamera, kImage, kBrowseImage, kAddDisplay, kAddWindow}) EnableWindow(get(id), editable);
-        EnableWindow(get(kCameraDevice), editable && checked(kCamera));
+        EnableWindow(get(kCameraDevice), editable);
         const bool arranging = editable || active;
         for (int id : {kScene, kNewScene, kSceneName, kSourceShown}) EnableWindow(get(id), arranging);
         EnableWindow(get(kDeleteScene), arranging && settings_.scenes.size() > 1);
