@@ -336,7 +336,13 @@ try {
     Set-Check $ui 'Microphone' $true
     $deadline = (Get-Date).AddSeconds(5)
     while ([AppWindow]::IsWindowVisible($row.Handle)) {
-        if ((Get-Date) -gt $deadline) { throw 'the permission row stayed after access came back' }
+        if ((Get-Date) -gt $deadline) {
+            $store = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone'
+            $values = foreach ($key in @($store, "$store\NonPackaged", ($store -replace '^HKCU:', 'HKLM:'))) {
+                "$key=$((Get-ItemProperty -Path $key -Name Value -ErrorAction SilentlyContinue).Value)"
+            }
+            throw "the permission row stayed after access came back: '$($row.Item.accName(0))'; $(Text-Of $ui 101); $($values -join '; ')"
+        }
         Start-Sleep -Milliseconds 100
     }
     Write-Host '0. permissions: microphone access off was shown and kept the recording from starting'
