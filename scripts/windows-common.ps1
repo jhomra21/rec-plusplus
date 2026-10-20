@@ -385,10 +385,16 @@ function Start-Phone([string]$url, [int]$port = 9333) {
                  "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $browser) { throw 'the phone camera E2E needs Chrome or Edge' }
     $profile = Join-Path $env:TEMP "rec-phone-$PID"
-    $process = Start-Process -FilePath $browser -PassThru -ArgumentList @('--headless=new', '--use-fake-device-for-media-stream',
+    # Chrome and Edge ask Windows whether apps may use the camera and microphone, and that can
+    # create the user's switches set to Deny (a runner's default), which then keeps rec from
+    # recording a microphone. Stop-Phone puts them back.
+    $store = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore'
+    $consent = foreach ($key in @("$store\microphone", "$store\microphone\NonPackaged", "$store\webcam", "$store\webcam\NonPackaged")) {
+        @{ Key = $key; Existed = (Test-Path $key); Value = (Get-ItemProperty -Path $key -Name Value -ErrorAction SilentlyContinue).Value }
+    }    $process = Start-Process -FilePath $browser -PassThru -ArgumentList @('--headless=new', '--use-fake-device-for-media-stream',
         '--use-fake-ui-for-media-stream', '--ignore-certificate-errors', '--inprivate', '--incognito', '--no-first-run',
         '--disable-sync', "--remote-debugging-port=$port", "--user-data-dir=$profile", $url)
-    return @{ Process = $process; Port = $port; Profile = $profile }
+    return @{ Process = $process; Port = $port; Profile = $profile; Consent = $consent }
 }
 
 function Get-PageText($phone, [string]$expression) {
@@ -430,4 +436,9 @@ function Stop-Phone($phone) {
     $phone.Process.WaitForExit(5000) | Out-Null
     Start-Sleep -Milliseconds 500
     Remove-Item -Recurse -Force $phone.Profile -ErrorAction SilentlyContinue
+    foreach ($entry in $phone.Consent) {
+        if ($null -ne $entry.Value) { Set-ItemProperty -Path $entry.Key -Name Value -Value $entry.Value }
+        elseif ($entry.Existed) { Remove-ItemProperty -Path $entry.Key -Name Value -ErrorAction SilentlyContinue }
+        else { Remove-Item -Path $entry.Key -Recurse -Force -ErrorAction SilentlyContinue }
+    }
 }
