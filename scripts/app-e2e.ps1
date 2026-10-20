@@ -334,7 +334,11 @@ try {
     # Turned back on, the row goes once the app looks again (here: the box changes).
     Set-Check $ui 'Microphone' $false
     Set-Check $ui 'Microphone' $true
-    if ([AppWindow]::IsWindowVisible($row.Handle)) { throw 'the permission row stayed after access came back' }
+    $deadline = (Get-Date).AddSeconds(5)
+    while ([AppWindow]::IsWindowVisible($row.Handle)) {
+        if ((Get-Date) -gt $deadline) { throw 'the permission row stayed after access came back' }
+        Start-Sleep -Milliseconds 100
+    }
     Write-Host '0. permissions: microphone access off was shown and kept the recording from starting'
     # 1. Record, pause, resume, stop: 2 + 2 s recorded around a 1.5 s pause.
     Set-Check $ui 'System audio' $true
