@@ -42,6 +42,9 @@ public:
     // One 20 ms Opus packet starting at a 48 kHz sample index on the stream timeline.
     bool audio(std::int64_t sample, Bytes packet);
     void close(int flush_ms);
+    // True once when the server asked for a keyframe (RTCP PLI or FIR) and none was queued in
+    // the last second: the encoder should make the next frame a keyframe.
+    bool take_keyframe_request();
 
     bool live() const noexcept { return live_.load(); }
     bool reconnecting() const noexcept { return reconnecting_.load(); }
@@ -87,7 +90,8 @@ private:
     std::chrono::steady_clock::time_point flush_deadline_{};
     std::string failure_;
     std::thread sender_;
-    std::atomic_bool live_{false}, reconnecting_{false};
+    std::atomic_bool live_{false}, reconnecting_{false}, keyframe_wanted_{false};
+    std::atomic<std::int64_t> last_key_ns_{0};  // steady_clock time the last keyframe was queued.
     std::atomic<std::uint32_t> reconnects_{0};
     std::atomic<std::uint64_t> bytes_{0}, dropped_{0};
 };

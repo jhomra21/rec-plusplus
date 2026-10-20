@@ -25,10 +25,12 @@
 #endif
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <fstream>
 #include <iterator>
 #include <string_view>
+#include <thread>
 
 namespace rec::core {
 namespace {
@@ -363,13 +365,25 @@ bool UdpSocket::send(const Endpoint& to, const std::uint8_t* data, std::size_t s
     sockaddr_storage address{};
     int length = 0;
     to_sockaddr(to, address, length);
+    // A keyframe leaves as a burst of a hundred or more datagrams. When the interface queue is
+    // full, macOS fails sendto with ENOBUFS instead of waiting (a slow CI Mac lost the first
+    // keyframe this way), so wait a millisecond and try again, for up to 20 ms.
+    for (int attempt = 0;; ++attempt) {
 #ifdef _WIN32
-    return ::sendto(as_socket(socket_), reinterpret_cast<const char*>(data), static_cast<int>(size), 0,
-                    reinterpret_cast<sockaddr*>(&address), length) == static_cast<int>(size);
+        if (::sendto(as_socket(socket_), reinterpret_cast<const char*>(data), static_cast<int>(size), 0,
+                     reinterpret_cast<sockaddr*>(&address), length) == static_cast<int>(size))
+            return true;
+        const int error = WSAGetLastError();
+        const bool full = error == WSAENOBUFS || error == WSAEWOULDBLOCK;
 #else
-    return ::sendto(as_socket(socket_), data, size, 0, reinterpret_cast<sockaddr*>(&address),
-                    static_cast<socklen_t>(length)) == static_cast<ssize_t>(size);
+        if (::sendto(as_socket(socket_), data, size, 0, reinterpret_cast<sockaddr*>(&address),
+                     static_cast<socklen_t>(length)) == static_cast<ssize_t>(size))
+            return true;
+        const bool full = errno == ENOBUFS || errno == EAGAIN || errno == EWOULDBLOCK;
 #endif
+        if (!full || attempt == 20) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
 }
 
 std::size_t UdpSocket::receive(std::uint8_t* data, std::size_t size, int timeout_ms, Endpoint& from) {

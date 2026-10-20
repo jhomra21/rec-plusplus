@@ -349,9 +349,16 @@ private:
 
     void encode_video(const Pending& frame) {
         const auto fps = static_cast<int32_t>(settings_.fps);
+        CFDictionaryRef options = nullptr;
+        if (servers_.keyframe_requested()) {
+            const void* keys[] = {kVTEncodeFrameOptionKey_ForceKeyFrame};
+            const void* values[] = {kCFBooleanTrue};
+            options = CFDictionaryCreate(nullptr, keys, values, 1, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        }
         const OSStatus status = VTCompressionSessionEncodeFrame(
             session_, frame.pixel, CMTimeMake(static_cast<int64_t>(frame.slot), fps), CMTimeMake(1, fps),
-            nullptr, nullptr, nullptr);
+            options, nullptr, nullptr);
+        if (options) CFRelease(options);
         if (status != noErr) fail(failed("stream video encoding failed", status));
     }
 

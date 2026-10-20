@@ -841,6 +841,13 @@ bool Broadcast::wants_opus() const noexcept {
     return std::any_of(servers_.begin(), servers_.end(), [](const auto& s) { return s->whip != nullptr; });
 }
 
+bool Broadcast::keyframe_requested() {
+    bool wanted = false;
+    for (auto& server : servers_)
+        if (server->whip && server->whip->take_keyframe_request()) wanted = true;
+    return wanted;
+}
+
 void Broadcast::opus(std::int64_t sample, const Bytes& packet) {
     for (auto& server : servers_)
         if (server->whip) server->whip->audio(sample, packet);

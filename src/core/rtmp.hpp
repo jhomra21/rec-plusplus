@@ -173,6 +173,8 @@ public:
     bool wants_opus() const noexcept;
     // One 20 ms Opus packet starting at a 48 kHz sample index.
     void opus(std::int64_t sample, const Bytes& packet);
+    // True when a WHIP server asked for a keyframe: make the next frame one.
+    bool keyframe_requested();
     // Closes every server at once, each sending what is queued for at most flush_ms. The
     // counters stay readable afterwards.
     void close(int flush_ms);

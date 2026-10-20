@@ -595,7 +595,12 @@ bool WhipPublisher::video(std::uint32_t ms, bool key, bool header, const Bytes& 
         need_key_ = true;
         return false;
     }
-    if (need_key_ && !key) { dropped_.fetch_add(1); return false; }
+    if (need_key_ && !key) {
+        // Waiting for a keyframe after a drop or a reconnect: ask the encoder for one.
+        keyframe_wanted_.store(true);
+        dropped_.fetch_add(1);
+        return false;
+    }
     // Behind by more than the queue allows: drop the queued video and restart at a keyframe.
     auto oldest = std::find_if(queue_.begin(), queue_.end(), [](const Media& m) { return m.video; });
     if (!key && oldest != queue_.end() && ms - oldest->ms > kQueueMs) {
@@ -615,7 +620,16 @@ bool WhipPublisher::video(std::uint32_t ms, bool key, bool header, const Bytes& 
     m.ms = static_cast<std::uint32_t>(static_cast<std::int64_t>(ms) + cts);
     m.data.assign(body.begin() + 5, body.end());
     queue_.push_back(std::move(m));
+    if (key) last_key_ns_.store(Clock::now().time_since_epoch().count());
     return true;
+}
+
+bool WhipPublisher::take_keyframe_request() {
+    if (!keyframe_wanted_.exchange(false)) return false;
+    // Some servers (MediaMTX) ask every couple of seconds whether or not they lost anything.
+    // A keyframe less than a second ago answers that; the regular one comes within 2 s.
+    const auto since = Clock::now().time_since_epoch().count() - last_key_ns_.load();
+    return since >= std::chrono::duration_cast<Clock::duration>(milliseconds(1000)).count();
 }
 
 bool WhipPublisher::audio(std::int64_t sample, Bytes packet) {
@@ -858,6 +872,10 @@ void WhipPublisher::handle_datagram(Session& s, const std::uint8_t* data, std::s
                     if (kept.size() >= 12 && get16(kept.data() + 2) == seq) s.send(kept);
                 }
             }
+        } else if (type == 206 && (format == 1 || format == 4)) {
+            // PLI or FIR: the server cannot decode the picture (servers also send one when they
+            // start reading). Answered with a keyframe; until then frames would not decode.
+            keyframe_wanted_.store(true);
         }
         at += length;
     }

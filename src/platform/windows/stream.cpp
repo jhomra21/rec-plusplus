@@ -470,6 +470,10 @@ private:
     }
 
     void encode_video(IMFSample* frame) {
+        if (servers_.keyframe_requested()) {
+            ComPtr<ICodecAPI> api;
+            if (SUCCEEDED(video_.mft.As(&api))) set_value(api.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1);
+        }
         HRESULT hr = video_.input(frame);
         if (hr == MF_E_NOTACCEPTING && !video_.async) {
             collect_video();
