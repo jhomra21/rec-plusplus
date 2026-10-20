@@ -210,7 +210,7 @@ try {
     $route.Connect('8.8.8.8', 53)
     $address = $route.Client.LocalEndPoint.Address.ToString()
     $route.Dispose()
-    $relay = Start-Relay (Join-Path $root 'support\phone-relay') (Join-Path $artifacts 'relay.log')
+    $phoneRelay = Start-Relay (Join-Path $root 'support\phone-relay') (Join-Path $artifacts 'relay.log')
     function Test-Phone([string]$name, [string]$relayUrl) {
         $token = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 22 | ForEach-Object { [char]$_ })
         $env:REC_PHONE_RELAY = if ($relayUrl) { $relayUrl } else { 'off' }
@@ -254,7 +254,9 @@ try {
     }
     Test-Phone 'phone' ''
     # The relay stays set for the rest, so the app's phone camera uses it too.
-    Test-Phone 'phone-relay' $relay.Url    # Overlays: a camera and an image drawn into every frame on the GPU; "hide 1" removes the
+    Test-Phone 'phone-relay' $phoneRelay.Url
+
+    # Overlays: a camera and an image drawn into every frame on the GPU; "hide 1" removes the
     # camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
     $png = Join-Path $PSScriptRoot 'overlay-test.png'
     Expect-Failure 'could not open the image' @('record', '--test-pattern', '-t', '1', '--image', (Join-Path $artifacts 'missing.png'), '-o', (Join-Path $artifacts 'missing.mp4'))
@@ -710,6 +712,6 @@ try {
     & (Join-Path $PSScriptRoot 'app-e2e.ps1') -Rec $rec -App $app -Artifacts $appArtifacts
     Write-Host 'smoke passed'
 } finally {
-    Stop-Relay $relay
+    Stop-Relay $phoneRelay
     if ($artifacts -ne $tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
 }
