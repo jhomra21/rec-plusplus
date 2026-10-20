@@ -440,6 +440,40 @@ else
   fi
   if grep -q smokekey "$artifacts/stream-canvas2.record.log"; then echo 'a stream key was printed' >&2; exit 1; fi
 
+  # TikTok-shaped signed key: MediaMTX routes without the query. The local rehearsal also
+  # checked the full query at its HTTP auth hook. Keep this local and never print the key.
+  tiktok_key='stream-REHEARSAL_ID?expire=EXAMPLE_EXPIRY&sign=EXAMPLE_SIGNATURE'
+  "$rec" record --test-pattern --test-tone -r 1080p -f 30 -t 6 --stream-bitrate 6000 \
+    --stream rtmp://127.0.0.1:1935/live/tiktok-landscape \
+    --canvas2 vertical --canvas2-place screen:0,0,1,1:0.34,0,0.32,1 \
+    --canvas2-stream "rtmp://127.0.0.1:1935/game/$tiktok_key" \
+    -o "$artifacts/stream-tiktok-local.mov" | tee "$artifacts/stream-tiktok.record.log"
+  if grep -Eq 'REHEARSAL_ID|EXAMPLE_SIGNATURE' "$artifacts/stream-tiktok.record.log"; then
+    echo 'the TikTok stream key or signature was printed' >&2; exit 1
+  fi
+  grep -Eq 'Second canvas 1080x1920: (13[5-9]|1[4-7][0-9]|180) frames, skipped ([0-9]|[1-3][0-9]|4[0-5])([^0-9]|$)' \
+    "$artifacts/stream-tiktok.record.log"
+  file="$(find "$received/game/stream-REHEARSAL_ID" -type f -name '*.mp4' -print -quit)"
+  [[ -n "$file" ]] || { echo 'MediaMTX recorded nothing for the TikTok-shaped stream' >&2; exit 1; }
+  "$rec" probe "$file" | tee "$artifacts/stream-tiktok-received.probe"
+  grep -qx 'codec=h264' "$artifacts/stream-tiktok-received.probe"
+  grep -qx 'width=1080' "$artifacts/stream-tiktok-received.probe"
+  grep -qx 'height=1920' "$artifacts/stream-tiktok-received.probe"
+  grep -qx 'audio_codec=aac' "$artifacts/stream-tiktok-received.probe"
+  within "$(value frames "$artifacts/stream-tiktok-received.probe")" 129 180
+  within "$(value av_sync_events "$artifacts/stream-tiktok-received.probe")" 5 6
+  within "$(value av_offset_max_ms "$artifacts/stream-tiktok-received.probe")" 0 55
+  file="$(find "$received/live/tiktok-landscape" -type f -name '*.mp4' -print -quit)"
+  [[ -n "$file" ]] || { echo 'MediaMTX recorded nothing for the accompanying landscape stream' >&2; exit 1; }
+  "$rec" probe "$file" | tee "$artifacts/stream-tiktok-landscape-received.probe"
+  grep -qx 'codec=h264' "$artifacts/stream-tiktok-landscape-received.probe"
+  grep -qx 'width=1920' "$artifacts/stream-tiktok-landscape-received.probe"
+  grep -qx 'height=1080' "$artifacts/stream-tiktok-landscape-received.probe"
+  grep -qx 'audio_codec=aac' "$artifacts/stream-tiktok-landscape-received.probe"
+  within "$(value frames "$artifacts/stream-tiktok-landscape-received.probe")" 174 180
+  within "$(value av_sync_events "$artifacts/stream-tiktok-landscape-received.probe")" 5 6
+  within "$(value av_offset_max_ms "$artifacts/stream-tiktok-landscape-received.probe")" 0 55
+
   # A server restart mid-stream: the stream reconnects and resumes at the next keyframe.
   "$rec" record --test-pattern --test-tone -r 720p -f 30 -t 10 --stream rtmp://127.0.0.1:1935/live/smokekey5 \
     -o "$artifacts/stream-reconnect.mov" </dev/null >"$artifacts/stream-reconnect.record.log" 2>&1 &
