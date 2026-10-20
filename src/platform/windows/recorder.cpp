@@ -2016,6 +2016,7 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
     HRESULT hr = open(reader);
     if (FAILED(hr)) return {failed("could not open movie", hr)};
     int video = -1, audio = -1;
+    DWORD audio_subtype = 0;
     for (DWORD i = 0;; ++i) {
         ComPtr<IMFMediaType> type;
         hr = reader->GetNativeMediaType(i, 0, &type);
@@ -2042,7 +2043,10 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
             ++probe.audio_tracks;
             if (audio < 0) {
                 audio = static_cast<int>(i);
-                probe.audio_codec = subtype == MFAudioFormat_AAC ? "aac" : subtype == MFAudioFormat_Opus ? "opus" : "other";
+                // Without an Opus decoder installed, the MP4 source may name Opus by its FourCC.
+                const bool opus = subtype == MFAudioFormat_Opus || subtype.Data1 == FCC('Opus') || subtype.Data1 == FCC('opus');
+                probe.audio_codec = subtype == MFAudioFormat_AAC ? "aac" : opus ? "opus" : "other";
+                audio_subtype = subtype.Data1;
             }
         }
     }
@@ -2163,7 +2167,11 @@ Result probe_file(const std::string& path, Probe& probe, std::optional<Region> s
             ::OpusDecoder*& decoder;
             ~OpusDone() { if (decoder) opus_decoder_destroy(decoder); }
         } opus_done{opus};
-        if (FAILED(hr) && !opus) return {failed("could not decode audio", hr)};
+        if (FAILED(hr) && !opus) {
+            char kind[16];
+            std::snprintf(kind, sizeof kind, "%08lX", static_cast<unsigned long>(audio_subtype));
+            return {failed(("could not decode audio of type " + std::string(kind)).c_str(), hr)};
+        }
         ComPtr<IMFMediaType> actual;
         audio_reader->GetCurrentMediaType(static_cast<DWORD>(audio), &actual);
         const UINT32 channels = opus ? 2 : std::max<UINT32>(1, MFGetAttributeUINT32(actual.Get(), MF_MT_AUDIO_NUM_CHANNELS, 2));
