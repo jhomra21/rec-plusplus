@@ -376,6 +376,37 @@ public static class RecOutputMeter {
     return [RecOutputMeter]::Peak([int]($seconds * 1000))
 }
 
+# The phone camera's relay (support/phone-relay) on this computer, in wrangler's local Workers
+# runtime, so the E2E checks this checkout's relay rather than the deployed one. Needs Node.js;
+# the first run downloads wrangler. Close it with Stop-Relay.
+function Start-Relay([string]$directory, [string]$log, [int]$port = 8787) {
+    $env:WRANGLER_SEND_METRICS = 'false'
+    $process = Start-Process -FilePath 'cmd.exe' -PassThru -NoNewWindow -WorkingDirectory $directory `
+        -RedirectStandardOutput $log -RedirectStandardError "$log.err" `
+        -ArgumentList @('/c', 'npx', '--yes', 'wrangler@4.151.3', 'dev', '--ip', '127.0.0.1', '--port', "$port", '--show-interactive-dev-session=false')
+    $relay = @{ Process = $process; Url = "http://127.0.0.1:$port" }
+    $deadline = (Get-Date).AddSeconds(180)
+    while ($true) {
+        try { if ((Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 "$($relay.Url)/").StatusCode -eq 200) { return $relay } } catch { }
+        if ($process.HasExited -or (Get-Date) -gt $deadline) {
+            Stop-Relay $relay
+            throw "the relay did not start: $(Get-Content -Raw $log -ErrorAction SilentlyContinue) $(Get-Content -Raw "$log.err" -ErrorAction SilentlyContinue)"
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+function Stop-Relay($relay) {
+    if ($relay -and -not $relay.Process.HasExited) { & taskkill.exe /T /F /PID $relay.Process.Id 2>&1 | Out-Null }
+}
+
+# Posts an offer to the relay with a wrong signature, as a relay or anyone who knows the room
+# could; rec must refuse it. Returns the relay's reply and status.
+function Send-ForgedOffer([string]$relay, [string]$token) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $room = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes("rec phone room`n$token")) | ForEach-Object { $_.ToString('x2') })
+    return (curl.exe -s -w ' [%{http_code}]' -X POST -H 'Content-Type: application/sdp' -H "Rec-Mac: $('0' * 64)" --data 'v=0' "$relay/rooms/$room/offer")
+}
 # The base64 SHA-256 of the phone server's public key (its SubjectPublicKeyInfo), which is what
 # Chrome's --ignore-certificate-errors-spki-list takes. A browser pinned to it refuses any other
 # key, as a real phone does after its person confirmed the certificate warning once.
@@ -407,7 +438,8 @@ function Start-Phone([string]$url, [int]$port = 9333) {
                  "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
                  "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $browser) { throw 'the phone camera E2E needs Chrome or Edge' }
-    $pin = Get-PhoneKeyPin $url
+    # Rec's own page needs its key pinned; a relay's page has a real certificate, or none.
+    $pin = if ($url -match '^https://[0-9.]+:') { Get-PhoneKeyPin $url } else { '' }
     $profile = Join-Path $env:TEMP "rec-phone-$PID"
     # Chrome and Edge ask Windows whether apps may use the camera and microphone, and that can
     # create the user's switches set to Deny (a runner's default), which then keeps rec from
@@ -423,7 +455,7 @@ function Start-Phone([string]$url, [int]$port = 9333) {
 
 function Get-PageText($phone, [string]$expression) {
     $targets = Invoke-RestMethod "http://127.0.0.1:$($phone.Port)/json"
-    $page = $targets | Where-Object { $_.type -eq 'page' -and $_.url -like 'https:*' } | Select-Object -First 1
+    $page = $targets | Where-Object { $_.type -eq 'page' -and $_.url -match '^https?:' } | Select-Object -First 1
     if (-not $page) { return $null }
     $socket = New-Object System.Net.WebSockets.ClientWebSocket
     $none = [Threading.CancellationToken]::None

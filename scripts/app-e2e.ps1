@@ -18,7 +18,8 @@
 #      The camera's shape, border and shadow show before Start and change while recording.
 #      A new scene with a display layer, placed by dragging, is switched away from while recording.
 #      A phone camera (a headless browser with a synthetic camera) opens the address in the
-#      phone code window, shows in the preview, and stays in a recording started from there.
+#      phone code window (the relay's page), shows in the preview, and stays in a recording
+#      started from there.
 #   7. Volume and mute change the mix while recording, from the window and the menu.
 #   8. Settings persist without the stream key, which Credential Manager holds.
 #   9. Quit Rec from the notification-area menu while recording saves the movie, then exits.
@@ -297,6 +298,13 @@ function Engine-Command([string]$command) {
 }
 function Stop-Engine { Engine-Command 'shutdown' | Out-Null }
 Stop-Engine
+# The phone camera's page comes from the relay: smoke.ps1 runs one, or this runs its own.
+$ownRelay = $null
+if (-not $env:REC_PHONE_RELAY) {
+    $ownRelay = Start-Relay (Join-Path (Split-Path -Parent $PSScriptRoot) 'support\phone-relay') (Join-Path $Artifacts 'app-relay.log')
+    $env:REC_PHONE_RELAY = $ownRelay.Url
+}
+$relayed = $env:REC_PHONE_RELAY -ne 'off'
 $mediamtx = Start-MediaMTX (Get-MediaMTX (Join-Path (Split-Path -Parent $PSScriptRoot) 'build\tools')) $received (Join-Path $Artifacts 'app-mediamtx')
 $ui = $null
 try {
@@ -695,7 +703,10 @@ try {
     $code = [IntPtr]::Zero
     Wait-Until { $script:code = [AppWindow]::FindWindow('RecPhoneCode', 'Phone camera'); $script:code -ne [IntPtr]::Zero -and [AppWindow]::IsWindowVisible($script:code) } 'the phone code window did not open'
     $address = [AppWindow]::Of([AppWindow]::GetDlgItem($code, 102)).accValue(0)
-    if ($address -notmatch '^https://[0-9.]+:47110/#[A-Za-z0-9]{22}$') { throw "the phone address is '$address'" }
+    $expected = if ($relayed) { '^' + [regex]::Escape($env:REC_PHONE_RELAY) + '/#[A-Za-z0-9]{22}$' } else { '^https://[0-9.]+:47110/#[A-Za-z0-9]{22}$' }
+    if ($address -notmatch $expected) { throw "the phone address is '$address'" }
+    $backup = [AppWindow]::Of([AppWindow]::GetDlgItem($code, 104)).accName(0)
+    if ($relayed -and $backup -notmatch '^Without internet: open https://[0-9.]+:47110/#[A-Za-z0-9]{22} ') { throw "the phone window's local address reads '$backup'" }
     $phoneStatus = { [AppWindow]::Of([AppWindow]::GetDlgItem($code, 103)).accName(0) }
     Wait-Until { (& $phoneStatus) -eq 'Waiting for the phone...' } "the phone window says '$(& $phoneStatus)'" 15
     $phoneArea = @(0.75, 0.12, 0.16, 0.14)
@@ -914,6 +925,7 @@ try {
     if ($ui -and -not $ui.Process.HasExited) { $ui.Process.Kill() }
     Stop-MediaMTX $mediamtx
     Stop-Engine
+    if ($ownRelay) { Stop-Relay $ownRelay; Remove-Item Env:REC_PHONE_RELAY }
     if (Test-Path (Join-Path $appHome 'engine.log')) { Copy-Item (Join-Path $appHome 'engine.log') (Join-Path $Artifacts 'app-engine.log') }
     foreach ($url in $server, $server2) { cmdkey "/delete:rec/stream/$url" 2>&1 | Out-Null }
 }

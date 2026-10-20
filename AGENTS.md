@@ -50,6 +50,6 @@ These are references, not dependencies. Record the upstream revision when copyin
 - `src/platform/windows/`: Windows capture (WGC, WASAPI), timing and Media Foundation encoding adapter, TLS for RTMPS (Schannel), and crypto and Opus for WHIP (CNG, libopus fetched by CMake).
 - `src/platform/unsupported.cpp`: clear error on other hosts.
 - `src/app/`: the desktop app. `session.{hpp,cpp}` is the shared layer (settings, stream destinations, one recording session hosted by the background engine and followed by a worker thread); `macos/main.mm` (AppKit) and `windows/main.cpp` (Win32 controls) only present it.
-- `support/`: Info.plists and the Windows app manifest.
+- `support/`: Info.plists, the Windows app manifest, and the phone camera's relay (`phone-relay/`, a Cloudflare Worker that serves `src/core/phone-page.html`).
 - `scripts/`: build and end-to-end runs (`*.sh` for macOS, `*.ps1` for Windows), including the app checks `app-e2e.*`.
 - `.github/workflows/`: native macOS and Windows builds and capture-independent smoke gates.

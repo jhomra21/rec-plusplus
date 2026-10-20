@@ -10,7 +10,11 @@ endif()
 add_library(rec STATIC)
 target_compile_features(rec PUBLIC cxx_std_20)
 target_include_directories(rec PUBLIC "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>" "$<INSTALL_INTERFACE:include>")
-target_include_directories(rec PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(rec PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_BINARY_DIR}/generated")
+# The phone camera's page, compiled in as a string; the relay in support/phone-relay serves it too.
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/core/phone-page.html" REC_PHONE_PAGE)
+file(CONFIGURE OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/generated/core/phone_page.inc" CONTENT "R\"PAGE(@REC_PHONE_PAGE@)PAGE\"\n" @ONLY)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/core/phone-page.html")
 
 if(APPLE)
     enable_language(OBJCXX)

@@ -1,7 +1,8 @@
 # Windows smoke: build with MSVC, then encode and decode real Media Foundation output.
 # REC_E2E_ARTIFACT_DIR keeps the recordings and probe reports; REC_E2E_CAPTURE=1 also
-# records the real display. The streaming check downloads a pinned MediaMTX release. The
-# desktop app check (app-e2e.ps1) needs an interactive desktop session.
+# records the real display. The streaming check downloads a pinned MediaMTX release; the phone
+# camera check runs the relay with wrangler (Node.js). The desktop app check (app-e2e.ps1)
+# needs an interactive desktop session.
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
 
@@ -200,42 +201,60 @@ try {
     if ($cameraLost.Log -notmatch 'Camera lost at 00:0[01]\.\d; it shows its last frame') { throw "the camera loss was not reported: $($cameraLost.Log)" }
     Expect-Text $cameraLost.Log 'Camera frames 30'
     Expect-Field $cameraLost.Probe 'frames' '90'
-    # A phone camera: a headless browser with a synthetic camera opens the page rec serves and
+    # A phone camera: a headless browser with a synthetic camera opens the camera page and
     # sends its green picture over WebRTC; rec decodes the H.264 into the camera's area. The
-    # page is opened on this computer's network address, as a phone would (browsers do not
-    # pair their candidates with a loopback one).
-    $token = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 22 | ForEach-Object { [char]$_ })
+    # page comes from the relay (support/phone-relay, run here), which passes the offer and
+    # answer on, or without a relay from rec itself. The video goes to this computer's network
+    # address, as from a phone (browsers do not pair their candidates with a loopback one).
     $route = New-Object Net.Sockets.UdpClient
     $route.Connect('8.8.8.8', 53)
     $address = $route.Client.LocalEndPoint.Address.ToString()
     $route.Dispose()
-    $phonePath = Join-Path $artifacts 'phone.mp4'
-    # A cold browser on a CI runner can take many seconds to connect, so the recording runs
-    # until 10 s after the page is live.
-    $run = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '120', '--camera', "phone:$token", '-o', $phonePath)
-    $started = Get-Date
-    $phone = Start-Phone "https://${address}:47110/#$token"
-    try {
-        $phoneStatus = Wait-PhoneStatus $phone 'Live in Rec' 45
-        Write-Host "phone page: '$phoneStatus' after $([int]((Get-Date) - $started).TotalSeconds) s"
-        if ($phoneStatus -eq 'Live in Rec') { Start-Sleep -Seconds 10 }
-    } finally {
-        try { Send-RecCommand $run 'stop' } catch { }
-        $phoneRun = Stop-RecProcess $run
-        Stop-Phone $phone
+    $relay = Start-Relay (Join-Path $root 'support\phone-relay') (Join-Path $artifacts 'relay.log')
+    function Test-Phone([string]$name, [string]$relayUrl) {
+        $token = -join ((48..57) + (65..90) + (97..122) | Get-Random -Count 22 | ForEach-Object { [char]$_ })
+        $env:REC_PHONE_RELAY = if ($relayUrl) { $relayUrl } else { 'off' }
+        $local = "https://${address}:47110/#"
+        $page = if ($relayUrl) { "$relayUrl/#" } else { $local }
+        $path = Join-Path $artifacts "$name.mp4"
+        # A cold browser on a CI runner can take many seconds to connect, so the recording runs
+        # until 10 s after the page is live.
+        $run = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '120', '--camera', "phone:$token", '-o', $path)
+        $started = Get-Date
+        $phone = Start-Phone "$page$token"
+        try {
+            $status = Wait-PhoneStatus $phone 'Live in Rec' 45
+            Write-Host "$name page: '$status' after $([int]((Get-Date) - $started).TotalSeconds) s"
+            if ($status -eq 'Live in Rec') {
+                if ($relayUrl) {
+                    $forged = Send-ForgedOffer $relayUrl $token
+                    Write-Host "$name forged offer: $forged"
+                    if ($forged -ne 'This link is old. Scan the code in Rec again. [403]') { throw "rec did not refuse a forged offer: $forged" }
+                }
+                Start-Sleep -Seconds 10
+            }
+        } finally {
+            try { Send-RecCommand $run 'stop' } catch { }
+            $done = Stop-RecProcess $run
+            Stop-Phone $phone
+        }
+        $log = $done.Text -replace [regex]::Escape($token), 'TOKEN'
+        Set-Content -Path (Join-Path $artifacts "$name.record.log") -Value $log
+        Write-Host $log
+        if ($done.Code -ne 0) { throw "the $name recording failed: $log" }
+        if ($status -ne 'Live in Rec') { throw "the $name page never went live: $status" }
+        Expect-Text $log "Phone camera: on a phone on this network, open ${page}TOKEN"
+        if ($relayUrl) { Expect-Text $log "Without internet, open ${local}TOKEN" }
+        elseif ($log.Contains('Without internet')) { throw 'rec offered a relay that is off' }
+        if (-not ($log -match 'Camera frames (\d+)') -or [int]$Matches[1] -lt 90) { throw "the $name camera delivered too few frames" }
+        $probe = Get-Probe $rec $path (Join-Path $artifacts "$name-camera.probe") @('--sample', '1420,940,120,80')
+        $last = 0
+        while ($probe.ContainsKey("sample_$($last + 1)")) { $last++ }
+        foreach ($second in ($last - 3)..($last - 1)) { Expect-Color $probe "sample_$second" 'green' }
     }
-    $phoneLog = $phoneRun.Text -replace [regex]::Escape($token), 'TOKEN'
-    Set-Content -Path (Join-Path $artifacts 'phone.record.log') -Value $phoneLog
-    Write-Host $phoneLog
-    if ($phoneRun.Code -ne 0) { throw "the phone camera recording failed: $phoneLog" }
-    if ($phoneStatus -ne 'Live in Rec') { throw "the phone page never went live: $phoneStatus" }
-    Expect-Text $phoneLog "Phone camera: on a phone on this network, open https://${address}:47110/#TOKEN"
-    if (-not ($phoneLog -match 'Camera frames (\d+)') -or [int]$Matches[1] -lt 90) { throw 'the phone camera delivered too few frames' }
-    $phoneProbe = Get-Probe $rec $phonePath (Join-Path $artifacts 'phone-camera.probe') @('--sample', '1420,940,120,80')
-    $last = 0
-    while ($phoneProbe.ContainsKey("sample_$($last + 1)")) { $last++ }
-    foreach ($second in ($last - 3)..($last - 1)) { Expect-Color $phoneProbe "sample_$second" 'green' }
-    # Overlays: a camera and an image drawn into every frame on the GPU; "hide 1" removes the
+    Test-Phone 'phone' ''
+    # The relay stays set for the rest, so the app's phone camera uses it too.
+    Test-Phone 'phone-relay' $relay.Url    # Overlays: a camera and an image drawn into every frame on the GPU; "hide 1" removes the
     # camera mid-recording. overlay-test.png is 200x100 of (220, 30, 30).
     $png = Join-Path $PSScriptRoot 'overlay-test.png'
     Expect-Failure 'could not open the image' @('record', '--test-pattern', '-t', '1', '--image', (Join-Path $artifacts 'missing.png'), '-o', (Join-Path $artifacts 'missing.mp4'))
@@ -691,5 +710,6 @@ try {
     & (Join-Path $PSScriptRoot 'app-e2e.ps1') -Rec $rec -App $app -Artifacts $appArtifacts
     Write-Host 'smoke passed'
 } finally {
+    Stop-Relay $relay
     if ($artifacts -ne $tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
 }

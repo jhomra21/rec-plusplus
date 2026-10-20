@@ -30,6 +30,7 @@ using Clock = std::chrono::steady_clock;
 using std::chrono::milliseconds;
 
 constexpr std::uint16_t kDefaultPort = 47110;
+constexpr const char* kDefaultRelay = "https://rec-camera.jhonra121.workers.dev";
 constexpr auto kNackAfter = milliseconds(20);     // A gap this old is asked for again.
 constexpr auto kGiveUpAfter = milliseconds(300);  // Then the frame is dropped and a keyframe asked for.
 constexpr auto kReportEvery = milliseconds(500);
@@ -37,92 +38,24 @@ constexpr auto kPliEvery = milliseconds(300);
 constexpr auto kSessionIdle = std::chrono::seconds(30);
 constexpr std::uint32_t kMaxBitrate = 8000000;
 
-const char kPage[] =
-    R"PAGE(<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>Rec camera</title>
-<style>
-body{margin:0;background:#111;color:#eee;font:17px -apple-system,system-ui,sans-serif;display:flex;flex-direction:column;height:100vh;height:100dvh}
-video{flex:1;min-height:0;width:100%;object-fit:contain;background:#000}
-#bar{display:flex;gap:10px;padding:12px 16px calc(12px + env(safe-area-inset-bottom));align-items:center}
-#status{flex:1}
-button{font:inherit;padding:10px 16px;border-radius:12px;border:0;background:#2c2c2e;color:#fff}
-</style></head>
-<body><video id="v" autoplay playsinline muted></video>
-<div id="bar"><span id="status" role="status">Starting</span><button id="flip">Switch camera</button></div>
-<script>
-const token = location.hash.slice(1), v = document.getElementById('v'), status = document.getElementById('status');
-let facing = localStorage.getItem('rec-facing') || 'environment', stream = null, pc = null, sender = null, timer = null;
-const say = t => { status.textContent = t; };
-async function camera() {
-  const s = await navigator.mediaDevices.getUserMedia({audio: false, video: {facingMode: {ideal: facing},
-    width: {ideal: 1920}, height: {ideal: 1080}, frameRate: {ideal: 30}}});
-  if (stream) stream.getTracks().forEach(t => t.stop());
-  stream = s;
-  v.srcObject = s;
-  v.style.transform = facing === 'user' ? 'scaleX(-1)' : '';
-  return s.getVideoTracks()[0];
+// The camera page (src/core/phone-page.html), which the relay in support/phone-relay serves too.
+// Served by rec, it talks to rec directly.
+const std::string& local_page() {
+    static const std::string page = [] {
+        std::string text(
+#include "core/phone_page.inc"
+        );
+        constexpr std::string_view kMarker = "/*local*/false";
+        if (const auto at = text.find(kMarker); at != std::string::npos) text.replace(at, kMarker.size(), "true");
+        return text;
+    }();
+    return page;
 }
-async function connect() {
-  if (pc) { pc.onconnectionstatechange = null; pc.close(); }
-  pc = new RTCPeerConnection();
-  const transceiver = pc.addTransceiver(stream.getVideoTracks()[0], {direction: 'sendonly', streams: [stream]});
-  sender = transceiver.sender;
-  const caps = RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('video');
-  if (caps && transceiver.setCodecPreferences) {
-    const h264 = caps.codecs.filter(c => c.mimeType.toLowerCase() === 'video/h264');
-    if (h264.length) transceiver.setCodecPreferences(h264);
-  }
-  const mine = pc;
-  const lost = () => { if (mine === pc) { say('Reconnecting'); retry(); } };
-  pc.onconnectionstatechange = () => {
-    if (mine !== pc) return;
-    if (pc.connectionState === 'connected') say('Live in Rec');
-    else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') lost();
-  };
-  await pc.setLocalDescription(await pc.createOffer());
-  await new Promise(done => {
-    if (pc.iceGatheringState === 'complete') return done();
-    pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') done(); };
-    setTimeout(done, 1500);
-  });
-  const response = await fetch('/offer', {method: 'POST', cache: 'no-store',
-    headers: {'Content-Type': 'application/sdp', 'Authorization': 'Bearer ' + token}, body: pc.localDescription.sdp});
-  if (!response.ok) throw new Error(response.status === 403 ? 'This link is old. Scan the code in Rec again.' : 'Rec answered ' + response.status + ': ' + await response.text());
-  await pc.setRemoteDescription({type: 'answer', sdp: await response.text()});
-  // Rec ends the session with a DTLS close_notify when it closes the camera.
-  const transport = transceiver.sender.transport;
-  if (transport) transport.onstatechange = () => { if (transport.state === 'closed' || transport.state === 'failed') lost(); };
-  const p = sender.getParameters();
-  if (!p.encodings || !p.encodings.length) p.encodings = [{}];
-  p.encodings[0].maxBitrate = 8000000;
-  p.degradationPreference = 'maintain-resolution';
-  try { await sender.setParameters(p); } catch (e) {}
-}
-function retry() {
-  if (timer) return;
-  timer = setTimeout(async () => {
-    timer = null;
-    try { await connect(); } catch (e) { say(e.message); retry(); }
-  }, 2000);
-}
-document.getElementById('flip').onclick = async () => {
-  facing = facing === 'user' ? 'environment' : 'user';
-  localStorage.setItem('rec-facing', facing);
-  try { const track = await camera(); if (sender) await sender.replaceTrack(track); } catch (e) { say(e.message); }
-};
-async function awake() { try { await navigator.wakeLock.request('screen'); } catch (e) {} }
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') awake(); });
-(async () => {
-  if (!token) { say('Open the link Rec shows.'); return; }
-  try { await camera(); } catch (e) { say('No camera: ' + e.message); return; }
-  say('Connecting');
-  awake();
-  try { await connect(); } catch (e) { say(e.message); retry(); }
-})();
-</script></body></html>
-)PAGE"
-;
+
+constexpr auto kRelayPing = std::chrono::seconds(25);   // The relay answers "ping" without waking.
+constexpr auto kRelaySilent = std::chrono::seconds(75);  // Nothing heard: the connection is gone.
+constexpr int kRelayConnectMs = 5000;
+constexpr std::size_t kMaxRelayMessage = 128 * 1024;  // An offer is a few kilobytes.
 
 void put8(Bytes& b, std::uint64_t v) { b.push_back(static_cast<std::uint8_t>(v)); }
 void put16(Bytes& b, std::uint64_t v) { put8(b, v >> 8); put8(b, v); }
@@ -155,6 +88,78 @@ bool same(const std::string& a, const std::string& b) {
     unsigned char differ = 0;
     for (std::size_t i = 0; i < a.size(); ++i) differ |= static_cast<unsigned char>(a[i] ^ b[i]);
     return differ == 0;
+}
+
+// --- The relay -------------------------------------------------------------------------
+
+std::string hex(const std::uint8_t* data, std::size_t size) {
+    static const char kDigits[] = "0123456789abcdef";
+    std::string out;
+    for (std::size_t i = 0; i < size; ++i) {
+        out += kDigits[data[i] >> 4];
+        out += kDigits[data[i] & 15];
+    }
+    return out;
+}
+
+std::string base64(const std::uint8_t* data, std::size_t size) {
+    static const char kDigits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    for (std::size_t i = 0; i < size; i += 3) {
+        const std::uint32_t n = data[i] << 16 | (i + 1 < size ? data[i + 1] << 8 : 0) | (i + 2 < size ? data[i + 2] : 0);
+        out += kDigits[n >> 18 & 63];
+        out += kDigits[n >> 12 & 63];
+        out += i + 1 < size ? kDigits[n >> 6 & 63] : '=';
+        out += i + 2 < size ? kDigits[n & 63] : '=';
+    }
+    return out;
+}
+
+// The room the page and rec meet in: a hash of the token, which the relay never sees.
+std::string room_of(const std::string& token) {
+    const std::string text = "rec phone room\n" + token;
+    const auto digest = crypto::sha256(reinterpret_cast<const std::uint8_t*>(text.data()), text.size());
+    return hex(digest.data(), digest.size());
+}
+
+// Offers and answers carry this, so the relay can neither forge nor change them.
+std::string mac_of(const std::string& token, const std::string& text) {
+    const auto mac = crypto::hmac_sha256(reinterpret_cast<const std::uint8_t*>(token.data()), token.size(),
+                                         reinterpret_cast<const std::uint8_t*>(text.data()), text.size());
+    return hex(mac.data(), mac.size());
+}
+
+struct RelayAddress {
+    bool secure = true;
+    std::string host, port;
+};
+
+bool parse_relay(const std::string& url, RelayAddress& out) {
+    std::string rest;
+    if (url.rfind("https://", 0) == 0) { out.secure = true; out.port = "443"; rest = url.substr(8); }
+    else if (url.rfind("http://", 0) == 0) { out.secure = false; out.port = "80"; rest = url.substr(7); }
+    else return false;
+    rest = rest.substr(0, rest.find('/'));
+    if (const auto colon = rest.rfind(':'); colon != std::string::npos) {
+        out.port = rest.substr(colon + 1);
+        rest.resize(colon);
+    }
+    out.host = rest;
+    return !out.host.empty() && !out.port.empty() && out.port.find_first_not_of("0123456789") == std::string::npos;
+}
+
+// A client's WebSocket frame (RFC 6455): final and masked.
+Bytes ws_frame(std::uint8_t opcode, const std::string& payload) {
+    Bytes frame{static_cast<std::uint8_t>(0x80 | opcode)};
+    const std::uint64_t size = payload.size();
+    if (size < 126) put8(frame, 0x80 | size);
+    else if (size < 65536) { put8(frame, 0x80 | 126); put16(frame, size); }
+    else { put8(frame, 0x80 | 127); put32(frame, size >> 32); put32(frame, size); }
+    std::uint8_t mask[4];
+    crypto::random(mask, sizeof mask);
+    frame.insert(frame.end(), mask, mask + 4);
+    for (std::size_t i = 0; i < payload.size(); ++i) frame.push_back(static_cast<std::uint8_t>(payload[i]) ^ mask[i % 4]);
+    return frame;
 }
 
 // --- The page's offer ---------------------------------------------------------------------
@@ -478,7 +483,8 @@ const Identity* identity() {
 
 } // namespace
 
-struct PhoneCamera::Server {    std::unique_ptr<TcpListener> listener;
+struct PhoneCamera::Server {
+    std::unique_ptr<TcpListener> listener;
     std::thread thread;
     std::atomic_bool stop{false};
     std::mutex mutex;
@@ -540,7 +546,7 @@ struct PhoneCamera::Server {    std::unique_ptr<TcpListener> listener;
         const std::string body = request.substr(header_end + 4, length);
         std::string response;
         if (line.rfind("GET / ", 0) == 0) {
-            response = http_response(200, "OK", "text/html; charset=utf-8", kPage,
+            response = http_response(200, "OK", "text/html; charset=utf-8", local_page(),
                                      "Content-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; media-src 'self' blob: mediastream:\r\n");
         } else if (line.rfind("POST /offer ", 0) == 0) {
             std::string token;
@@ -584,14 +590,171 @@ std::uint16_t PhoneCamera::port() {
 
 std::string PhoneCamera::new_token() { return random_text(22); }
 
+std::string PhoneCamera::relay() {
+    const char* chosen = std::getenv("REC_PHONE_RELAY");
+    std::string address = chosen && *chosen ? chosen : kDefaultRelay;
+    if (address == "off") return {};
+    while (!address.empty() && address.back() == '/') address.pop_back();
+    return address;
+}
+
 std::string PhoneCamera::url(const std::string& token) {
-    // Routing toward a public address picks the interface on the home network; nothing is sent.
+    const auto address = relay();
+    return address.empty() ? local_url(token) : address + "/#" + token;
+}
+
+std::string PhoneCamera::local_url(const std::string& token) {    // Routing toward a public address picks the interface on the home network; nothing is sent.
     const std::string ip = local_address_toward("8.8.8.8");
     if (ip.empty()) return {};
     return "https://" + ip + ":" + std::to_string(port()) + "/#" + token;
 }
 
 PhoneCamera::PhoneCamera(std::string token) : token_(std::move(token)) {}
+
+// The relay's thread keeps this, so closing the camera never waits for a connection.
+struct PhoneCamera::Relay {
+    std::string token;
+    std::atomic_bool stop{false}, connected{false};
+    std::mutex mutex;
+    Transport* transport = nullptr;  // Interrupted when the camera closes.
+    std::deque<std::string> answered;  // Signatures of offers already answered, on the relay thread.
+};
+
+namespace {
+
+// "offer\nID\nMAC\nSDP" from the relay: "answer\nID\nMAC\nSDP", or "refuse\nID\nREASON".
+std::string relay_reply(PhoneCamera::Relay& relay, const std::weak_ptr<PhoneCamera>& camera, const std::string& message) {
+    if (message.rfind("offer\n", 0) != 0) return {};
+    const auto id_end = message.find('\n', 6);
+    const auto mac_end = id_end == std::string::npos ? std::string::npos : message.find('\n', id_end + 1);
+    if (mac_end == std::string::npos) return {};
+    const std::string id = message.substr(6, id_end - 6), mac = message.substr(id_end + 1, mac_end - id_end - 1);
+    const std::string sdp = message.substr(mac_end + 1);
+    if (!same(mac, mac_of(relay.token, "offer\n" + sdp))) return "refuse\n" + id + "\nThis link is old. Scan the code in Rec again.";
+    // A page offers anew each time, so an offer seen before is a replay.
+    if (std::find(relay.answered.begin(), relay.answered.end(), mac) != relay.answered.end())
+        return "refuse\n" + id + "\nThis offer was answered already. Reload the page.";
+    const auto self = camera.lock();
+    if (!self) return {};
+    std::string error;
+    // The phone's address is not known yet; its checks will arrive on the home network's interface.
+    const std::string answer = self->answer(sdp, "8.8.8.8", error);
+    if (answer.empty()) return "refuse\n" + id + "\n" + error;
+    relay.answered.push_back(mac);
+    if (relay.answered.size() > 32) relay.answered.pop_front();
+    return "answer\n" + id + "\n" + mac_of(relay.token, "answer\n" + mac + "\n" + answer) + "\n" + answer;
+}
+
+// One WebSocket to the relay, until it closes or the camera does.
+void relay_session(PhoneCamera::Relay& relay, const std::weak_ptr<PhoneCamera>& camera, Transport& t,
+                   const std::string& host, const std::string& path) {
+    std::uint8_t nonce[16];
+    crypto::random(nonce, sizeof nonce);
+    const std::string request = "GET " + path + " HTTP/1.1\r\nHost: " + host +
+                                "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: " +
+                                base64(nonce, sizeof nonce) + "\r\nSec-WebSocket-Version: 13\r\nUser-Agent: rec\r\n\r\n";
+    if (!t.send(reinterpret_cast<const std::uint8_t*>(request.data()), request.size())) return;
+    std::string data;
+    std::uint8_t buffer[8192];
+    std::size_t header_end;
+    while ((header_end = data.find("\r\n\r\n")) == std::string::npos) {
+        const std::size_t got = t.receive(buffer, sizeof buffer);
+        if (!got || data.size() > 16384) return;
+        data.append(reinterpret_cast<const char*>(buffer), got);
+    }
+    const std::string head = lower(data.substr(0, header_end + 2));
+    if (head.rfind("http/1.1 101 ", 0) != 0 || head.find("\r\nupgrade: websocket\r\n") == std::string::npos) return;
+    data.erase(0, header_end + 4);
+    relay.connected.store(true);
+    const auto send = [&t](std::uint8_t opcode, const std::string& payload) {
+        const auto frame = ws_frame(opcode, payload);
+        return t.send(frame.data(), frame.size());
+    };
+    auto heard = Clock::now(), pinged = Clock::now();
+    std::string message;
+    while (!relay.stop.load()) {
+        // Whole frames first; the relay's are not masked.
+        while (data.size() >= 2) {
+            const auto* p = reinterpret_cast<const std::uint8_t*>(data.data());
+            std::uint64_t size = p[1] & 0x7F;
+            std::size_t at = 2;
+            if (size == 126) {
+                if (data.size() < 4) break;
+                size = get16(p + 2);
+                at = 4;
+            } else if (size == 127) {
+                if (data.size() < 10) break;
+                size = std::uint64_t{get32(p + 2)} << 32 | get32(p + 6);
+                at = 10;
+            }
+            const bool masked = p[1] & 0x80;
+            if (size > kMaxRelayMessage) return;
+            if (data.size() < at + (masked ? 4 : 0) + size) break;
+            std::string payload = data.substr(at + (masked ? 4 : 0), static_cast<std::size_t>(size));
+            if (masked)
+                for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<char>(payload[i] ^ p[at + i % 4]);
+            const bool final = p[0] & 0x80;
+            const int opcode = p[0] & 0x0F;
+            data.erase(0, at + (masked ? 4 : 0) + static_cast<std::size_t>(size));
+            if (opcode == 8) { send(8, {}); return; }
+            if (opcode == 9) { send(10, payload); continue; }
+            if (opcode != 0 && opcode != 1) continue;
+            if (message.size() + payload.size() > kMaxRelayMessage) return;
+            message += payload;
+            if (!final) continue;
+            const std::string reply = relay_reply(relay, camera, message);
+            message.clear();
+            if (!reply.empty() && !send(1, reply)) return;
+        }
+        if (t.readable()) {
+            const std::size_t got = t.receive(buffer, sizeof buffer);
+            if (!got) return;
+            data.append(reinterpret_cast<const char*>(buffer), got);
+            heard = Clock::now();
+            continue;
+        }
+        const auto now = Clock::now();
+        if (now - heard > kRelaySilent) return;
+        if (now - pinged > kRelayPing) {
+            if (!send(1, "ping")) return;
+            pinged = now;
+        }
+        std::this_thread::sleep_for(milliseconds(50));
+    }
+    send(8, {});
+}
+
+void relay_loop(std::shared_ptr<PhoneCamera::Relay> relay, std::weak_ptr<PhoneCamera> camera, std::string address) {
+    RelayAddress where;
+    if (!parse_relay(address, where)) return;
+    std::string host = where.host;
+    if (where.port != (where.secure ? "443" : "80")) host += ":" + where.port;
+    const std::string path = "/rooms/" + room_of(relay->token) + "/rec";
+    auto backoff = milliseconds(1000);
+    while (!relay->stop.load()) {
+        std::string error;
+        auto transport = where.secure ? connect_tls(where.host, where.port, kRelayConnectMs, error)
+                                      : connect_tcp(where.host, where.port, kRelayConnectMs, error);
+        if (transport) {
+            {
+                std::lock_guard lock(relay->mutex);
+                if (relay->stop.load()) break;
+                relay->transport = transport.get();
+            }
+            relay_session(*relay, camera, *transport, host, path);
+            {
+                std::lock_guard lock(relay->mutex);
+                relay->transport = nullptr;
+            }
+            if (relay->connected.exchange(false)) backoff = milliseconds(1000);
+        }
+        for (auto waited = milliseconds(0); waited < backoff && !relay->stop.load(); waited += milliseconds(50))
+            std::this_thread::sleep_for(milliseconds(50));
+        backoff = std::min(backoff * 2, milliseconds(30000));
+    }
+}
+
+} // namespace
 
 std::shared_ptr<PhoneCamera> PhoneCamera::open(const std::string& token, std::string& error) {
     if (token.size() < 16) { error = "the phone camera needs a token of 16 or more characters"; return nullptr; }
@@ -604,10 +767,20 @@ std::shared_ptr<PhoneCamera> PhoneCamera::open(const std::string& token, std::st
         it = it->second.expired() ? server->cameras.erase(it) : std::next(it);
     if (server->cameras.count(token)) { error = "this phone camera is already open"; return nullptr; }
     server->cameras[token] = camera;
+    if (auto address = relay(); !address.empty()) {
+        camera->relay_ = std::make_shared<Relay>();
+        camera->relay_->token = token;
+        std::thread(relay_loop, camera->relay_, std::weak_ptr<PhoneCamera>(camera), address).detach();
+    }
     return camera;
 }
 
 PhoneCamera::~PhoneCamera() {
+    if (relay_) {
+        relay_->stop.store(true);
+        std::lock_guard lock(relay_->mutex);
+        if (relay_->transport) relay_->transport->interrupt();
+    }
     stop_.store(true);
     if (thread_.joinable()) thread_.join();
     if (server_) {
@@ -636,6 +809,8 @@ void PhoneCamera::deliver(const Bytes& unit, bool key) {
 }
 
 std::string PhoneCamera::answer(const std::string& sdp, const std::string& peer_ip, std::string& error) {
+    // The local page and the relay may both offer.
+    std::lock_guard serialized(answer_mutex_);
     Offer offer;
     if (error = parse_offer(sdp, offer); !error.empty()) return {};
     auto s = std::make_unique<Session>();
@@ -691,8 +866,7 @@ std::string PhoneCamera::answer(const std::string& sdp, const std::string& peer_
     return answer;
 }
 
-void PhoneCamera::run(Session& s) {
-    std::uint8_t buffer[2048];
+void PhoneCamera::run(Session& s) {    std::uint8_t buffer[2048];
     s.last_rx = Clock::now();
     auto unit = [this](const Bytes& au, bool key) {
         last_media_ns_.store(Clock::now().time_since_epoch().count());

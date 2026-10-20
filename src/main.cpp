@@ -507,9 +507,15 @@ int main(int argc, char** argv) {
 #if defined(_WIN32) || defined(__APPLE__)
     for (const auto& overlay : options.overlays)
         if (overlay.kind == rec::Overlay::Kind::camera && overlay.source.rfind("phone:", 0) == 0) {
-            const auto url = rec::core::PhoneCamera::url(overlay.source.substr(6));
-            std::cout << "Phone camera: on a phone on this network, open " << (url.empty() ? "(no network)" : url)
-                      << " and confirm the certificate warning once\n";
+            const auto token = overlay.source.substr(6);
+            const auto url = rec::core::PhoneCamera::url(token);
+            const auto local = rec::core::PhoneCamera::local_url(token);
+            if (rec::core::PhoneCamera::relay().empty())
+                std::cout << "Phone camera: on a phone on this network, open " << (url.empty() ? "(no network)" : url)
+                          << " and confirm the certificate warning once\n";
+            else
+                std::cout << "Phone camera: on a phone on this network, open " << url << "\nWithout internet, open "
+                          << (local.empty() ? "(no network)" : local) << " and confirm the certificate warning once\n";
             if (!url.empty()) print_qr(url, live);
         }
 #endif

@@ -2276,7 +2276,7 @@ private:
 
     // The phone camera's code: its address as a QR code and as text, how to connect, and
     // whether the phone's picture is arriving. Closing it hides it.
-    enum PhoneControl : int { kPhoneHelp = 101, kPhoneAddress, kPhoneStatus };
+    enum PhoneControl : int { kPhoneHelp = 101, kPhoneAddress, kPhoneStatus, kPhoneLocal };
     static constexpr UINT_PTR kPhoneTimer = 1;
 
     void show_phone_code() {
@@ -2292,8 +2292,10 @@ private:
         if (!kind) return;
         phone_url_ = rec::core::PhoneCamera::url(settings_.phone_token);
         phone_qr_ = rec::core::qr_code(phone_url_);
+        const bool relayed = !rec::core::PhoneCamera::relay().empty();
+        const auto local = relayed ? rec::core::PhoneCamera::local_url(settings_.phone_token) : std::string();
         if (!phone_window_) {
-            RECT frame{0, 0, px(400), px(560)};
+            RECT frame{0, 0, px(400), px(660)};
             AdjustWindowRectExForDpi(&frame, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, WS_EX_CONTROLPARENT, dpi_);
             phone_window_ = CreateWindowExW(WS_EX_CONTROLPARENT, L"RecPhoneCode", L"Phone camera", WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU,
                                             CW_USEDEFAULT, CW_USEDEFAULT, frame.right - frame.left, frame.bottom - frame.top,
@@ -2301,6 +2303,21 @@ private:
             if (!phone_window_) return;
         }
         SetWindowTextW(GetDlgItem(phone_window_, kPhoneAddress), phone_url_.empty() ? L"No network" : wide(phone_url_).c_str());
+        SetWindowTextW(GetDlgItem(phone_window_, kPhoneHelp),
+                       relayed ? L"Use a phone on the same Wi-Fi as this computer.\n"
+                                 L"1. Scan the code with the phone's camera, or type the address.\n"
+                                 L"2. Allow the camera, and keep the page open. Switch camera picks the front or back one.\n"
+                                 L"The page comes from Rec's website; the video goes straight from the phone to this computer. "
+                                 L"If the phone cannot connect, allow Rec through Windows Firewall on private networks."
+                               : L"Use a phone on the same Wi-Fi as this computer.\n"
+                                 L"1. Scan the code with the phone's camera, or type the address.\n"
+                                 L"2. The first time, the browser warns about Rec's own certificate: continue to the page.\n"
+                                 L"3. Allow the camera, and keep the page open. Switch camera picks the front or back one.\n"
+                                 L"If the phone cannot connect, allow Rec through Windows Firewall on private networks.");
+        SetWindowTextW(GetDlgItem(phone_window_, kPhoneLocal),
+                       local.empty() ? L""
+                                     : (L"Without internet: open " + wide(local) +
+                                        L" and continue past the browser's warning about Rec's own certificate.").c_str());
         update_phone_status();
         InvalidateRect(phone_window_, nullptr, TRUE);
         ShowWindow(phone_window_, SW_SHOW);
@@ -2321,15 +2338,10 @@ private:
                 SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(app->font_), FALSE);
                 return hwnd;
             };
-            child(kPhoneHelp, WC_STATICW,
-                  L"Use a phone on the same Wi-Fi as this computer.\n"
-                  L"1. Scan the code with the phone's camera, or type the address.\n"
-                  L"2. The first time, the browser warns about Rec's own certificate: continue to the page.\n"
-                  L"3. Allow the camera, and keep the page open. Switch camera picks the front or back one.\n"
-                  L"If the phone cannot connect, allow Rec through Windows Firewall on private networks.",
-                  SS_LEFT | SS_NOPREFIX);
+            child(kPhoneHelp, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX);
             child(kPhoneAddress, WC_EDITW, L"", ES_READONLY | ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE);
             child(kPhoneStatus, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX);
+            child(kPhoneLocal, WC_STATICW, L"", SS_LEFT | SS_NOPREFIX);
             child(IDCANCEL, WC_BUTTONW, L"Close", BS_DEFPUSHBUTTON | WS_TABSTOP);
             const int margin = app->px(16), width = app->px(400) - 2 * margin, code = app->px(240);
             int y = margin + code + app->px(12);
@@ -2339,8 +2351,9 @@ private:
             };
             place(kPhoneHelp, app->px(150));
             place(kPhoneAddress, app->px(24));
-            place(kPhoneStatus, app->px(40));
-            SetWindowPos(GetDlgItem(window, IDCANCEL), nullptr, app->px(400) - margin - app->px(96), app->px(560) - margin - app->px(28),
+            place(kPhoneStatus, app->px(36));
+            place(kPhoneLocal, app->px(64));
+            SetWindowPos(GetDlgItem(window, IDCANCEL), nullptr, app->px(400) - margin - app->px(96), app->px(660) - margin - app->px(28),
                          app->px(96), app->px(28), SWP_NOZORDER | SWP_NOACTIVATE);
             return 0;
         }
