@@ -48,6 +48,17 @@ using rec::app::Status;
 
 constexpr CGFloat kControlTitleWidth = 82;
 constexpr CGFloat kControlValueWidth = 42;
+constexpr CGFloat kControlGap = 10;
+
+struct Palette {
+    static NSColor* accent() { return [NSColor colorWithSRGBRed:225.0 / 255 green:40.0 / 255 blue:40.0 / 255 alpha:1]; }
+    static NSColor* pausedAccent() { return [accent() colorWithAlphaComponent:0.55]; }
+    static NSColor* text() { return NSColor.labelColor; }
+    static NSColor* secondaryText() {
+        return NSWorkspace.sharedWorkspace.accessibilityDisplayShouldIncreaseContrast
+                   ? NSColor.labelColor : NSColor.secondaryLabelColor;
+    }
+};
 
 NSString* ns(const std::string& text) { return [NSString stringWithUTF8String:text.c_str()] ?: @""; }
 std::string utf8(NSString* text) { return text.UTF8String ? std::string(text.UTF8String) : std::string(); }
@@ -401,7 +412,7 @@ struct PreviewHit {
     bool _attention;
     bool _saved;
     State _state;
-    float _systemShown, _micShown;
+    rec::app::Meter _systemMeterState, _micMeterState;
     EventHotKeyRef _hotkeyRef, _replayHotkeyRef;
     NSWindow* _window;
     NSTextField *_status, *_detail, *_live, *_folder;
@@ -446,6 +457,8 @@ struct PreviewHit {
     NSSlider *_screenColor[3], *_cameraColor[3];
     NSTextField *_screenColorValue[3], *_cameraColorValue[3];
     NSButton *_screenColorReset, *_cameraColorReset;
+    NSView *_screenStrip, *_cameraStrip;
+    NSStackView* _statusColumn;
     NSButton* _shadow;
     NSTextField *_bitrate, *_imageFile;
     NSStatusItem* _statusItem;
@@ -515,6 +528,16 @@ struct PreviewHit {
     [_window makeKeyAndOrderFront:nil];
     [NSApp activateIgnoringOtherApps:YES];
     [self listDevices];
+    _window.autorecalculatesKeyViewLoop = NO;
+    _micVolume.nextKeyView = _micMute;
+    _micMute.nextKeyView = _screenColor[0];
+    _screenColor[0].nextKeyView = _screenColor[1];
+    _screenColor[1].nextKeyView = _screenColor[2];
+    _screenColor[2].nextKeyView = _screenColorReset;
+    _screenColorReset.nextKeyView = _cameraColor[0];
+    _cameraColor[0].nextKeyView = _cameraColor[1];
+    _cameraColor[1].nextKeyView = _cameraColor[2];
+    _cameraColor[2].nextKeyView = _cameraColorReset;
 
     const std::string report = environment("REC_APP_SELF_TEST");
     if (!report.empty()) {
@@ -941,6 +964,67 @@ struct PreviewHit {
     return meter;
 }
 
+- (NSView*)colorStrip:(const rec::app::Strip&)strip {
+    const BOOL camera = strip.source && strip.source->kind == rec::app::SourceRef::Kind::camera;
+    const char* names[] = {camera ? "Camera brightness" : "Screen brightness",
+                           camera ? "Camera contrast" : "Screen contrast",
+                           camera ? "Camera saturation" : "Screen saturation"};
+    NSString* title = ns(strip.name);
+    NSTextField* titleLabel = header(title);
+    NSButton* reset = [self button:@"Reset" action:@selector(resetColor:)];
+    reset.accessibilityLabel = camera ? @"Reset camera color" : @"Reset screen color";
+    [reset.widthAnchor constraintEqualToConstant:60].active = YES;
+    if (camera) _cameraColorReset = reset;
+    else _screenColorReset = reset;
+    NSStackView* headerRow = [NSStackView stackViewWithViews:@[titleLabel, reset]];
+    headerRow.distribution = NSStackViewDistributionFill;
+    [titleLabel setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    NSMutableArray<NSView*>* rows = [NSMutableArray arrayWithObject:headerRow];
+    for (int i = 0; i < 3; ++i) {
+        ResettableSlider* slider = [ResettableSlider sliderWithValue:0 minValue:-100 maxValue:100
+            target:self action:@selector(colorChanged:)];
+        slider.continuous = YES;
+        slider.numberOfTickMarks = 3;
+        slider.allowsTickMarkValuesOnly = NO;
+        slider.accessibilityLabel = [NSString stringWithUTF8String:names[i]];
+        slider.resetTarget = self;
+        slider.resetAction = @selector(resetSlider:);
+        slider.finishTarget = self;
+        slider.finishAction = @selector(sliderFinished:);
+        (camera ? _cameraColor : _screenColor)[i] = slider;
+        NSTextField* labelField = label(@[@"Brightness", @"Contrast", @"Saturation"][i]);
+        [labelField.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
+        NSTextField* value = label(@"0");
+        value.alignment = NSTextAlignmentRight;
+        value.accessibilityLabel = [NSString stringWithFormat:@"%s value", names[i]];
+        [value.widthAnchor constraintEqualToConstant:kControlValueWidth].active = YES;
+        NSView* trailingSpace = [[NSView alloc] init];
+        [trailingSpace.widthAnchor constraintEqualToConstant:110].active = YES;
+        (camera ? _cameraColorValue : _screenColorValue)[i] = value;
+        NSStackView* row = [NSStackView stackViewWithViews:@[labelField, slider, value, trailingSpace]];
+        row.distribution = NSStackViewDistributionFill;
+        row.spacing = kControlGap;
+        [slider setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [rows addObject:row];
+    }
+    NSBox* separator = [[NSBox alloc] init];
+    separator.boxType = NSBoxSeparator;
+    [rows insertObject:separator atIndex:1];
+    NSStackView* stack = [NSStackView stackViewWithViews:rows];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 3;
+    for (NSView* row in rows) [row.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
+    if (camera) {
+        _cameraStrip = stack;
+        stack.hidden = !_settings.camera;
+    } else {
+        _screenStrip = stack;
+    }
+    return stack;
+}
+
 - (NSSlider*)volumeSlider:(NSString*)name {
     ResettableSlider* slider = [ResettableSlider sliderWithValue:0 minValue:rec::app::kVolumeMin maxValue:rec::app::kVolumeMax
                                                           target:self action:@selector(volumeChanged:)];
@@ -966,13 +1050,13 @@ struct PreviewHit {
     _status.font = [NSFont systemFontOfSize:24 weight:NSFontWeightSemibold];
     _status.accessibilityLabel = @"Status";
     _detail = [NSTextField wrappingLabelWithString:@""];
-    _detail.textColor = NSColor.secondaryLabelColor;
+    _detail.textColor = Palette::secondaryText();
     _detail.maximumNumberOfLines = 2;
     _detail.preferredMaxLayoutWidth = 440;
     [_detail setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     _live = label(@"");
     _live.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
-    _live.textColor = NSColor.systemPurpleColor;
+    _live.textColor = Palette::accent();
 
     // Each source: its level before volume, the volume, and mute.
     _systemMeter = [self meter:@"System audio level"];
@@ -981,17 +1065,21 @@ struct PreviewHit {
     _micVolume = [self volumeSlider:@"Microphone volume"];
     _systemVolumeText = label(@"0 dB");
     _micVolumeText = label(@"0 dB");
+    _systemVolumeText.alignment = NSTextAlignmentRight;
+    _micVolumeText.alignment = NSTextAlignmentRight;
     _systemMute = [self check:@"Mute system"];
     _micMute = [self check:@"Mute mic"];
     // A source's name and meter, then its volume, value and mute below.
     const auto volumeRow = ^NSStackView*(NSSlider* slider, NSTextField* value, NSButton* mute) {
         [value.widthAnchor constraintEqualToConstant:kControlValueWidth].active = YES;
         [mute.widthAnchor constraintEqualToConstant:110].active = YES;
-        NSStackView* row = [NSStackView stackViewWithViews:@[slider, value, mute]];
+        NSView* labelColumn = [[NSView alloc] init];
+        [labelColumn.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
+        NSStackView* row = [NSStackView stackViewWithViews:@[labelColumn, slider, value, mute]];
         row.distribution = NSStackViewDistributionFill;
-        row.spacing = 10;
+        row.spacing = kControlGap;
         [slider setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-        [slider.widthAnchor constraintGreaterThanOrEqualToConstant:120].active = YES;
+        [slider.widthAnchor constraintGreaterThanOrEqualToConstant:80].active = YES;
         return row;
     };
     NSTextField* systemTitle = label(@"System audio");
@@ -1000,6 +1088,16 @@ struct PreviewHit {
     [micTitle.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
     NSGridView* meters = [self grid:@[@[systemTitle, _systemMeter], @[volumeRow(_systemVolume, _systemVolumeText, _systemMute)],
                                       @[micTitle, _micMeter], @[volumeRow(_micVolume, _micVolumeText, _micMute)]]];
+    NSView* screenStrip = nil;
+    NSView* cameraStrip = nil;
+    Settings stripSettings = _settings;
+    stripSettings.camera = true;
+    for (const auto& strip : rec::app::mixer_strips(stripSettings)) {
+        if (strip.kind != rec::app::Strip::Kind::visual || !strip.color) continue;
+        if (strip.source && strip.source->kind == rec::app::SourceRef::Kind::screen) screenStrip = [self colorStrip:strip];
+        if (strip.source && strip.source->kind == rec::app::SourceRef::Kind::camera) cameraStrip = [self colorStrip:strip];
+    }
+    cameraStrip.hidden = !_settings.camera;
 
     // The newest frame as encoded, in the output's shape on dark gray.
     _preview = [[PreviewView alloc] init];
@@ -1050,7 +1148,7 @@ struct PreviewHit {
     buttons.distribution = NSStackViewDistributionFill;
     [_record setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     _permission = label(@"");
-    _permission.textColor = NSColor.systemOrangeColor;
+    _permission.textColor = Palette::secondaryText();
     _openPrivacy = [self button:@"Open Privacy Settings" action:@selector(openPrivacy:)];
     _permissionRow = [NSStackView stackViewWithViews:@[_permission, _openPrivacy]];
     _permissionRow.distribution = NSStackViewDistributionFill;
@@ -1063,7 +1161,6 @@ struct PreviewHit {
     _micDevice = [self popup:@"Microphone device"];
     _cursor = [self check:@"Show cursor"];
     _clicks = [self check:@"Show clicks"];
-    NSView* screenColor = [self colorControls:NO];
     NSGridView* capture = [self grid:@[@[label(@"Source"), _source], @[_systemAudio], @[_microphone, _micDevice], @[_cursor, _clicks]]];
 
     _resolution = [self popup:@"Resolution"];
@@ -1139,7 +1236,7 @@ struct PreviewHit {
     _shadow = [self check:@"Drop shadow"];
     _image = [self check:@"Image overlay"];
     _imageFile = label(@"");
-    _imageFile.textColor = NSColor.secondaryLabelColor;
+    _imageFile.textColor = Palette::secondaryText();
     _imageFile.lineBreakMode = NSLineBreakByTruncatingMiddle;
     _imageFile.accessibilityLabel = @"Image file";
     [_imageFile setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -1150,7 +1247,6 @@ struct PreviewHit {
                                       @[label(@"Position"), _corner], @[label(@"Size"), _cameraSize],
                                       @[label(@"Shape"), _cameraShape], @[label(@"Roundness"), _roundness],
                                       @[label(@"Border"), _cameraBorder], @[NSGridCell.emptyContentView, _shadow],
-                                      @[[self colorControls:YES]],
                                       @[_image, imageRow]]];
     [camera columnAtIndex:0].width = 120;
     _phoneCodeRow = [camera rowAtIndex:1];
@@ -1190,7 +1286,7 @@ struct PreviewHit {
     NSStackView* sourceButtons = [NSStackView stackViewWithViews:@[_addDisplay, _addWindow, _removeSource]];
     sourceButtons.distribution = NSStackViewDistributionFillEqually;
     _folder = label(@"");
-    _folder.textColor = NSColor.secondaryLabelColor;
+    _folder.textColor = Palette::secondaryText();
     _folder.lineBreakMode = NSLineBreakByTruncatingMiddle;
     _folder.selectable = YES;
     _folder.accessibilityLabel = @"Recordings folder";
@@ -1204,8 +1300,8 @@ struct PreviewHit {
     // Status and preview side by side over two columns: what and how to record on the left,
     // where it goes on the right, and the scenes in a narrower third column. One column would
     // be taller than a 13-inch screen.
-    NSArray<NSView*>* status = @[_status, _detail, _live, meters, buttons, _permissionRow];
-    NSArray<NSView*>* left = @[header(@"Capture"), capture, header(@"Screen color"), screenColor,
+    NSArray<NSView*>* status = @[_status, _detail, _live, meters, screenStrip, cameraStrip, buttons, _permissionRow];
+    NSArray<NSView*>* left = @[header(@"Capture"), capture,
                                header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons,
                                _verticalMovie];
     NSArray<NSView*>* right = @[header(@"Live stream"), live, header(@"Replay"), replay];
@@ -1221,13 +1317,13 @@ struct PreviewHit {
         for (NSView* view in views) [view.widthAnchor constraintEqualToConstant:width].active = YES;
         return stack;
     };
-    NSStackView* statusColumn = column(status, 440);
+    _statusColumn = column(status, 440);
     _showPreview = [self check:@"Show preview"];
     // With the vertical video, its preview stands beside the landscape one.
     NSStackView* previews = [NSStackView stackViewWithViews:@[_preview, _preview2]];
     previews.distribution = NSStackViewDistributionFill;
     previews.spacing = 8;
-    NSStackView* top = [NSStackView stackViewWithViews:@[statusColumn, column(@[previews, _showPreview], 440)]];
+    NSStackView* top = [NSStackView stackViewWithViews:@[_statusColumn, column(@[previews, _showPreview], 440)]];
     top.alignment = NSLayoutAttributeTop;
     top.spacing = 30;
     NSStackView* leftColumn = column(left, 440);
@@ -1262,6 +1358,15 @@ struct PreviewHit {
         [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
     ]];
     [_window setContentSize:stack.fittingSize];
+    _micVolume.nextKeyView = _micMute;
+    _micMute.nextKeyView = _screenColor[0];
+    _screenColor[0].nextKeyView = _screenColor[1];
+    _screenColor[1].nextKeyView = _screenColor[2];
+    _screenColor[2].nextKeyView = _screenColorReset;
+    _screenColorReset.nextKeyView = _cameraColor[0];
+    _cameraColor[0].nextKeyView = _cameraColor[1];
+    _cameraColor[1].nextKeyView = _cameraColor[2];
+    _cameraColor[2].nextKeyView = _cameraColorReset;
 }
 
 - (void)showSettings {
@@ -1282,6 +1387,7 @@ struct PreviewHit {
     const auto length = std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds);
     [_replayLength selectItemAtIndex:length == rec::app::kReplayLengths.end() ? 1 : length - rec::app::kReplayLengths.begin()];
     _camera.state = s.camera ? NSControlStateValueOn : NSControlStateValueOff;
+    _cameraStrip.hidden = !s.camera;
     [self showColor:NO];
     [self showColor:YES];
     [self showCameraStyle];
@@ -1296,45 +1402,6 @@ struct PreviewHit {
     [self showDestinations:std::vector<std::string>()];
     [self showDisplays:_displays windows:_windows microphones:_microphones];
     [self showScenes];
-}
-
-- (NSView*)colorControls:(BOOL)camera {
-    const char* names[] = {camera ? "Camera brightness" : "Screen brightness",
-                           camera ? "Camera contrast" : "Screen contrast",
-                           camera ? "Camera saturation" : "Screen saturation"};
-    NSMutableArray<NSArray<NSView*>*>* rows = [NSMutableArray array];
-    for (int i = 0; i < 3; ++i) {
-        ResettableSlider* slider = [ResettableSlider sliderWithValue:0 minValue:-100 maxValue:100 target:self action:@selector(colorChanged:)];
-        slider.continuous = YES;
-        slider.accessibilityLabel = [NSString stringWithUTF8String:names[i]];
-        slider.numberOfTickMarks = 3;
-        slider.allowsTickMarkValuesOnly = NO;
-        slider.resetTarget = self;
-        slider.resetAction = @selector(resetSlider:);
-        slider.finishTarget = self;
-        slider.finishAction = @selector(sliderFinished:);
-        (camera ? _cameraColor : _screenColor)[i] = slider;
-        NSString* title = @[@"Brightness", @"Contrast", @"Saturation"][i];
-        NSTextField* value = label(@"0");
-        NSTextField* titleLabel = label(title);
-        [titleLabel.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
-        value.alignment = NSTextAlignmentRight;
-        value.accessibilityLabel = [NSString stringWithFormat:@"%s value", names[i]];
-        [value.widthAnchor constraintEqualToConstant:kControlValueWidth].active = YES;
-        (camera ? _cameraColorValue : _screenColorValue)[i] = value;
-        NSStackView* row = [NSStackView stackViewWithViews:@[titleLabel, slider, value]];
-        row.spacing = 8;
-        [slider setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-        [rows addObject:@[row]];
-    }
-    NSButton* reset = [self button:camera ? @"Reset camera color" : @"Reset screen color" action:@selector(resetColor:)];
-    reset.accessibilityLabel = reset.title;
-    if (camera) _cameraColorReset = reset;
-    else _screenColorReset = reset;
-    [rows addObject:@[NSGridCell.emptyContentView, reset]];
-    NSGridView* grid = [self grid:rows];
-    grid.rowSpacing = 3;
-    return grid;
 }
 
 - (void)showColor:(BOOL)camera {
@@ -1735,6 +1802,7 @@ struct PreviewHit {
     }
     if (sender == _camera || sender == _image) {
         [self readSettings];
+        _cameraStrip.hidden = !_settings.camera;
         [self showSceneSources];
     }
     if (sender == _cameraDevice) {
@@ -1772,7 +1840,7 @@ struct PreviewHit {
         _phoneLocal.accessibilityLabel = @"Phone camera address without internet";
         _phoneLocal.preferredMaxLayoutWidth = 368;
         _phoneLocal.selectable = YES;
-        _phoneLocal.textColor = NSColor.secondaryLabelColor;
+        _phoneLocal.textColor = Palette::secondaryText();
         _phoneClose = [self button:@"Close" action:@selector(performClose:)];
         _phoneClose.target = _phoneWindow;
         _phoneClose.keyEquivalent = @"\r";
@@ -2144,8 +2212,8 @@ struct PreviewHit {
     CGRequestScreenCaptureAccess();
     NSString* text = @"Turn on Rec in System Settings > Privacy & Security > Screen & System Audio Recording, "
                      @"then quit and reopen Rec.";
-    _detail.stringValue = text;
-    _detail.textColor = NSColor.systemOrangeColor;
+    _detail.stringValue = [@"! " stringByAppendingString:text];
+    _detail.textColor = Palette::secondaryText();
     NSAlert* alert = [[NSAlert alloc] init];
     alert.messageText = @"Rec needs Screen Recording permission";
     alert.informativeText = text;
@@ -2159,8 +2227,8 @@ struct PreviewHit {
 }
 
 - (void)warn:(NSString*)message {
-    _detail.stringValue = message;
-    _detail.textColor = NSColor.systemOrangeColor;
+    _detail.stringValue = [@"! " stringByAppendingString:message];
+    _detail.textColor = Palette::secondaryText();
     if (!environment("REC_APP_SELF_TEST").empty()) return;
     NSAlert* alert = [[NSAlert alloc] init];
     alert.messageText = @"Rec could not start recording";
@@ -2395,11 +2463,8 @@ struct PreviewHit {
     [self showOutline];
 }
 
-- (void)meter:(NSLevelIndicator*)meter peak:(float)peak shown:(float&)shown {
-    // dB scale over the last 60 dB, falling back at about 20 dB a second.
-    const float level = peak > 0 ? std::clamp((20.0f * std::log10(peak) + 60.0f) / 60.0f, 0.0f, 1.0f) : 0.0f;
-    shown = std::max(level, shown - 0.017f);
-    meter.doubleValue = shown;
+- (void)meter:(NSLevelIndicator*)meter peak:(float)peak state:(rec::app::Meter&)state {
+    meter.doubleValue = state.feed(peak);
 }
 
 - (void)refresh {
@@ -2453,21 +2518,23 @@ struct PreviewHit {
         detail = _note;
         _attention = _noteAttention;
     }
+    if (_attention && detail.length && ![detail hasPrefix:@"!"]) detail = [@"! " stringByAppendingString:detail];
     if (![_status.stringValue isEqualToString:status]) _status.stringValue = status;
     if (![_detail.stringValue isEqualToString:detail]) _detail.stringValue = detail;
-    _status.textColor = s.state == State::recording ? NSColor.systemRedColor
-                      : s.state == State::paused    ? NSColor.systemOrangeColor
-                                                    : NSColor.labelColor;
-    _detail.textColor = _attention ? NSColor.systemOrangeColor : NSColor.secondaryLabelColor;
+    _status.textColor = s.state == State::recording ? Palette::accent()
+                      : s.state == State::paused    ? Palette::pausedAccent()
+                                                    : Palette::text();
+    _detail.textColor = Palette::secondaryText();
+    _live.textColor = s.live ? Palette::accent() : Palette::secondaryText();
     NSString* live = !active ? @""
                    : s.live && s.servers > 1 ? [NSString stringWithFormat:@"● LIVE %u/%u  %.1f Mb/s", s.servers_live, s.servers, s.stream_kbps / 1000.0]
                    : s.live ? [NSString stringWithFormat:@"● LIVE  %.1f Mb/s", s.stream_kbps / 1000.0]
                    : s.reconnecting ? @"Reconnecting…" : @"";
     if (![_live.stringValue isEqualToString:live]) _live.stringValue = live;
     // Hide the last level once recording ends; polling stops with it.
-    if (!active) _systemShown = _micShown = 0;
-    [self meter:_systemMeter peak:s.system_peak shown:_systemShown];
-    [self meter:_micMeter peak:s.mic_peak shown:_micShown];
+    if (!active) _systemMeterState.shown = _micMeterState.shown = 0;
+    [self meter:_systemMeter peak:s.system_peak state:_systemMeterState];
+    [self meter:_micMeter peak:s.mic_peak state:_micMeterState];
 
     _record.title = active ? @"Stop Recording" : @"Start Recording";
     _pause.title = s.state == State::paused ? @"Resume" : @"Pause";
@@ -2478,7 +2545,7 @@ struct PreviewHit {
     if (s.state == State::idle) {
         _missing = [self missingPermission];
         _permissionRow.hidden = !_missing;
-        if (_missing) _permission.stringValue = [self permissionText:*_missing];
+        if (_missing) _permission.stringValue = [@"! " stringByAppendingString:[self permissionText:*_missing]];
     }
     const bool editable = s.state == State::idle;
     for (NSControl* control in @[_source, _systemAudio, _microphone, _cursor, _clicks, _resolution, _fps, _codec, _format,
@@ -2579,7 +2646,8 @@ struct PreviewHit {
                                    accessibilityDescription:active ? @"Rec, recording" : @"Rec"];
         [image setTemplate:!active];
         button.image = image;
-        button.contentTintColor = active && s.state == State::recording ? NSColor.systemRedColor : nil;
+        button.contentTintColor = active && s.state == State::recording ? Palette::accent()
+                                : active && s.state == State::paused ? Palette::pausedAccent() : nil;
         button.title = active ? [@" " stringByAppendingString:clock_text(s.seconds)] : @"";
     } else {
         button.title = active ? [@"● " stringByAppendingString:clock_text(s.seconds)] : @"○";
@@ -2614,7 +2682,30 @@ struct PreviewHit {
                                    std::string(reportPath.UTF8String) + ".sample.txt' >/dev/null 2>&1";
         std::system(sample.c_str());
         std::_Exit(1);
-    };    const auto ui = [](void (^block)(void)) { dispatch_sync(dispatch_get_main_queue(), block); };
+    };
+    const auto ui = [](void (^block)(void)) { dispatch_sync(dispatch_get_main_queue(), block); };
+    NSString* artifacts = [reportPath stringByDeletingLastPathComponent];
+    const auto save_window_png = [&] {
+        __block NSInteger windowNumber = 0;
+        ui(^{ windowNumber = self->_window.windowNumber; });
+        NSString* path = [artifacts stringByAppendingPathComponent:@"app-strips.png"];
+        NSTask* capture = [[NSTask alloc] init];
+        capture.executableURL = [NSURL fileURLWithPath:@"/usr/sbin/screencapture"];
+        capture.arguments = @[@"-l", [NSString stringWithFormat:@"%ld", (long)windowNumber], @"-o", path];
+        NSError* error = nil;
+        if (![capture launchAndReturnError:&error]) fail([@"could not capture Rec window: " stringByAppendingString:error.localizedDescription]);
+        [capture waitUntilExit];
+        if (capture.terminationStatus != 0 || ![NSFileManager.defaultManager fileExistsAtPath:path])
+            fail(@"screencapture failed to save Rec's own window as app-strips.png");
+    };
+    const auto same_color = [](NSColor* left, NSColor* right) {
+        NSColor* a = [left colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
+        NSColor* b = [right colorUsingColorSpace:NSColorSpace.deviceRGBColorSpace];
+        return a && b && std::abs(a.redComponent - b.redComponent) < 0.01 &&
+               std::abs(a.greenComponent - b.greenComponent) < 0.01 &&
+               std::abs(a.blueComponent - b.blueComponent) < 0.01 &&
+               std::abs(a.alphaComponent - b.alphaComponent) < 0.01;
+    };
     const auto status = [&] {
         __block NSString* text;
         ui(^{ text = self->_status.stringValue; });
@@ -2781,6 +2872,43 @@ struct PreviewHit {
     note([@"margins=" stringByAppendingString:margins]);
     // Push buttons' frames include about 6 pt of bezel around the visible button.
     if (tight) fail([@"controls are too close to the window's edge: " stringByAppendingString:margins]);
+    __block BOOL stripLayoutOK = NO;
+    __block BOOL cameraInitiallyHidden = NO;
+    __block NSString* tabName;
+    ui(^{
+        NSView* content = self->_window.contentView;
+        [content layoutSubtreeIfNeeded];
+        const NSRect volume = [self->_systemVolume.superview convertRect:self->_systemVolume.frame toView:content];
+        const NSRect color = [self->_screenColor[0].superview convertRect:self->_screenColor[0].frame toView:content];
+        const NSRect volumeValue = [self->_systemVolumeText.superview convertRect:self->_systemVolumeText.frame toView:content];
+        const NSRect colorValue = [self->_screenColorValue[0].superview convertRect:self->_screenColorValue[0].frame toView:content];
+        const NSRect reset = [self->_screenColorReset.superview convertRect:self->_screenColorReset.frame toView:content];
+        NSStackView* screenStack = (NSStackView*)self->_screenStrip;
+        NSView* titleView = screenStack.arrangedSubviews.firstObject;
+        const NSRect title = [titleView.superview convertRect:titleView.frame toView:content];
+        const NSRect strip = [screenStack.superview convertRect:screenStack.frame toView:content];
+        stripLayoutOK = std::abs(volume.origin.x - color.origin.x) < 1 &&
+                        std::abs(volume.size.width - color.size.width) < 1 &&
+                        std::abs(volumeValue.origin.x - colorValue.origin.x) < 1 &&
+                        std::abs(volumeValue.size.width - colorValue.size.width) < 1 &&
+                        std::abs(NSMidY(reset) - NSMidY(title)) < 4 &&
+                        NSPointInRect(NSMakePoint(NSMidX(reset), NSMidY(reset)), strip) &&
+                        std::abs(NSMaxX(reset) - NSMaxX(strip)) < 10 &&
+                        [self->_screenColorReset.title isEqualToString:@"Reset"] &&
+                        [self->_screenColorReset.accessibilityLabel isEqualToString:@"Reset screen color"];
+        cameraInitiallyHidden = self->_cameraStrip.hiddenOrHasHiddenAncestor;
+        tabName = self->_micVolume.nextKeyView == self->_micMute &&
+                  self->_micMute.nextKeyView == self->_screenColor[0]
+                      ? self->_screenColor[0].accessibilityLabel : @"Unexpected key-view chain";
+    });
+    if (!stripLayoutOK) fail(@"Screen strip header/reset or color slider geometry does not match the mixer rows");
+    if (!cameraInitiallyHidden) fail(@"Camera strip is visible while Camera is off");
+    if (![tabName isEqualToString:@"Screen brightness"])
+        fail([NSString stringWithFormat:@"Tab after microphone volume did not reach Screen brightness; focused '%@'", tabName]);
+    note(@"screen-strip=ok");
+    note(@"camera-strip-hidden=ok");
+    note(@"tab-strip-order=ok");
+    save_window_png();
     // 30 fps keeps the check light on virtual machines.
     ui(^{ [self->_fps selectItemAtIndex:std::find(kFrameRates.begin(), kFrameRates.end(), 30u) - kFrameRates.begin()]; });
 
@@ -2789,9 +2917,17 @@ struct PreviewHit {
     set_check(_microphone, true);
     press(_record);
     wait_for(recording, 20);
+    __block BOOL recordingAccent = NO;
+    ui(^{ recordingAccent = same_color(self->_status.textColor, Palette::accent()); });
+    if (!recordingAccent) fail(@"recording status color did not match the palette accent");
+    note(@"status-recording-color=ok");
     sleep(2);
     press(_pause);
     wait_for(@"Paused", 5);
+    __block BOOL pausedAccent = NO;
+    ui(^{ pausedAccent = same_color(self->_status.textColor, Palette::pausedAccent()); });
+    if (!pausedAccent) fail(@"paused status color did not match the dimmed accent");
+    note(@"status-paused-color=ok");
     usleep(1500000);
     press(_pause);
     wait_for(recording, 5);
@@ -2863,6 +2999,10 @@ struct PreviewHit {
             if (!live) usleep(100000);
         }
         if (!live) fail([@"no LIVE badge: " stringByAppendingString:detail()]);
+        __block BOOL liveBadge = NO;
+        ui(^{ liveBadge = [self->_live.stringValue containsString:@"LIVE"]; });
+        if (!liveBadge) fail(@"live badge does not contain LIVE");
+        note(@"live-badge=ok");
         sleep(3);
         // The badge shows the measured send rate.
         __block NSString* badge;
@@ -3036,6 +3176,26 @@ struct PreviewHit {
     ui(^{ cameraMenuAvailable = self->_camera.state == NSControlStateValueOff && self->_cameraDevice.enabled; });
     if (!cameraMenuAvailable) fail(@"the camera menu was disabled while Camera was off");
     set_check(_camera, true);
+    __block BOOL cameraVisible = NO;
+    __block BOOL cameraHeaderOnRow = NO;
+    ui(^{
+        NSView* content = self->_window.contentView;
+        [content layoutSubtreeIfNeeded];
+        cameraVisible = !self->_cameraStrip.hiddenOrHasHiddenAncestor;
+        const NSRect reset = [self->_cameraColorReset.superview convertRect:self->_cameraColorReset.frame toView:content];
+        NSStackView* cameraStack = (NSStackView*)self->_cameraStrip;
+        NSView* titleView = cameraStack.arrangedSubviews.firstObject;
+        const NSRect title = [titleView.superview convertRect:titleView.frame toView:content];
+        const NSRect strip = [cameraStack.superview convertRect:cameraStack.frame toView:content];
+        cameraHeaderOnRow = std::abs(NSMidY(reset) - NSMidY(title)) < 4 &&
+                            NSPointInRect(NSMakePoint(NSMidX(reset), NSMidY(reset)), strip) &&
+                            std::abs(NSMaxX(reset) - NSMaxX(strip)) < 10 &&
+                            [self->_cameraColorReset.title isEqualToString:@"Reset"] &&
+                            [self->_cameraColorReset.accessibilityLabel isEqualToString:@"Reset camera color"];
+    });
+    if (!cameraVisible) fail(@"Camera strip stayed hidden after Camera was enabled");
+    if (!cameraHeaderOnRow) fail(@"Camera Reset is not on the header row inside its strip");
+    note(@"camera-strip-visible=ok");
     set_check(_image, true);
     const auto scene = [&](NSInteger index) {
         ui(^{
@@ -3073,7 +3233,6 @@ struct PreviewHit {
         const auto c = mean_color(f, x, y, w, h);
         if (!is_color(c, want)) fail([NSString stringWithFormat:@"%@: the preview is %ld,%ld,%ld, not %@", name, c[0], c[1], c[2], want]);
     };
-    NSString* artifacts = [reportPath stringByDeletingLastPathComponent];
     const auto save_png = [&](const rec::PreviewFrame& f, NSString* name) {
         NSBitmapImageRep* rep = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr pixelsWide:f.width
             pixelsHigh:f.height bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
