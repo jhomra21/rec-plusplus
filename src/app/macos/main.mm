@@ -407,6 +407,8 @@ struct PreviewHit {
     NSPopUpButton *_cameraDevice, *_corner, *_cameraSize, *_scene;
     NSPopUpButton *_cameraShape, *_cameraBorder;
     NSSlider* _roundness;
+    NSSlider *_screenColor[3], *_cameraColor[3];
+    NSButton *_screenColorReset, *_cameraColorReset;
     NSButton* _shadow;
     NSTextField *_bitrate, *_imageFile;
     NSStatusItem* _statusItem;
@@ -1015,6 +1017,7 @@ struct PreviewHit {
     _micDevice = [self popup:@"Microphone device"];
     _cursor = [self check:@"Show cursor"];
     _clicks = [self check:@"Show clicks"];
+    NSView* screenColor = [self colorControls:NO];
     NSGridView* capture = [self grid:@[@[label(@"Source"), _source], @[_systemAudio], @[_microphone, _micDevice], @[_cursor, _clicks]]];
 
     _resolution = [self popup:@"Resolution"];
@@ -1101,6 +1104,7 @@ struct PreviewHit {
                                       @[label(@"Position"), _corner], @[label(@"Size"), _cameraSize],
                                       @[label(@"Shape"), _cameraShape], @[label(@"Roundness"), _roundness],
                                       @[label(@"Border"), _cameraBorder], @[NSGridCell.emptyContentView, _shadow],
+                                      @[[self colorControls:YES]],
                                       @[_image, imageRow]]];
     [camera columnAtIndex:0].width = 120;
     _phoneCodeRow = [camera rowAtIndex:1];
@@ -1155,7 +1159,8 @@ struct PreviewHit {
     // where it goes on the right, and the scenes in a narrower third column. One column would
     // be taller than a 13-inch screen.
     NSArray<NSView*>* status = @[_status, _detail, _live, meters, buttons, _permissionRow];
-    NSArray<NSView*>* left = @[header(@"Capture"), capture, header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons,
+    NSArray<NSView*>* left = @[header(@"Capture"), capture, header(@"Screen color"), screenColor,
+                               header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons,
                                _verticalMovie];
     NSArray<NSView*>* right = @[header(@"Live stream"), live, header(@"Replay"), replay];
     NSArray<NSView*>* third = @[header(@"Scenes"), scenes, label(@"Sources"), sourcesScroll, _sourceShown, sourceButtons,
@@ -1231,6 +1236,8 @@ struct PreviewHit {
     const auto length = std::find(rec::app::kReplayLengths.begin(), rec::app::kReplayLengths.end(), s.replay_seconds);
     [_replayLength selectItemAtIndex:length == rec::app::kReplayLengths.end() ? 1 : length - rec::app::kReplayLengths.begin()];
     _camera.state = s.camera ? NSControlStateValueOn : NSControlStateValueOff;
+    [self showColor:NO];
+    [self showColor:YES];
     [self showCameraStyle];
     [self showVolume:rec::AudioInput::system];
     [self showVolume:rec::AudioInput::microphone];
@@ -1243,6 +1250,55 @@ struct PreviewHit {
     [self showDestinations:std::vector<std::string>()];
     [self showDisplays:_displays windows:_windows microphones:_microphones];
     [self showScenes];
+}
+
+- (NSView*)colorControls:(BOOL)camera {
+    const char* names[] = {camera ? "Camera brightness" : "Screen brightness",
+                           camera ? "Camera contrast" : "Screen contrast",
+                           camera ? "Camera saturation" : "Screen saturation"};
+    NSMutableArray<NSArray<NSView*>*>* rows = [NSMutableArray array];
+    for (int i = 0; i < 3; ++i) {
+        NSSlider* slider = [NSSlider sliderWithValue:0 minValue:-100 maxValue:100 target:self action:@selector(colorChanged:)];
+        slider.continuous = YES;
+        slider.accessibilityLabel = [NSString stringWithUTF8String:names[i]];
+        (camera ? _cameraColor : _screenColor)[i] = slider;
+        NSString* title = @[@"Brightness", @"Contrast", @"Saturation"][i];
+        [rows addObject:@[label(title), slider]];
+    }
+    NSButton* reset = [self button:camera ? @"Reset camera color" : @"Reset screen color" action:@selector(resetColor:)];
+    reset.accessibilityLabel = reset.title;
+    if (camera) _cameraColorReset = reset;
+    else _screenColorReset = reset;
+    [rows addObject:@[NSGridCell.emptyContentView, reset]];
+    NSGridView* grid = [self grid:rows];
+    grid.rowSpacing = 3;
+    return grid;
+}
+
+- (void)showColor:(BOOL)camera {
+    const auto& color = camera ? _settings.camera_color : _settings.screen_color;
+    const int values[] = {color.brightness, color.contrast, color.saturation};
+    for (int i = 0; i < 3; ++i) (camera ? _cameraColor : _screenColor)[i].integerValue = values[i];
+}
+
+- (void)applyColor:(BOOL)camera {
+    auto& color = camera ? _settings.camera_color : _settings.screen_color;
+    color = {static_cast<int>((camera ? _cameraColor : _screenColor)[0].integerValue),
+             static_cast<int>((camera ? _cameraColor : _screenColor)[1].integerValue),
+             static_cast<int>((camera ? _cameraColor : _screenColor)[2].integerValue)};
+    [self applyScene];
+}
+
+- (void)colorChanged:(NSSlider*)slider {
+    [self applyColor:slider == _cameraColor[0] || slider == _cameraColor[1] || slider == _cameraColor[2]];
+}
+
+- (void)resetColor:(NSButton*)button {
+    const BOOL camera = button == _cameraColorReset;
+    if (camera) _settings.camera_color = {};
+    else _settings.screen_color = {};
+    [self showColor:camera];
+    [self applyScene];
 }
 
 - (void)showVolume:(rec::AudioInput)input {
@@ -2562,7 +2618,10 @@ struct PreviewHit {
                                      self->_verticalMovie, self->_verticalLayout,
                                      self->_bitrate, self->_changeFolder, self->_openFolder, self->_showLast,
                                      self->_systemMeter, self->_micMeter, self->_systemVolume, self->_micVolume,
-                                     self->_systemMute, self->_micMute]) {
+                                     self->_systemMute, self->_micMute,
+                                     self->_screenColor[0], self->_screenColor[1], self->_screenColor[2],
+                                     self->_cameraColor[0], self->_cameraColor[1], self->_cameraColor[2],
+                                     self->_screenColorReset, self->_cameraColorReset]) {
             NSString* name = control.accessibilityLabel.length ? control.accessibilityLabel : control.accessibilityTitle;
             // Buttons are named by their title.
             if (!name.length && [control isKindOfClass:NSButton.class]) name = ((NSButton*)control).title;
@@ -2974,6 +3033,37 @@ struct PreviewHit {
     if (!off) fail(@"Show preview off left the preview on");
     set_check(_showPreview, true);
     wait_preview(@"app-preview-idle", @"green", 0.76, 0.75, 0.18, 0.18);
+    // Screen brightness changes the synthetic preview live; Reset restores white.
+    ui(^{
+        self->_screenColor[0].integerValue = -50;
+        [self->_screenColor[0] sendAction:self->_screenColor[0].action to:self->_screenColor[0].target];
+    });
+    __block rec::PreviewFrame colorPreview;
+    bool gray = false;
+    for (int i = 0; i < 100 && !gray; ++i) {
+        ui(^{ colorPreview = self->_frame; });
+        if (colorPreview.number) {
+            const auto c = mean_color(colorPreview, 0.4, 0.4, 0.2, 0.2);
+            gray = c[0] >= 100 && c[0] <= 160 && c[1] >= 100 && c[1] <= 160 &&
+                   c[2] >= 100 && c[2] <= 160 && std::max({c[0], c[1], c[2]}) - std::min({c[0], c[1], c[2]}) < 25;
+        }
+        if (!gray) usleep(50000);
+    }
+    if (!gray) fail(@"Screen brightness did not make the preview gray");
+    save_png(colorPreview, @"app-preview-screen-gray");
+    press(_screenColorReset);
+    bool white = false;
+    for (int i = 0; i < 100 && !white; ++i) {
+        ui(^{ colorPreview = self->_frame; });
+        if (colorPreview.number) {
+            const auto c = mean_color(colorPreview, 0.4, 0.4, 0.2, 0.2);
+            white = c[0] > 190 && c[1] > 190 && c[2] > 190;
+        }
+        if (!white) usleep(50000);
+    }
+    if (!white) fail(@"Reset screen color did not restore the white preview");
+    save_png(colorPreview, @"app-preview-screen-reset");
+    note(@"screen-color=ok");
     note(@"idle-preview=ok");
     press(_record);
     wait_for(recording, 20);

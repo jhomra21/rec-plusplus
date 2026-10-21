@@ -51,8 +51,7 @@ color() {
     END { exit !(found && ok) }' "$2" || { echo "$1 is not $3" >&2; exit 1; }
 }
 
-# Color controls: Windows implements the GPU transform; macOS currently reports the
-# explicit unsupported-platform error, while still validating the shared CLI values.
+# Color controls validate their ranges on both platforms; macOS output checks run below.
 expect_failure 'the brightness must be -100 to 100' record --test-pattern --screen-color 101,0,0
 expect_failure 'the saturation must be -100 to 100' record --test-pattern --camera-color 0,0,-101
 "$rec" --help | grep -q 'native screen recorder'
@@ -284,33 +283,31 @@ else
   color sample_3 "$artifacts/shape-center.probe" green
   color sample_3 "$artifacts/shape-box.probe" green
   color sample_3 "$artifacts/shape-top.probe" green
-  # Separate screen and camera transforms; the Mac path reports its explicit unsupported
-  # message until the Core Image/Metal implementation lands.
+# Separate screen and camera transforms. Screen brightness maps white to 127 gray;
+# camera desaturation makes the green test camera neutral, while the image stays red.
   expect_failure 'the brightness must be -100 to 100' record --test-pattern --screen-color 101,0,0
   if [[ "$(uname -s)" == Darwin ]]; then
-    if "$rec" record --test-pattern -r 1080p -f 30 -t 3 --camera test --image "$png@0.05,0.05,0.2,0.2" \
-        --screen-color -50,0,0 --camera-color 0,0,-100 -o "$artifacts/color-adjust.mov" >"$tmp/color-adjust.log" 2>&1; then
-      "$rec" probe "$artifacts/color-adjust.mov" --sample 600,100,300,100 | tee "$artifacts/color-adjust-screen.probe"
-      "$rec" probe "$artifacts/color-adjust.mov" --sample 1450,800,380,200 | tee "$artifacts/color-adjust-camera.probe"
-      "$rec" probe "$artifacts/color-adjust.mov" --sample 150,100,250,100 | tee "$artifacts/color-adjust-image.probe"
-      color sample_0 "$artifacts/color-adjust-screen.probe" gray
-      color sample_1 "$artifacts/color-adjust-camera.probe" neutral
-      color sample_0 "$artifacts/color-adjust-image.probe" red
-      printf '%s\n' 'color-adjust static: macOS probes passed'
-      { sleep 1.5; echo 'color screen -50,0,0'; } |
-        "$rec" record --test-pattern -r 1080p -f 30 -t 4 -o "$artifacts/color-adjust-live.mov" >"$artifacts/color-adjust-live.log" 2>&1
-      grep -q 'Screen color -50,0,0' "$artifacts/color-adjust-live.log"
-      "$rec" probe "$artifacts/color-adjust-live.mov" --sample 600,100,300,100 | tee "$artifacts/color-adjust-live.probe"
-      color sample_0 "$artifacts/color-adjust-live.probe" white
-      color sample_2 "$artifacts/color-adjust-live.probe" gray
-      printf '%s\n' 'color-adjust live: macOS probes passed'
-    elif grep -q 'color adjustment is not yet supported on macOS' "$tmp/color-adjust.log"; then
-      printf '%s\n' 'color-adjust: skipped image assertions, macOS reports not yet supported'
-      expect_failure 'color adjustment is not yet supported on macOS' record --test-pattern --camera test --camera-color 0,0,-100
-    else
-      cat "$tmp/color-adjust.log" >&2
-      exit 1
-    fi
+  "$rec" record --test-pattern -r 1080p -f 30 -t 3 --camera test --image "$png@0.05,0.05,0.2,0.2" \
+    --screen-color -50,0,0 --camera-color 0,0,-100 -o "$artifacts/color-adjust.mov" | tee "$artifacts/color-adjust.record.log"
+  "$rec" probe "$artifacts/color-adjust.mov" --sample 600,100,300,100 | tee "$artifacts/color-adjust-screen.probe"
+  "$rec" probe "$artifacts/color-adjust.mov" --sample 1450,800,380,200 | tee "$artifacts/color-adjust-camera.probe"
+  "$rec" probe "$artifacts/color-adjust.mov" --sample 150,100,250,100 | tee "$artifacts/color-adjust-image.probe"
+  color sample_0 "$artifacts/color-adjust-screen.probe" gray
+  color sample_1 "$artifacts/color-adjust-camera.probe" neutral
+  color sample_0 "$artifacts/color-adjust-image.probe" red
+  printf 'color-adjust static: screen=%s camera=%s image=%s\n' \
+    "$(value sample_0 "$artifacts/color-adjust-screen.probe")" \
+    "$(value sample_1 "$artifacts/color-adjust-camera.probe")" \
+    "$(value sample_0 "$artifacts/color-adjust-image.probe")"
+  { sleep 1.5; echo 'color screen -50,0,0'; } |
+    "$rec" record --test-pattern -r 1080p -f 30 -t 4 -o "$artifacts/color-adjust-live.mov" | tee "$artifacts/color-adjust-live.log"
+  grep -q 'Screen color -50,0,0' "$artifacts/color-adjust-live.log"
+  "$rec" probe "$artifacts/color-adjust-live.mov" --sample 600,100,300,100 | tee "$artifacts/color-adjust-live.probe"
+  color sample_0 "$artifacts/color-adjust-live.probe" white
+  color sample_2 "$artifacts/color-adjust-live.probe" gray
+  printf 'color-adjust live: before=%s after=%s\n' \
+    "$(value sample_0 "$artifacts/color-adjust-live.probe")" \
+    "$(value sample_2 "$artifacts/color-adjust-live.probe")"
   fi
   # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
   # pattern fills it and the camera sits near the bottom; mid-recording "place canvas2 1 0 ..."

@@ -92,7 +92,7 @@ Recordings are written in fragments, so a crash, kill or power loss keeps everyt
 ./build/rec record --camera default@0.7,0.6,0.28,0.35 --camera-style circle,border=6,shadow -t 0 -o talk.mov
 ```
 
-`--screen-color B,C,S` and `--camera-color B,C,S` independently adjust screen-type sources and cameras. Each integer is from -100 to 100: brightness adds B/100, contrast scales around 0.5 by `1+C/100`, and saturation mixes with Rec.709 luma by `1+S/100`. Adjustments run in saturation, contrast, brightness order, before clamping; image overlays are unchanged. For example, `--screen-color -50,0,0 --camera-color 0,0,-100` dims the screen and makes cameras grayscale. Use `color screen|camera B,C,S` with `rec send` to change either setting while recording. Windows applies these in its GPU compositor and preview; macOS currently reports that color adjustment is not yet supported.
+`--screen-color B,C,S` and `--camera-color B,C,S` independently adjust screen-type sources and cameras. Each integer is from -100 to 100: brightness adds B/100, contrast scales around 0.5 by `1+C/100`, and saturation mixes with Rec.709 luma by `1+S/100`. Adjustments run in saturation, contrast, brightness order, before clamping; image overlays are unchanged. For example, `--screen-color -50,0,0 --camera-color 0,0,-100` dims the screen and makes cameras grayscale. Use `color screen|camera B,C,S` with `rec send` to change either setting while recording. Both macOS and Windows apply these in their GPU compositor and preview.
 
 #### A phone as a camera
 

@@ -556,6 +556,10 @@ public:
 
     Result start(std::uint32_t width, std::uint32_t height, const Options& options, const ClickSource& clicks) {
         if (auto error = core::check_overlays(options.overlays); !error.empty()) return {error};
+        if (auto error = core::check_color(options.screen_color); !error.empty()) return {error};
+        if (auto error = core::check_color(options.camera_color); !error.empty()) return {error};
+        screen_color_ = options.screen_color;
+        camera_color_ = options.camera_color;
         if (!core::valid(options.screen_area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
         if (auto error = core::check_crop("the screen", options.screen_crop); !error.empty()) return {error};
         if (auto error = core::check_canvas(options); !error.empty()) return {error};
@@ -646,10 +650,11 @@ public:
     CVPixelBufferRef compose(std::size_t index, CVPixelBufferRef base) {
         if (index >= canvas_count_) return nullptr;
         Canvas& canvas = canvases_[index];
-        struct Job { Layer* layer; Layout layout; Style style; };
+        struct Job { Layer* layer; Layout layout; Style style; ColorAdjust color; };
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
         Layout screen;
+        ColorAdjust screen_adjustment;
         // The presses are stamped when this reads them, about one frame late, so marks are
         // drawn for now rather than for the frame's slot, which is 40 ms behind.
         const auto now = core::Clicks::Clock::now();
@@ -663,8 +668,14 @@ public:
             // canvas found last.
             std::lock_guard lock(mutex_);
             for (std::size_t i = 0; i < layers_.size(); ++i)
-                if (canvas.layers[i].visible) jobs[count++] = {&layers_[i], canvas.layers[i], layers_[i].overlay.style};
+                if (canvas.layers[i].visible) {
+                    const auto kind = layers_[i].overlay.kind;
+                    const ColorAdjust color = kind == Overlay::Kind::camera ? camera_color_ :
+                        (kind == Overlay::Kind::display || kind == Overlay::Kind::window) ? screen_color_ : ColorAdjust{};
+                    jobs[count++] = {&layers_[i], canvas.layers[i], layers_[i].overlay.style, color};
+                }
             screen = canvas.screen;
+            screen_adjustment = screen_color_;
             if (index == kMainCanvas) click_now_ = click_place;
             else click_place = click_now_;
         }
@@ -696,7 +707,8 @@ public:
             }
         }
         const bool fits = CVPixelBufferGetWidth(base) == width && CVPixelBufferGetHeight(base) == height;
-        if (index == kMainCanvas && whole && fits && !count && !mark_count) return CVPixelBufferRetain(base);
+        const bool screen_adjusted = screen_adjustment.brightness || screen_adjustment.contrast || screen_adjustment.saturation;
+        if (index == kMainCanvas && whole && fits && !count && !mark_count && !screen_adjusted) return CVPixelBufferRetain(base);
         @autoreleasepool {
             CVPixelBufferRef out = nullptr;
             // The second canvas's pool is bounded: past it, its encoder has fallen behind and
@@ -708,12 +720,15 @@ public:
             CVBufferPropagateAttachments(base, out);
             const CGRect frame = CGRectMake(0, 0, width, height);
             CIImage* result = nil;
+            CIImage* screen_picture = [CIImage imageWithCVPixelBuffer:base];
+            if (screen.visible && screen_adjusted) screen_picture = color_adjusted(screen_picture, screen_adjustment);
             if (whole && fits) {
-                result = [CIImage imageWithCVPixelBuffer:base];
+                result = screen.visible ? screen_picture :
+                    [CIImage imageWithCVPixelBuffer:base];
             } else {
                 result = [[CIImage imageWithColor:[CIColor colorWithRed:0 green:0 blue:0]] imageByCroppingToRect:frame];
                 if (screen.visible)
-                    result = [placed([CIImage imageWithCVPixelBuffer:base], Overlay::Kind::image, screen, width, height)
+                    result = [placed(screen_picture, Overlay::Kind::image, screen, width, height)
                         imageByCompositingOverImage:result];
             }
             for (std::size_t i = 0; i < mark_count; ++i) result = [mark(marks[i], height) imageByCompositingOverImage:result];
@@ -729,6 +744,8 @@ public:
                 const Style& style = jobs[i].style;
                 Layout layout = jobs[i].layout;
                 layout.area = core::shaped_area(style, layout.area, width, height);
+                if (jobs[i].color.brightness || jobs[i].color.contrast || jobs[i].color.saturation)
+                    picture = color_adjusted(picture, jobs[i].color);
                 CGRect target;
                 CIImage* shown = placed(picture, layer.overlay.kind, layout, width, height, &target);
                 if (core::plain(style)) {
@@ -794,9 +811,10 @@ public:
         layers_[index].overlay.style = style;
         return {};
     }
-    Result set_color(ColorTarget, const ColorAdjust& color) {
+    Result set_color(ColorTarget target, const ColorAdjust& color) {
         if (auto error = core::check_color(color); !error.empty()) return {error};
-        if (color.brightness || color.contrast || color.saturation) return {"color adjustment is not yet supported on macOS"};
+        std::lock_guard lock(mutex_);
+        (target == ColorTarget::screen ? screen_color_ : camera_color_) = color;
         return {};
     }
 
@@ -835,6 +853,30 @@ private:
     static constexpr std::uint32_t kMarkSize = 128;
     // The second canvas's frames: its encoder's queue of four plus what VideoToolbox holds.
     static constexpr int kSecondFrames = 12;
+
+    static CIImage* color_adjusted(CIImage* image, const ColorAdjust& color) {
+        if (!color.brightness && !color.contrast && !color.saturation) return image;
+        const float saturation = 1.0f + color.saturation / 100.0f;
+        const float contrast = 1.0f + color.contrast / 100.0f;
+        const float luma[3] = {0.2126f, 0.7152f, 0.0722f};
+        CIVector* rows[3];
+        for (int r = 0; r < 3; ++r) {
+            float values[4]{};
+            for (int col = 0; col < 3; ++col)
+                values[col] = contrast * (saturation * (r == col ? 1.0f : 0.0f) + (1.0f - saturation) * luma[col]);
+            rows[r] = [CIVector vectorWithX:values[0] Y:values[1] Z:values[2] W:0];
+        }
+        const float offset = 0.5f * (1.0f - contrast) + color.brightness / 100.0f;
+        CIImage* transformed = [image imageByApplyingFilter:@"CIColorMatrix" withInputParameters:@{
+            @"inputRVector": rows[0], @"inputGVector": rows[1], @"inputBVector": rows[2],
+            @"inputAVector": [CIVector vectorWithX:0 Y:0 Z:0 W:1],
+            @"inputBiasVector": [CIVector vectorWithX:offset Y:offset Z:offset W:0]
+        }];
+        return [transformed imageByApplyingFilter:@"CIColorClamp" withInputParameters:@{
+            @"inputMinComponents": [CIVector vectorWithX:0 Y:0 Z:0 W:0],
+            @"inputMaxComponents": [CIVector vectorWithX:1 Y:1 Z:1 W:1]
+        }];
+    }
 
     // One picture of the recording: its size, frames and the layout of every source.
     struct Canvas {
@@ -963,6 +1005,7 @@ private:
     std::uint64_t click_lookups_ = 0;
     std::uint32_t presses_[2] = {};
     bool held_[2] = {};
+    ColorAdjust screen_color_, camera_color_;
     CIImage* __strong click_marks_[2] = {nil, nil};
 };
 

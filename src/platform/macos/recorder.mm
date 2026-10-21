@@ -630,9 +630,8 @@ public:
     Result start() {
         @autoreleasepool {
             if (active_) return {"already recording"};
-            if (options_.screen_color.brightness || options_.screen_color.contrast || options_.screen_color.saturation ||
-                options_.camera_color.brightness || options_.camera_color.contrast || options_.camera_color.saturation)
-                return {"color adjustment is not yet supported on macOS"};
+            if (auto error = core::check_color(options_.screen_color); !error.empty()) return {error};
+            if (auto error = core::check_color(options_.camera_color); !error.empty()) return {error};
             window_closed_.store(false);
             if (options_.preview_only) {
                 if (!options_.preview_width) return {"a preview needs a preview width"};
@@ -958,7 +957,8 @@ public:
     }
     Result set_color(ColorTarget target, const ColorAdjust& color) {
         if (auto error = core::check_color(color); !error.empty()) return {error};
-        if (color.brightness || color.contrast || color.saturation) return {"color adjustment is not yet supported on macOS"};
+        if (!overlays_ && (color.brightness || color.contrast || color.saturation))
+            return {"color adjustment requires the compositor"};
         if (!overlays_) return {};
         return overlays_->set_color(target, color);
     }
@@ -995,7 +995,9 @@ private:
     bool layered() const {
         const auto& a = options_.screen_area;
         const auto& c = options_.screen_crop;
-        return !options_.overlays.empty() || options_.clicks || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 ||
+        return !options_.overlays.empty() || options_.clicks || options_.screen_color.brightness || options_.screen_color.contrast ||
+               options_.screen_color.saturation || options_.camera_color.brightness || options_.camera_color.contrast ||
+               options_.camera_color.saturation || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 ||
                a.height < 1 || c.x > 0 || c.y > 0 || c.width < 1 || c.height < 1 || options_.canvas2.width;
     }
 

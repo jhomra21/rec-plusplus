@@ -25,7 +25,8 @@ struct ClickSource {
 // display and window overlays. Each canvas (the main one and, with options.canvas2, a
 // second one) has its own size, pool and layout of the same sources. The recording thread
 // composes the main canvas and another thread may compose the second one at the same time;
-// set(), set_screen(), set_layout() and set_style() may come from any thread. Each camera and each display or window stream
+// set(), set_screen(), set_layout(), set_style() and set_color() may come from any thread. Each
+// camera and each display or window stream
 // delivers on its own queue and only replaces its newest retained frame. With
 // options.clicks, compose() reads the system's mouse-down counters, so a press shorter than
 // a frame still shows and no input permission is needed.
