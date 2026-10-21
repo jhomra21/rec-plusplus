@@ -20,6 +20,11 @@
 #include <utility>
 
 namespace rec::app {
+float Meter::feed(float peak) {
+    const float level = peak > 0 ? std::clamp((20.0f * std::log10(peak) + 60.0f) / 60.0f, 0.0f, 1.0f) : 0.0f;
+    shown = std::max(level, shown - 0.017f);
+    return shown;
+}
 namespace {
 int volume(const std::string& text) {
     try {
@@ -676,6 +681,20 @@ std::vector<SourceRef> scene_sources(const Settings& s) {
     if (s.camera) sources.push_back({SourceRef::Kind::camera, 0});
     if (s.image) sources.push_back({SourceRef::Kind::image, 0});
     return sources;
+}
+std::vector<Strip> mixer_strips(const Settings& s) {
+    std::vector<Strip> strips{
+        {Strip::Kind::audio, "System audio", rec::AudioInput::system, std::nullopt, false},
+        {Strip::Kind::audio, "Microphone", rec::AudioInput::microphone, std::nullopt, false},
+        {Strip::Kind::visual, "Screen", std::nullopt, SourceRef{SourceRef::Kind::screen, 0}, true},
+    };
+    // A camera strip follows the setting, just as camera capture does. Layers and the image
+    // do not yet have per-source color controls.
+    if (s.camera) strips.push_back({Strip::Kind::visual, "Camera", std::nullopt, SourceRef{SourceRef::Kind::camera, 0}, true});
+    for (std::size_t i = 0; i < s.layers.size(); ++i)
+        strips.push_back({Strip::Kind::visual, layer_name(s.layers[i]), std::nullopt,
+                          SourceRef{SourceRef::Kind::layer, i}, false});
+    return strips;
 }
 
 std::string source_name(const Settings& s, const SourceRef& source) {
