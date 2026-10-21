@@ -57,6 +57,39 @@ try {
     }
     Expect-Failure '--open takes screen, microphone or camera' @('permissions', '--open', 'speakers')
     Expect-Failure 'Windows asks no permission' @('permissions', '--open', 'screen')
+    # Power requests hold the system and display awake while recording. Existing external
+    # requests make those bits inconclusive; still verify any bit that starts clear.
+    $executionBefore = Get-ExecutionState
+    $powerCheckPath = Join-Path $artifacts 'power-request.mp4'
+    $powerRun = Start-RecProcess $rec @('record', '--test-pattern', '-t', '0', '-o', $powerCheckPath)
+    try {
+        Start-Sleep -Milliseconds 1200
+        $executionDuring = Get-ExecutionState
+        Write-Host ('Execution state before=0x{0:X}, during=0x{1:X}' -f $executionBefore, $executionDuring)
+        $preexisting = $executionBefore -band 0x3
+        $newlyRequired = 0x3 -band (-bnot $executionBefore)
+        if ($preexisting -ne 0) {
+            Write-Host ('Execution-state check inconclusive for pre-existing bit(s): 0x{0:X}' -f $preexisting)
+        }
+        if (($executionDuring -band $newlyRequired) -ne $newlyRequired) {
+            throw ('recording did not set the unheld system/display bit(s) (state=0x{0:X})' -f $executionDuring)
+        }
+        if ($newlyRequired -eq 0) {
+            Write-Host 'Execution-state check inconclusive: both bits were already set before recording.'
+        } else {
+            Write-Host ('Recording set previously-clear execution bit(s): 0x{0:X}' -f $newlyRequired)
+        }
+        Send-RecCommand $powerRun 'stop'
+        $powerResult = Stop-RecProcess $powerRun
+        if ($powerResult.Code -ne 0) { throw "power-request recording failed: $($powerResult.Text)" }
+        $executionAfter = Get-ExecutionState
+        Write-Host ('Execution state after=0x{0:X}' -f $executionAfter)
+    } finally {
+        if (-not $powerRun.Process.HasExited) {
+            $powerRun.Process.Kill()
+            $powerRun.Process.WaitForExit()
+        }
+    }
     # The live A/V sync stimulus must at least compile.
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'flash-beep.ps1') -CheckOnly
     if ($LASTEXITCODE -ne 0) { throw 'flash-beep.ps1 does not compile' }

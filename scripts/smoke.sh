@@ -77,6 +77,23 @@ else
       "$artifacts/permissions.txt"
   done
   expect_failure '--open takes screen, microphone or camera' permissions --open speakers
+  # A recording keeps the Mac and its display awake: rec holds both idle-sleep assertions.
+  power_log="$artifacts/power-request.record.log"
+  "$rec" record --test-pattern -t 0 -o "$tmp/power-request.mov" >"$power_log" 2>&1 &
+  power_pid=$!
+  sleep 1
+  assertions="$(pmset -g assertions)"
+  printf '%s\n' "$assertions" >"$artifacts/power-request.assertions"
+  owned_assertions="$(printf '%s\n' "$assertions" | grep -E "pid $power_pid\\(rec\\):.*PreventUserIdle(Display|System)Sleep" || true)"
+  if ! printf '%s\n' "$owned_assertions" | grep -q 'PreventUserIdleDisplaySleep' ||
+      ! printf '%s\n' "$owned_assertions" | grep -q 'PreventUserIdleSystemSleep'; then
+    kill -TERM "$power_pid" 2>/dev/null || true
+    wait "$power_pid" || true
+    echo "rec PID $power_pid does not hold display/system sleep assertions" >&2
+    exit 1
+  fi
+  kill -INT "$power_pid"
+  wait "$power_pid"
   # Hardware encode and AVFoundation decode without screen permissions. A fresh CI VM's first
   # VideoToolbox session can stall long enough to drop frames, so an unmeasured recording warms it.
   "$rec" record --test-pattern -r 1080p -f 30 -t 1 --codec h264 -o "$tmp/warmup.mov" >"$artifacts/warmup.record.log"

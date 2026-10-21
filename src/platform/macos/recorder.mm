@@ -746,7 +746,7 @@ public:
                 auto ready = create_writer();
                 if (!ready) { stop(); return ready; }
                 activity_ = [[NSProcessInfo processInfo]
-                    beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep
+                    beginActivityWithOptions:NSActivityUserInitiated | NSActivityIdleDisplaySleepDisabled
                     reason:@"Screen recording"];
             }
             finished_.store(false);

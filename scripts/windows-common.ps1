@@ -188,6 +188,25 @@ function Stop-RecProcess($run, [int]$timeoutSeconds = 60) {
     return @{ Code = $run.Process.ExitCode; Text = ($run.Stdout.Result + $run.Stderr.Result).Trim() }
 }
 
+function Get-ExecutionState {
+    if (-not ('RecPowerInformation' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class RecPowerInformation {
+    [DllImport("powrprof.dll")]
+    public static extern UInt32 CallNtPowerInformation(
+        Int32 informationLevel, IntPtr inputBuffer, UInt32 inputBufferLength,
+        out UInt32 outputBuffer, UInt32 outputBufferLength);
+}
+'@
+    }
+    [uint32]$state = 0
+    $status = [RecPowerInformation]::CallNtPowerInformation(16, [IntPtr]::Zero, 0, [ref]$state, 4)
+    if ($status -ne 0) { throw "CallNtPowerInformation(SystemExecutionState) failed: $status" }
+    return $state
+}
+
 # MediaMTX, a local RTMP server for the streaming E2E: pinned release, checksum-verified.
 $MediaMtxVersion = 'v1.21.2'
 $MediaMtxSha256 = 'a84224f5a490855684e62ba6fb71e80ea2a5e16aed61883bb58380290e93e467'

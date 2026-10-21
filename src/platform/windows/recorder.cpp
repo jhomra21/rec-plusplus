@@ -17,6 +17,7 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mmdeviceapi.h>
+#include <powrprof.h>
 #include <wrl/client.h>
 
 #include <windows.graphics.capture.interop.h>
@@ -78,6 +79,42 @@ constexpr std::int64_t kMixWaitFrames = kMixRate * 3 / 10;
 constexpr std::size_t kChunkFrames = 2400;  // 50 ms at 48 kHz.
 // Device.FriendlyName, defined here to avoid instantiating every property key.
 constexpr PROPERTYKEY kFriendlyName{{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
+
+class RecordingPowerRequest {
+public:
+    ~RecordingPowerRequest() { reset(); }
+
+    void start() noexcept {
+        if (handle_) return;
+        REASON_CONTEXT reason{};
+        reason.Version = POWER_REQUEST_CONTEXT_VERSION;
+        reason.Flags = POWER_REQUEST_CONTEXT_SIMPLE_STRING;
+        reason.Reason.SimpleReasonString = const_cast<LPWSTR>(L"Rec is recording");
+        HANDLE handle = PowerCreateRequest(&reason);
+        if (!handle || handle == INVALID_HANDLE_VALUE) return;
+        if (!PowerSetRequest(handle, PowerRequestSystemRequired)) {
+            CloseHandle(handle);
+            return;
+        }
+        if (!PowerSetRequest(handle, PowerRequestDisplayRequired)) {
+            PowerClearRequest(handle, PowerRequestSystemRequired);
+            CloseHandle(handle);
+            return;
+        }
+        handle_ = handle;
+    }
+
+    void reset() noexcept {
+        if (!handle_) return;
+        PowerClearRequest(handle_, PowerRequestDisplayRequired);
+        PowerClearRequest(handle_, PowerRequestSystemRequired);
+        CloseHandle(handle_);
+        handle_ = nullptr;
+    }
+
+private:
+    HANDLE handle_ = nullptr;
+};
 
 std::string failed(const char* what, HRESULT hr) {
     char code[16];
@@ -917,6 +954,7 @@ public:
         audio_cap_ = options_.duration_seconds > 0
             ? std::llround(options_.duration_seconds * options_.fps) * kMixRate / options_.fps : INT64_MAX;
         begin_ = std::chrono::steady_clock::now();
+        if (!options_.preview_only) power_request_.start();
         recording_.store(true);
         for (auto& source : audio_) {
             if (!source.capture) continue;
@@ -997,6 +1035,7 @@ public:
             source.capture.reset();
         }
         if (mf_started_) { MFShutdown(); mf_started_ = false; }
+        power_request_.reset();
         recording_.store(false);
         active_ = false;
         return result;
@@ -1923,6 +1962,7 @@ private:
     }
 
     Options options_;
+    RecordingPowerRequest power_request_;
     Size size_{};
     mutable std::mutex mutex_;
     std::condition_variable frames_ready_;

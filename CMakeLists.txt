@@ -39,7 +39,7 @@ elseif(WIN32)
     target_compile_definitions(rec PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
     target_compile_options(rec PRIVATE /permissive- /utf-8 /bigobj /EHsc)
     target_link_libraries(rec PUBLIC d3d11 dxgi d3dcompiler mf mfplat mfreadwrite mfuuid ole32 windowscodecs windowsapp
-        ws2_32 secur32 crypt32 dwmapi advapi32 shell32 bcrypt wmcodecdspuuid)
+        ws2_32 secur32 crypt32 dwmapi advapi32 shell32 bcrypt wmcodecdspuuid powrprof)
     # Windows has no Opus encoder, and WHIP servers take Opus audio: libopus (BSD), pinned
     # and checksum-verified, built into the engine.
     include(FetchContent)
