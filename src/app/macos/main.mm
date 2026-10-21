@@ -2213,7 +2213,7 @@ struct PreviewHit {
     NSString* text = @"Turn on Rec in System Settings > Privacy & Security > Screen & System Audio Recording, "
                      @"then quit and reopen Rec.";
     _detail.stringValue = [@"! " stringByAppendingString:text];
-    _detail.textColor = Palette::secondaryText();
+    _detail.textColor = Palette::text();
     NSAlert* alert = [[NSAlert alloc] init];
     alert.messageText = @"Rec needs Screen Recording permission";
     alert.informativeText = text;
@@ -2228,7 +2228,7 @@ struct PreviewHit {
 
 - (void)warn:(NSString*)message {
     _detail.stringValue = [@"! " stringByAppendingString:message];
-    _detail.textColor = Palette::secondaryText();
+    _detail.textColor = Palette::text();
     if (!environment("REC_APP_SELF_TEST").empty()) return;
     NSAlert* alert = [[NSAlert alloc] init];
     alert.messageText = @"Rec could not start recording";
@@ -2524,7 +2524,7 @@ struct PreviewHit {
     _status.textColor = s.state == State::recording ? Palette::accent()
                       : s.state == State::paused    ? Palette::pausedAccent()
                                                     : Palette::text();
-    _detail.textColor = Palette::secondaryText();
+    _detail.textColor = _attention ? Palette::text() : Palette::secondaryText();
     _live.textColor = s.live ? Palette::accent() : Palette::secondaryText();
     NSString* live = !active ? @""
                    : s.live && s.servers > 1 ? [NSString stringWithFormat:@"● LIVE %u/%u  %.1f Mb/s", s.servers_live, s.servers, s.stream_kbps / 1000.0]
@@ -2872,6 +2872,21 @@ struct PreviewHit {
     note([@"margins=" stringByAppendingString:margins]);
     // Push buttons' frames include about 6 pt of bezel around the visible button.
     if (tight) fail([@"controls are too close to the window's edge: " stringByAppendingString:margins]);
+    __block BOOL attentionReadable = NO;
+    ui(^{
+        self->_note = @"Self-test attention";
+        self->_noteAttention = true;
+        self->_noteUntil = [NSDate dateWithTimeIntervalSinceNow:2];
+        [self refresh];
+        attentionReadable = [self->_detail.stringValue hasPrefix:@"! "] &&
+                            same_color(self->_detail.textColor, Palette::text());
+        self->_note = nil;
+        self->_noteAttention = false;
+        self->_noteUntil = [NSDate dateWithTimeIntervalSince1970:0];
+        [self refresh];
+    });
+    if (!attentionReadable) fail(@"attention detail did not use full-strength label color");
+    note(@"attention-text=ok");
     __block BOOL stripLayoutOK = NO;
     __block BOOL cameraInitiallyHidden = NO;
     __block NSString* tabName;
