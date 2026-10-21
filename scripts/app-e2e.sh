@@ -34,6 +34,7 @@ source "$root/scripts/mediamtx.sh"
 source "$root/scripts/relay.sh"
 home="$artifacts/app-home"
 report="$artifacts/self-test.txt"
+keychain_service="rec stream key (test home) $home"
 rm -rf "$home" "$report"
 mkdir -p "$artifacts"
 
@@ -75,6 +76,7 @@ finish() {
   rm -rf "$engine_dir"
   stop_mediamtx
   stop_relay
+  while /usr/bin/security delete-generic-password -s "$keychain_service" >/dev/null 2>&1; do :; done
 }
 trap finish EXIT
 # The phone camera step needs a Chromium-family browser.

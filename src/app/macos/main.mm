@@ -24,8 +24,10 @@
 #include <cstring>
 #include <cstdlib>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unistd.h>
 #include <vector>
 
@@ -59,28 +61,67 @@ NSString* clock_text(double seconds) {
 }
 
 // Stream keys live in the login keychain, one generic password per server URL, never in the
-// settings file. A separate home gets its own service: a freshly built test copy reading the
-// user's real keys would wait on a keychain prompt.
+// settings file. Test homes get a unique service so a fresh run cannot read stale test items.
+dispatch_queue_t keychain_queue() {
+    static dispatch_queue_t queue = dispatch_queue_create("rec.app.keychain", DISPATCH_QUEUE_SERIAL);
+    return queue;
+}
+std::mutex key_cache_mutex;
+std::unordered_map<std::string, std::string> key_cache;
+std::atomic_bool keychain_main_thread_violation{false};
+
+bool keychain_queue_check() {
+    if (!NSThread.isMainThread) return true;
+    keychain_main_thread_violation.store(true);
+    std::fprintf(stderr, "self-test: failed=keychain call ran on the main thread\n");
+    if (!environment("REC_APP_SELF_TEST").empty()) std::_Exit(1);
+    return false;
+}
+
 NSMutableDictionary* key_query(const std::string& server) {
-    static NSString* const service = environment("REC_APP_HOME").empty() ? @"rec stream key" : @"rec stream key (test home)";
+    static NSString* const service = [] {
+        const std::string home = environment("REC_APP_HOME");
+        return home.empty() ? @"rec stream key"
+                            : [NSString stringWithFormat:@"rec stream key (test home) %@", ns(home)];
+    }();
     return [@{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
               (__bridge id)kSecAttrService: service,
               (__bridge id)kSecAttrAccount: ns(server)} mutableCopy];
 }
 
-std::string load_key(const std::string& server) {
-    if (server.empty()) return {};
+std::string load_key_on_queue(const std::string& server) {
+    if (!keychain_queue_check() || server.empty()) return {};
     NSMutableDictionary* query = key_query(server);
     query[(__bridge id)kSecReturnData] = @YES;
     query[(__bridge id)kSecMatchLimit] = (__bridge id)kSecMatchLimitOne;
     CFTypeRef found = nullptr;
-    if (SecItemCopyMatching((__bridge CFDictionaryRef)query, &found) != errSecSuccess || !found) return {};
-    NSData* data = CFBridgingRelease(found);
-    return std::string(static_cast<const char*>(data.bytes), data.length);
+    std::string key;
+    if (SecItemCopyMatching((__bridge CFDictionaryRef)query, &found) == errSecSuccess && found) {
+        NSData* data = CFBridgingRelease(found);
+        key.assign(static_cast<const char*>(data.bytes), data.length);
+    }
+    {
+        std::lock_guard lock(key_cache_mutex);
+        if (key.empty()) key_cache.erase(server);
+        else key_cache[server] = key;
+    }
+    return key;
 }
 
-OSStatus store_key(const std::string& server, const std::string& key) {
-    if (server.empty() || key.empty() || load_key(server) == key) return errSecSuccess;
+std::string load_key(const std::string& server) {
+    if (server.empty()) return {};
+    __block std::string result;
+    dispatch_sync(keychain_queue(), ^{ result = load_key_on_queue(server); });
+    return result;
+}
+
+OSStatus store_key_on_queue(const std::string& server, const std::string& key) {
+    if (!keychain_queue_check() || server.empty() || key.empty()) return errSecSuccess;
+    {
+        std::lock_guard lock(key_cache_mutex);
+        const auto found = key_cache.find(server);
+        if (found != key_cache.end() && found->second == key) return errSecSuccess;
+    }
     NSData* data = [NSData dataWithBytes:key.data() length:key.size()];
     OSStatus status = SecItemUpdate((__bridge CFDictionaryRef)key_query(server),
                                     (__bridge CFDictionaryRef)@{(__bridge id)kSecValueData: data});
@@ -90,10 +131,31 @@ OSStatus store_key(const std::string& server, const std::string& key) {
         item[(__bridge id)kSecAttrLabel] = [NSString stringWithFormat:@"Rec stream key (%@)", ns(server)];
         status = SecItemAdd((__bridge CFDictionaryRef)item, nullptr);
     }
+    if (status == errSecSuccess) {
+        std::lock_guard lock(key_cache_mutex);
+        key_cache[server] = key;
+    }
     return status;
 }
 
-void delete_key(const std::string& server) { SecItemDelete((__bridge CFDictionaryRef)key_query(server)); }
+void store_key(const std::string& server, const std::string& key) {
+    if (server.empty() || key.empty()) return;
+    const std::string server_copy = server, key_copy = key;
+    dispatch_async(keychain_queue(), ^{ store_key_on_queue(server_copy, key_copy); });
+}
+
+void delete_key(const std::string& server) {
+    if (server.empty()) return;
+    const std::string server_copy = server;
+    dispatch_async(keychain_queue(), ^{
+        if (!keychain_queue_check()) return;
+        {
+            std::lock_guard lock(key_cache_mutex);
+            key_cache.erase(server_copy);
+        }
+        SecItemDelete((__bridge CFDictionaryRef)key_query(server_copy));
+    });
+}
 
 NSTextField* label(NSString* text) {
     NSTextField* field = [NSTextField labelWithString:text];
@@ -1288,13 +1350,14 @@ struct PreviewHit {
     const std::string name = rec::app::key_name(_settings, i);
     if (name.empty()) return;
     NSSecureTextField* field = _destKey[i];
+    const std::string name_copy = name;
     __weak RecController* weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        NSString* key = ns(load_key(name));
+    dispatch_async(keychain_queue(), ^{
+        NSString* key = ns(load_key_on_queue(name_copy));
         dispatch_async(dispatch_get_main_queue(), ^{
             RecController* me = weakSelf;
             // A key typed meanwhile, or another server chosen, wins.
-            if (!me || field.stringValue.length || rec::app::key_name(me->_settings, i) != name) return;
+            if (!me || field.stringValue.length || rec::app::key_name(me->_settings, i) != name_copy) return;
             field.stringValue = key;
         });
     });
@@ -2679,10 +2742,19 @@ struct PreviewHit {
         __block std::size_t left = 0;
         ui(^{ left = self->_settings.destinations.size(); });
         if (left != 2) fail(@"Remove did not remove the third destination");
-        const std::string stored = load_key(server), stored2 = load_key(server2);
+        std::string stored, stored2;
+        for (int i = 0; i < 100; ++i) {
+            stored = load_key(server);
+            stored2 = load_key(server2);
+            if (stored == "appkey" && stored2 == "appkey2") break;
+            usleep(100000);
+        }
         delete_key(server);
         delete_key(server2);
-        if (stored != "appkey" || stored2 != "appkey2") fail(@"the stream keys were not stored in the keychain");
+        if (stored != "appkey" || stored2 != "appkey2")
+            fail([NSString stringWithFormat:@"the stream keys were not stored in the keychain (first: %zu bytes, second: %zu bytes)",
+                                              stored.size(), stored2.size()]);
+        if (keychain_main_thread_violation.load()) fail(@"a keychain call ran on the main thread");
         note(@"keychain=ok");
         // Get Key on a TikTok row fills its server and key from what is copied; a new server
         // takes the key with it and the old one is forgotten. The copied text is put back after.
