@@ -273,17 +273,16 @@ function Snapshot-StripDpi($ui, [string]$directory, [string]$prefix) {
     if (-not [AppWindow]::GetWindowRect($ui.Window, [ref]$baseRect)) { throw 'GetWindowRect failed before strip DPI screenshots' }
     $camera = $prefix -eq 'app-strips-camera'
     $sourceName = if ($camera) { 'Camera' } else { 'Screen' }
-    $stripSlider = (Find $ui "$sourceName brightness" $Slider).Handle
-    $sliderId = [AppWindow]::GetDlgCtrlID($stripSlider)
-    $firstStripId = $sliderId - 4
-    $frameId = $sliderId + $(if ($camera) { 8 } else { 18 })
+    # These ids are explicit in main.cpp's reserved strip blocks, independent of enum ordering.
+    $stripIds = if ($camera) { @(320..331) } else { @(300..311) }
+    $frameId = if ($camera) { 331 } else { 311 }
     $visible = @{}
     try {
         foreach ($id in 100..399) {
             $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
             if ($handle -eq [IntPtr]::Zero) { continue }
             $visible[$id] = [AppWindow]::IsWindowVisible($handle)
-            $keep = ($id -ge $firstStripId -and $id -le ($sliderId + 6)) -or $id -eq $frameId
+            $keep = $id -in $stripIds
             if (-not $keep) { [AppWindow]::ShowWindow($handle, 0) | Out-Null }
         }
         foreach ($dpi in @(96, 144, 192)) {
@@ -333,13 +332,14 @@ function Assert-StripGeometry($ui, [bool]$camera) {
         ($sliderRect.Right - $sliderRect.Left) -ne ($referenceRect.Right - $referenceRect.Left)) {
         throw "$label color sliders do not share the same start and width"
     }
+    $valueId = if ($camera) { 327 } else { 307 } # kCameraBrightnessValue / kScreenBrightnessValue
     $valueRect = New-Object AppWindow+RECT
-    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, ([AppWindow]::GetDlgCtrlID($stripSlider) + 3)), [ref]$valueRect) | Out-Null
+    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, $valueId), [ref]$valueRect) | Out-Null
     $audioValueRect = New-Object AppWindow+RECT
     [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 106), [ref]$audioValueRect) | Out-Null
     if ($camera) {
         $otherValue = New-Object AppWindow+RECT
-        [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, ([AppWindow]::GetDlgCtrlID($stripSlider) + 4)), [ref]$otherValue) | Out-Null
+        [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 328), [ref]$otherValue) | Out-Null # kCameraContrastValue
         if (($valueRect.Right - $valueRect.Left) -ne ($otherValue.Right - $otherValue.Left)) {
             throw 'Camera value labels do not share a fixed-width value column'
         }
@@ -347,9 +347,29 @@ function Assert-StripGeometry($ui, [bool]$camera) {
         ($valueRect.Right - $valueRect.Left) -ne ($audioValueRect.Right - $audioValueRect.Left)) {
         throw 'Screen value labels do not share the audio readout column'
     }
+    $micValueRect = Rect-OfId $ui 111 # kMicVolumeText
+    if ($audioValueRect.Left -ne $micValueRect.Left -or
+        ($audioValueRect.Right - $audioValueRect.Left) -ne ($micValueRect.Right - $micValueRect.Left)) {
+        throw 'System and microphone dB readouts do not share a right-aligned column'
+    }
     $reset = Rect-Of $ui "Reset $($label.ToLower()) color" $PushButton
     $header = Rect-Of $ui $label 41
     if ([Math]::Abs($header.Top - $reset.Top) -gt 4) { throw "$label Reset is not on the header row" }
+}
+function Rect-OfId($ui, [int]$id) {
+    $r = New-Object AppWindow+RECT
+    $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
+    if ($handle -eq [IntPtr]::Zero -or -not [AppWindow]::GetWindowRect($handle, [ref]$r)) { throw "GetWindowRect failed for control id $id" }
+    return $r
+}
+function Assert-StripVisibility($ui, [int[]]$ids, [bool]$visible, [string]$name) {
+    foreach ($id in $ids) {
+        $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
+        if ($handle -eq [IntPtr]::Zero) { throw "$name strip control $id was not created" }
+        if ([AppWindow]::IsWindowVisible($handle) -ne $visible) {
+            throw "$name strip control $id visibility did not match expected visible=$visible"
+        }
+    }
 }
 function Rect-Of($ui, [string]$name, [int]$role) {
     $r = New-Object AppWindow+RECT
@@ -500,6 +520,7 @@ try {
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
     if ([AppWindow]::IsWindowVisible((Find $ui 'Camera brightness' $Slider).Handle)) { throw 'Camera strip is visible while Camera is off' }
+    Assert-StripVisibility $ui @(320..331) $false 'Camera'
     Find $ui 'Screen' 41 | Out-Null
     $screenHeader = Rect-Of $ui 'Screen' 41
     $screenReset = Rect-Of $ui 'Reset screen color' $PushButton
@@ -515,7 +536,7 @@ try {
     }
     $screenValueRect = New-Object AppWindow+RECT
     $volumeValueRect = New-Object AppWindow+RECT
-    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, ([AppWindow]::GetDlgCtrlID($screenSlider) + 3)), [ref]$screenValueRect) | Out-Null
+    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 307), [ref]$screenValueRect) | Out-Null
     [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 106), [ref]$volumeValueRect) | Out-Null  # kSystemVolumeText
     if ($screenValueRect.Left -ne $volumeValueRect.Left -or
         ($screenValueRect.Right - $screenValueRect.Left) -ne ($volumeValueRect.Right - $volumeValueRect.Left)) {
@@ -523,8 +544,13 @@ try {
     }
     Snapshot-StripDpi $ui $Artifacts 'app-strips'
     Set-Check $ui 'Camera' $true
+    Assert-StripVisibility $ui @(320..331) $true 'Camera'
     Snapshot-StripDpi $ui $Artifacts 'app-strips-camera'
     Set-Check $ui 'Camera' $false
+    Assert-StripVisibility $ui @(320..331) $false 'Camera'
+    $cameraOff = Join-Path $Artifacts 'app-strips-camera-off.png'
+    Snapshot-Window $ui $cameraOff | Out-Null
+    Write-Host "Camera-off strip snapshot: $cameraOff"
     # DPI messages are synthetic here; relaunch the test-owned window at the real desktop DPI
     # before the keyboard, recording and permission checks.
     [AppWindow]::PostMessage($ui.Window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_CLOSE, idle

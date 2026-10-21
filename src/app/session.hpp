@@ -228,17 +228,18 @@ struct SourceRef {
 // One mixer column, in order: system audio, microphone, screen, camera, then layers.
 struct Strip {
     enum class Kind { audio, visual };
-    Kind kind = Kind::visual;
+    Kind kind;
     std::string name;
     std::optional<rec::AudioInput> input;
     std::optional<SourceRef> source;
-    bool color = false;
+    bool color = false;  // Derivable from source, kept for future layers.
 };
 std::vector<Strip> mixer_strips(const Settings& settings);
-// Peak meter over the last 60 dB, falling about 20 dB per second at 20 Hz.
+// Peak meter over the last 60 dB, falling about 20 dB per second assuming a 50 ms poll.
 struct Meter {
     float shown = 0;
     float feed(float peak);
+    void reset() { shown = 0; }
 };
 // The sources settings use, bottom to top as drawn: the recorded screen, the layers, the
 // camera, the image.

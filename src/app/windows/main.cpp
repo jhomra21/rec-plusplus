@@ -72,7 +72,7 @@ struct Palette {
     }
     COLORREF paused_accent() const {
         if (high_contrast) return dim_text;
-        const COLORREF background = GetSysColor(COLOR_WINDOW);
+        const COLORREF background = surface;
         return RGB((GetRValue(accent) + GetRValue(background)) / 2,
                    (GetGValue(accent) + GetGValue(background)) / 2,
                    (GetBValue(accent) + GetBValue(background)) / 2);
@@ -95,13 +95,13 @@ enum Control : int {
     kAddDisplay, kAddWindow, kRemoveSource,
     kVerticalMovie, kVerticalLayoutLabel, kVerticalLayout, kPreview2, kAddDestination,
     kPermission, kOpenPrivacy,
-    kScreenColorLabel, kScreenBrightnessLabel, kScreenContrastLabel, kScreenSaturationLabel,
+    // Stable strip control-id blocks are shared with the Windows E2E snapshots.
+    kScreenColorLabel = 300, kScreenBrightnessLabel, kScreenContrastLabel, kScreenSaturationLabel,
     kScreenBrightness, kScreenContrast, kScreenSaturation, kScreenBrightnessValue, kScreenContrastValue,
-    kScreenSaturationValue, kScreenColorReset,
-    kCameraColorLabel, kCameraBrightnessLabel, kCameraContrastLabel, kCameraSaturationLabel,
+    kScreenSaturationValue, kScreenColorReset, kScreenStripBox,
+    kCameraColorLabel = 320, kCameraBrightnessLabel, kCameraContrastLabel, kCameraSaturationLabel,
     kCameraBrightness, kCameraContrast, kCameraSaturation, kCameraBrightnessValue, kCameraContrastValue,
-    kCameraSaturationValue, kCameraColorReset,
-    kScreenStripBox, kCameraStripBox,
+    kCameraSaturationValue, kCameraColorReset, kCameraStripBox,
     // Each destination's row: kDestination + 10 * index + one of DestinationField.
     kDestination = 400,
 };
@@ -253,7 +253,8 @@ HICON dot_icon(int size, COLORREF color, bool ring) {
 }
 
 // A dimmed overlay over every display: drag a rectangle to record it; Esc, a right click or
-// switching away cancels. The rectangle is a color-keyed hole, so its content shows undimmed.
+// switching away cancels. The accent is the layered-window color key, not a color to draw
+// with: that color becomes transparent and shows the content below undimmed.
 struct RegionPick {
     bool done = false, dragging = false, chosen = false;
     POINT from{}, to{};
@@ -469,6 +470,8 @@ private:
         auto* app = reinterpret_cast<App*>(data);
         const int id = static_cast<int>(subclass);
         if (!app) return DefSubclassProc(slider, message, w, l);
+        if (message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK || message == WM_CAPTURECHANGED)
+            app->slider_suppress_mouse_up_[id] = false;
         if (message == WM_LBUTTONDOWN) {
             const DWORD now = static_cast<DWORD>(GetMessageTime());
             const POINT point{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
@@ -856,7 +859,8 @@ private:
                            id == kSystemVolumeText || id == kMicVolumeText;
         const bool value = id == kScreenBrightnessValue || id == kScreenContrastValue || id == kScreenSaturationValue ||
                            id == kCameraBrightnessValue || id == kCameraContrastValue || id == kCameraSaturationValue;
-        return add(id, WC_STATICW, text, (value ? SS_RIGHT : SS_LEFT) |
+        const bool right = value || id == kSystemVolumeText || id == kMicVolumeText;
+        return add(id, WC_STATICW, text, (right ? SS_RIGHT : SS_LEFT) |
                    ((plain || value) ? SS_NOPREFIX : 0) | (id == kDetail ? SS_ENDELLIPSIS : 0));
     }
     HWND combo(int id) { return add(id, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP); }
@@ -868,6 +872,15 @@ private:
         dpi_ = GetDpiForWindow(window_);
         palette_ = Palette::current();
         taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
+        auto strip_settings = settings_;
+        strip_settings.camera = true;
+        const auto strips = rec::app::mixer_strips(strip_settings);
+        const auto strip_name = [&](rec::app::SourceRef::Kind kind) {
+            const auto found = std::find_if(strips.begin(), strips.end(), [&](const auto& strip) {
+                return strip.source && strip.source->kind == kind;
+            });
+            return found == strips.end() ? std::string{} : found->name;
+        };
         // Labels come right before their control: screen readers name the control after them.
         label(kStatus, L"Ready to record");
         label(kDetail, L"");
@@ -885,7 +898,7 @@ private:
         check(kMicMute, L"Mute mic");
         // These color controls are created directly after audio controls so keyboard focus
         // advances in mixer-strip order.
-        label(kScreenColorLabel, L"Screen");
+        label(kScreenColorLabel, wide(strip_name(rec::app::SourceRef::Kind::screen)).c_str());
         label(kScreenBrightnessLabel, L"Brightness");
         label(kScreenContrastLabel, L"Contrast");
         label(kScreenSaturationLabel, L"Saturation");
@@ -895,7 +908,7 @@ private:
         for (int id : {kScreenBrightnessValue, kScreenContrastValue, kScreenSaturationValue})
             label(id, L"0");
         button(kScreenColorReset, L"Reset");
-        label(kCameraColorLabel, L"Camera");
+        label(kCameraColorLabel, wide(strip_name(rec::app::SourceRef::Kind::camera)).c_str());
         label(kCameraBrightnessLabel, L"Brightness");
         label(kCameraContrastLabel, L"Contrast");
         label(kCameraSaturationLabel, L"Saturation");
@@ -1108,15 +1121,15 @@ private:
             place(control_id, x + label_width, y, width - label_width, px(240));
             y += row + gap;
         };
-        const auto color_slider = [&](int label_id, int slider_id, int value_id) {
-            const int value = px(50), mute = width > scenes_column ? px(110) : 0;
+        const auto color_slider = [&](int label_id, int slider_id, int value_id, int reserved) {
+            const int value = px(50), mute = reserved;
             place(label_id, x, y, label_width - gap, px(18));
             const int slider = width - value - mute - 2 * gap;
             place(slider_id, x, y + px(18), slider, px(22));
             place(value_id, x + slider + gap, y + px(19), value, px(20));
             y += px(40);
         };
-        const auto strip = [&](const rec::app::Strip& model) {
+        const auto strip = [&](const rec::app::Strip& model, bool visible) {
             if (model.kind != rec::app::Strip::Kind::visual || !model.color || !model.source) return;
             const bool camera_strip = model.source->kind == rec::app::SourceRef::Kind::camera;
             const int header_id = camera_strip ? kCameraColorLabel : kScreenColorLabel;
@@ -1131,14 +1144,29 @@ private:
             const int values[]{camera_strip ? kCameraBrightnessValue : kScreenBrightnessValue,
                                camera_strip ? kCameraContrastValue : kScreenContrastValue,
                                camera_strip ? kCameraSaturationValue : kScreenSaturationValue};
+            const int all_ids[]{header_id, reset_id, box_id, labels[0], labels[1], labels[2],
+                sliders[0], sliders[1], sliders[2], values[0], values[1], values[2]};
+            if (!visible) {
+                for (int id : all_ids) ShowWindow(get(id), SW_HIDE);
+                return;
+            }
             const int top = y;
             const int inset = px(8);
-            place(header_id, x + inset, y + px(14), width - px(120) - inset, px(20));
-            place(reset_id, x + width - px(8) - px(70), y + px(12), px(70), px(22));
+            const auto put = [&](int id, int left, int top, int w, int h) {
+                place(id, left, top, w, h);
+                ShowWindow(get(id), SW_SHOWNA);
+            };
+            put(header_id, x + inset, y + px(14), width - px(120) - inset, px(20));
+            put(reset_id, x + width - px(8) - px(70), y + px(12), px(70), px(22));
             y += px(36);
-            for (int i = 0; i < 3; ++i) color_slider(labels[i], sliders[i], values[i]);
+            for (int i = 0; i < 3; ++i) {
+                color_slider(labels[i], sliders[i], values[i], px(110));
+                ShowWindow(get(labels[i]), SW_SHOWNA);
+                ShowWindow(get(sliders[i]), SW_SHOWNA);
+                ShowWindow(get(values[i]), SW_SHOWNA);
+            }
             const int bottom = y + px(2);
-            place(box_id, x, top, width, bottom - top);
+            put(box_id, x, top, width, bottom - top);
             y = bottom + gap;
         };
 
@@ -1181,8 +1209,15 @@ private:
         place(kCursor, x, y, label_width - gap, px(22));
         place(kClicks, x + label_width, y, width - label_width, px(22));
         y += px(22) + gap;
-        for (const auto& model : rec::app::mixer_strips(settings_))
-            if (model.source && model.source->kind == rec::app::SourceRef::Kind::screen) strip(model);
+        const auto strips = rec::app::mixer_strips(settings_);
+        const rec::app::Strip* screen_strip = nullptr;
+        const rec::app::Strip* camera_strip = nullptr;
+        for (const auto& model : strips) {
+            if (!model.source) continue;
+            if (model.source->kind == rec::app::SourceRef::Kind::screen) screen_strip = &model;
+            if (model.source->kind == rec::app::SourceRef::Kind::camera) camera_strip = &model;
+        }
+        if (screen_strip) strip(*screen_strip, true);
 
         header(kQualityHeader);
         pair(kResolutionLabel, kResolution, row);
@@ -1279,13 +1314,13 @@ private:
         row_of(kBorderLabel, kBorder, true);
         place(kShadow, x + short_label, y, width - short_label, px(22));
         y += row + gap;
-        const int camera_strip_controls[]{kCameraColorLabel, kCameraStripBox, kCameraBrightnessLabel,
-            kCameraContrastLabel, kCameraSaturationLabel, kCameraBrightness, kCameraContrast,
-            kCameraSaturation, kCameraBrightnessValue, kCameraContrastValue, kCameraColorReset};
-        for (int id : camera_strip_controls)
-            ShowWindow(get(id), settings_.camera ? SW_SHOWNA : SW_HIDE);
-        for (const auto& model : rec::app::mixer_strips(settings_))
-            if (model.source && model.source->kind == rec::app::SourceRef::Kind::camera) strip(model);
+        if (camera_strip) {
+            strip(*camera_strip, settings_.camera);
+        } else {
+            const rec::app::Strip camera{rec::app::Strip::Kind::visual, "Camera", std::nullopt,
+                rec::app::SourceRef{rec::app::SourceRef::Kind::camera, 0}, true};
+            strip(camera, false);
+        }
         place(kImage, x, y, box - gap, px(22));
         place(kImageFile, x + box, y + px(4), width - box, px(20));
         y += row;
@@ -1308,7 +1343,7 @@ private:
             if (id == kLive) return palette_.accent;
             if (id == kStatus && state_ == State::recording) return palette_.accent;
             if (id == kStatus && state_ == State::paused) return palette_.dim_text;
-            if (id == kPermission) return palette_.dim_text;
+            if (id == kPermission || (id == kDetail && attention_)) return palette_.text;
             return (id == kDetail || id == kFolder || id == kImageFile) ? palette_.dim_text : palette_.text;
         }
         if (id == kLive) return palette_.accent;
@@ -1316,7 +1351,7 @@ private:
             if (state_ == State::recording) return palette_.accent;
             if (state_ == State::paused) return palette_.paused_accent();
         }
-        if ((id == kDetail && attention_) || id == kPermission) return palette_.dim_text;
+        if ((id == kDetail && attention_) || id == kPermission) return palette_.text;
         if (id == kDetail || id == kFolder || id == kImageFile) return palette_.dim_text;
         return palette_.text;
     }
@@ -2434,7 +2469,7 @@ private:
         }
         set_text(kLive, live);
         // Hide the last level once recording ends; polling stops with it.
-        if (!active) system_meter_.shown = mic_meter_.shown = 0;
+        if (!active) { system_meter_.reset(); mic_meter_.reset(); }
         meter(kSystemMeter, s.system_peak, system_meter_);
         meter(kMicMeter, s.mic_peak, mic_meter_);
         if (changed) {
