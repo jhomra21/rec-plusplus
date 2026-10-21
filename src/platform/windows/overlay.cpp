@@ -1036,9 +1036,8 @@ private:
         desc.ArraySize = 1;
         desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_DYNAMIC;
+        desc.Usage = D3D11_USAGE_DEFAULT;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
         layer.texture.Reset();
         layer.view.Reset();
         HRESULT hr = device_->CreateTexture2D(&desc, nullptr, &layer.texture);
@@ -1058,12 +1057,7 @@ private:
             layer.camera->upload(layer.seen, [&](const std::uint8_t* pixels, std::size_t row, UINT width, UINT height) {
                 if ((width != layer.width || height != layer.height || !layer.texture) && !camera_texture(layer, width, height))
                     return false;
-                D3D11_MAPPED_SUBRESOURCE mapped{};
-                if (FAILED(context->Map(layer.texture.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return false;
-                for (UINT y = 0; y < layer.height; ++y)
-                    std::memcpy(static_cast<std::uint8_t*>(mapped.pData) + static_cast<std::size_t>(y) * mapped.RowPitch,
-                                pixels + y * row, row);
-                context->Unmap(layer.texture.Get(), 0);
+                context->UpdateSubresource(layer.texture.Get(), 0, nullptr, pixels, static_cast<UINT>(row), 0);
                 layer.ready = true;
                 return true;
             });
