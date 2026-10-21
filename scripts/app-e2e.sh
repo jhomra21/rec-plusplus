@@ -52,6 +52,9 @@ color() {
       if (want == "red") ok = c[1] > 170 && c[1] > c[2] + 100 && c[1] > c[3] + 100
       if (want == "white") ok = c[1] > 190 && c[2] > 190 && c[3] > 190
       if (want == "black") ok = c[1] < 40 && c[2] < 40 && c[3] < 40
+      hi = c[1]; if (c[2] > hi) hi = c[2]; if (c[3] > hi) hi = c[3]
+      lo = c[1]; if (c[2] < lo) lo = c[2]; if (c[3] < lo) lo = c[3]
+      if (want == "gray") ok = c[1] >= 100 && c[1] <= 160 && c[2] >= 100 && c[2] <= 160 && c[3] >= 100 && c[3] <= 160 && hi - lo < 25
     }
     END { exit !(found && ok) }' "$2" || { echo "$1 in $2 is not $3" >&2; exit 1; }
 }
@@ -211,11 +214,13 @@ camera="$(step camera)"
 "$rec" probe "$camera" --sample 1450,800,380,200 | tee "$artifacts/app-camera-corner.probe"
 "$rec" probe "$camera" --sample 800,400,300,200 | tee "$artifacts/app-camera-center.probe"
 "$rec" probe "$camera" --sample 40,40,300,150 | tee "$artifacts/app-camera-image.probe"
+"$rec" probe "$camera" --sample 600,100,300,100 | tee "$artifacts/app-camera-screen-color.probe"
 color sample_1 "$artifacts/app-camera-corner.probe" green
 color sample_1 "$artifacts/app-camera-center.probe" white
 color sample_3 "$artifacts/app-camera-center.probe" green
 color sample_4 "$artifacts/app-camera-center.probe" green
-color sample_6 "$artifacts/app-camera-corner.probe" white
+color sample_6 "$artifacts/app-camera-corner.probe" gray
+color sample_6 "$artifacts/app-camera-screen-color.probe" gray
 for second in 0 1 2 3 4 5 6; do color "sample_$second" "$artifacts/app-camera-image.probe" red; done
 
 # The layout step: the camera dragged to the middle before Start, then to the top right at 2 s.

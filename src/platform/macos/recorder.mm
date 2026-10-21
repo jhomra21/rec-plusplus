@@ -699,8 +699,8 @@ public:
                 if (CGGetActiveDisplayList(16, displays, &found) == kCGErrorSuccess && options_.display >= 1 && options_.display <= found)
                     click_source_.display = options_.display == 1 ? CGMainDisplayID() : displays[options_.display - 1];
             }
-            // The compositor always runs, so the screen can move and layers can show while
-            // recording. Without anything to draw it passes frames through.
+            // Always create the compositor, even when there are no layers. Screen/camera color
+            // changes apply live through it; wrapping this in if (layered()) breaks those changes.
             overlays_ = std::make_unique<mac::Overlays>();
             if (auto started = overlays_->start(size_.width, size_.height, options_, click_source_); !started) {
                 overlays_.reset();
@@ -890,6 +890,7 @@ public:
         stats.captured = captured_.load();
         stats.written = written_.load();
         stats.dropped = dropped_.load();
+        stats.composed_frames = composed_frames_.load();
         stats.audio_written = audio_[kSystem].written.load();
         stats.audio_dropped = audio_[kSystem].dropped.load();
         stats.mic_written = audio_[kMic].written.load();
@@ -1651,6 +1652,7 @@ private:
                 if (frame && overlays_) {
                     composed = overlays_->compose(kMainCanvas, frame);
                     if (!composed) fail("could not draw the overlays");
+                    else if (composed != captured) composed_frames_.fetch_add(1);
                     frame = composed;
                 }
                 if (frame && preview_.due(slot, options_.fps)) render_preview(transfer_, frame, preview_pixels_, preview_);
@@ -1751,7 +1753,7 @@ private:
     std::atomic_bool finished_{false};
     std::atomic_bool stream_stopped_{false};  // ScreenCaptureKit ended the stream itself.
     std::atomic_bool window_closed_{false};
-    std::atomic<std::uint64_t> captured_{0}, written_{0}, dropped_{0}, mix_written_{0};
+    std::atomic<std::uint64_t> captured_{0}, written_{0}, dropped_{0}, composed_frames_{0}, mix_written_{0};
     std::unique_ptr<mac::LiveStream> live_;  // Kept after stop() for its counters.
     std::unique_ptr<mac::Overlays> overlays_;
     mac::ClickSource click_source_;

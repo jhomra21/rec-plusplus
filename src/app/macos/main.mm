@@ -1286,7 +1286,13 @@ struct PreviewHit {
     color = {static_cast<int>((camera ? _cameraColor : _screenColor)[0].integerValue),
              static_cast<int>((camera ? _cameraColor : _screenColor)[1].integerValue),
              static_cast<int>((camera ? _cameraColor : _screenColor)[2].integerValue)};
-    [self applyScene];
+    if (auto shown = _session->show_scene(_settings); !shown) {
+        _note = [@"Color not changed: " stringByAppendingString:ns(shown.error)];
+        _noteAttention = true;
+        _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
+    }
+    if (NSApp.currentEvent.type != NSEventTypeLeftMouseDragged) rec::app::save_settings(_settingsPath, _settings);
+    [self refresh];
 }
 
 - (void)colorChanged:(NSSlider*)slider {
@@ -3040,7 +3046,7 @@ struct PreviewHit {
     });
     __block rec::PreviewFrame colorPreview;
     bool gray = false;
-    for (int i = 0; i < 100 && !gray; ++i) {
+    for (int i = 0; i < 40 && !gray; ++i) {
         ui(^{ colorPreview = self->_frame; });
         if (colorPreview.number) {
             const auto c = mean_color(colorPreview, 0.4, 0.4, 0.2, 0.2);
@@ -3053,7 +3059,7 @@ struct PreviewHit {
     save_png(colorPreview, @"app-preview-screen-gray");
     press(_screenColorReset);
     bool white = false;
-    for (int i = 0; i < 100 && !white; ++i) {
+    for (int i = 0; i < 40 && !white; ++i) {
         ui(^{ colorPreview = self->_frame; });
         if (colorPreview.number) {
             const auto c = mean_color(colorPreview, 0.4, 0.4, 0.2, 0.2);
@@ -3094,6 +3100,11 @@ struct PreviewHit {
         }
     });
     if (!hidden) fail(@"the menu bar item's menu has no Screen only scene");
+    recorded(5.2);
+    ui(^{
+        self->_screenColor[0].integerValue = -50;
+        [self->_screenColor[0] sendAction:self->_screenColor[0].action to:self->_screenColor[0].target];
+    });
     recorded(7.5);
     press(_record);
     wait_for(@"Ready to record", 30);

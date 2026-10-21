@@ -870,15 +870,17 @@ private:
             rows[r] = [CIVector vectorWithX:values[0] Y:values[1] Z:values[2] W:0];
         }
         const float offset = 0.5f * (1.0f - contrast) + color.brightness / 100.0f;
-        CIImage* transformed = [image imageByApplyingFilter:@"CIColorMatrix" withInputParameters:@{
+        CIImage* unpremultiplied = [image imageByUnpremultiplyingAlpha];
+        CIImage* transformed = [unpremultiplied imageByApplyingFilter:@"CIColorMatrix" withInputParameters:@{
             @"inputRVector": rows[0], @"inputGVector": rows[1], @"inputBVector": rows[2],
             @"inputAVector": [CIVector vectorWithX:0 Y:0 Z:0 W:1],
             @"inputBiasVector": [CIVector vectorWithX:offset Y:offset Z:offset W:0]
         }];
-        return [transformed imageByApplyingFilter:@"CIColorClamp" withInputParameters:@{
+        CIImage* clamped = [transformed imageByApplyingFilter:@"CIColorClamp" withInputParameters:@{
             @"inputMinComponents": [CIVector vectorWithX:0 Y:0 Z:0 W:0],
             @"inputMaxComponents": [CIVector vectorWithX:1 Y:1 Z:1 W:1]
         }];
+        return [clamped imageByPremultiplyingAlpha];
     }
 
     // One picture of the recording: its size, frames and the layout of every source.

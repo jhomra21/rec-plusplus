@@ -112,6 +112,7 @@ else
   grep -qx 'frames=60' "$artifacts/h264.probe"
   grep -qx 'audio_tracks=0' "$artifacts/h264.probe"
   grep -q 'written 60, dropped 0' "$artifacts/h264.record.log"
+  grep -q 'Composed 0 frames' "$artifacts/h264.record.log"
 
   # Flash + beep through the AAC writer: measured A/V offset in the decoded file.
   "$rec" record --test-pattern --test-tone -r 1080p -f 30 -t 2 --codec h264 -o "$artifacts/av.mov" | tee "$artifacts/av.record.log"
@@ -294,6 +295,7 @@ else
   color sample_0 "$artifacts/color-adjust-screen.probe" gray
   color sample_1 "$artifacts/color-adjust-camera.probe" neutral
   color sample_0 "$artifacts/color-adjust-image.probe" red
+  grep -Eq 'Composed ([1-9][0-9]*) frames' "$artifacts/color-adjust.record.log"
   printf 'color-adjust static: screen=%s camera=%s image=%s\n' \
     "$(value sample_0 "$artifacts/color-adjust-screen.probe")" \
     "$(value sample_1 "$artifacts/color-adjust-camera.probe")" \
@@ -301,12 +303,21 @@ else
   { sleep 1.5; echo 'color screen -50,0,0'; } |
     "$rec" record --test-pattern -r 1080p -f 30 -t 4 -o "$artifacts/color-adjust-live.mov" | tee "$artifacts/color-adjust-live.log"
   grep -q 'Screen color -50,0,0' "$artifacts/color-adjust-live.log"
+  grep -Eq 'Composed ([1-9][0-9]*) frames' "$artifacts/color-adjust-live.log"
   "$rec" probe "$artifacts/color-adjust-live.mov" --sample 600,100,300,100 | tee "$artifacts/color-adjust-live.probe"
   color sample_0 "$artifacts/color-adjust-live.probe" white
   color sample_2 "$artifacts/color-adjust-live.probe" gray
   printf 'color-adjust live: before=%s after=%s\n' \
     "$(value sample_0 "$artifacts/color-adjust-live.probe")" \
     "$(value sample_2 "$artifacts/color-adjust-live.probe")"
+  { sleep 1.5; echo 'color screen -50,0,0'; echo 'color camera 0,0,-100'; } |
+    "$rec" record --test-pattern -r 1080p -f 30 -t 4 --camera test -o "$artifacts/color-adjust-live-camera.mov" \
+    | tee "$artifacts/color-adjust-live-camera.log"
+  grep -q 'Camera color 0,0,-100' "$artifacts/color-adjust-live-camera.log"
+  grep -Eq 'Composed ([1-9][0-9]*) frames' "$artifacts/color-adjust-live-camera.log"
+  "$rec" probe "$artifacts/color-adjust-live-camera.mov" --sample 1450,800,380,200 | tee "$artifacts/color-adjust-live-camera.probe"
+  color sample_0 "$artifacts/color-adjust-live-camera.probe" green
+  color sample_2 "$artifacts/color-adjust-live-camera.probe" neutral
   fi
   # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
   # pattern fills it and the camera sits near the bottom; mid-recording "place canvas2 1 0 ..."
@@ -336,6 +347,15 @@ else
   "$rec" probe "$artifacts/canvas2-main.mov" --sample 1450,800,380,200 | tee "$artifacts/canvas2-main-camera.probe"
   color sample_1 "$artifacts/canvas2-main-camera.probe" green
   color sample_4 "$artifacts/canvas2-main-camera.probe" green
+  "$rec" record --test-pattern -r 1080p -f 30 -t 2 --screen-color -50,0,0 \
+    --canvas2 720x1280 --canvas2-place screen:0,0,1,1:0.34,0,0.32,1 \
+    --canvas2-output "$artifacts/canvas2-color-vertical.mp4" -o "$artifacts/canvas2-color-main.mov" \
+    | tee "$artifacts/canvas2-color.record.log"
+  grep -Eq 'Composed ([1-9][0-9]*) frames' "$artifacts/canvas2-color.record.log"
+  "$rec" probe "$artifacts/canvas2-color-main.mov" --sample 600,100,300,100 | tee "$artifacts/canvas2-color-main.probe"
+  "$rec" probe "$artifacts/canvas2-color-vertical.mp4" --sample 260,100,200,100 | tee "$artifacts/canvas2-color-vertical.probe"
+  color sample_0 "$artifacts/canvas2-color-main.probe" gray
+  color sample_0 "$artifacts/canvas2-color-vertical.probe" gray
   # Scene layers: the pattern in the bottom middle on black and the test camera top left.
   # Mid-recording "hide 1" hides the camera and "move screen" moves the pattern to the bottom
   # left. Display and window layers need Screen Recording permission, which CI runners lack.
