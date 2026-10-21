@@ -797,6 +797,10 @@ private:
             ShutdownBlockReasonDestroy(window_);
             return 0;
         case WM_DESTROY:
+            if (detail_tooltip_window_) {
+                DestroyWindow(detail_tooltip_window_);
+                detail_tooltip_window_ = nullptr;
+            }
             if (access_) {
                 const MSAAPROPID props[]{PROPID_ACC_NAME, PROPID_ACC_VALUE};
                 for (int slider : {kSystemVolume, kMicVolume})
@@ -835,7 +839,7 @@ private:
         bold.lfWeight = FW_SEMIBOLD;
         bold_ = CreateFontIndirectW(&bold);
         LOGFONTW title = bold;
-        title.lfHeight = -MulDiv(18, static_cast<int>(dpi_), 72);
+        title.lfHeight = -MulDiv(16, static_cast<int>(dpi_), 72);
         title_ = CreateFontIndirectW(&title);
         for (auto& [id, hwnd] : controls_) {
             const bool header = id == kCaptureHeader || id == kQualityHeader || id == kStreamHeader || id == kReplayHeader ||
@@ -860,7 +864,8 @@ private:
         const bool value = id == kScreenBrightnessValue || id == kScreenContrastValue || id == kScreenSaturationValue ||
                            id == kCameraBrightnessValue || id == kCameraContrastValue || id == kCameraSaturationValue;
         const bool right = value || id == kSystemVolumeText || id == kMicVolumeText;
-        return add(id, WC_STATICW, text, (right ? SS_RIGHT : SS_LEFT) |
+        const DWORD centered = id == kStatus || id == kDetail || id == kLive ? SS_CENTERIMAGE : 0;
+        return add(id, WC_STATICW, text, (right ? SS_RIGHT : SS_LEFT) | centered |
                    ((plain || value) ? SS_NOPREFIX : 0) | (id == kDetail ? SS_ENDELLIPSIS : 0));
     }
     HWND combo(int id) { return add(id, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP); }
@@ -885,6 +890,18 @@ private:
         label(kStatus, L"Ready to record");
         label(kDetail, L"");
         label(kLive, L"");
+        detail_tooltip_ = L"";
+        detail_tooltip_window_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+            WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+            window_, nullptr, instance_, nullptr);
+        if (detail_tooltip_window_) {
+            TOOLINFOW tool{sizeof tool};
+            tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+            tool.hwnd = window_;
+            tool.uId = reinterpret_cast<UINT_PTR>(get(kDetail));
+            tool.lpszText = const_cast<wchar_t*>(detail_tooltip_.c_str());
+            SendMessageW(detail_tooltip_window_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
+        }
         // Each source: its level before volume, the volume, and mute.
         label(kSystemLabel, L"System audio");
         add(kSystemMeter, PROGRESS_CLASSW, L"", PBS_SMOOTH);
@@ -1172,9 +1189,14 @@ private:
 
         // Status, levels and the record buttons on the left, the preview on the right.
         width = column;
-        line(kStatus, px(34));
-        line(kDetail, px(20));
-        line(kLive, px(20));
+        {
+            const int status_width = px(180), live_width = px(112), status_height = px(34), text_height = px(20);
+            const int detail_width = width - status_width - live_width - 2 * gap;
+            place(kStatus, x, y, status_width, status_height);
+            place(kDetail, x + status_width + gap, y + (status_height - text_height) / 2, detail_width, text_height);
+            place(kLive, x + width - live_width, y + (status_height - text_height) / 2, live_width, text_height);
+            y += status_height + gap;
+        }
         level(kSystemLabel, kSystemMeter, kSystemVolume, kSystemVolumeText, kSystemMute);
         level(kMicLabel, kMicMeter, kMicVolume, kMicVolumeText, kMicMute);
         const int button_width = px(110);
@@ -2456,6 +2478,17 @@ private:
         if (attention_ && !detail.empty()) detail = L"! " + detail;
         set_text(kStatus, status);
         set_text(kDetail, detail);
+        if (detail_tooltip_ != detail) {
+            detail_tooltip_ = detail;
+            if (detail_tooltip_window_) {
+                TOOLINFOW tool{sizeof tool};
+                tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+                tool.hwnd = window_;
+                tool.uId = reinterpret_cast<UINT_PTR>(get(kDetail));
+                tool.lpszText = const_cast<wchar_t*>(detail_tooltip_.c_str());
+                SendMessageW(detail_tooltip_window_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&tool));
+            }
+        }
         std::wstring live;
         if (active && s.live) {
             wchar_t rate[48];
@@ -2732,6 +2765,8 @@ private:
 
     HINSTANCE instance_ = nullptr;
     HWND window_ = nullptr;
+    HWND detail_tooltip_window_ = nullptr;
+    std::wstring detail_tooltip_;
     UINT dpi_ = 96;
     UINT taskbar_created_ = 0;
     HFONT font_ = nullptr, bold_ = nullptr, title_ = nullptr;

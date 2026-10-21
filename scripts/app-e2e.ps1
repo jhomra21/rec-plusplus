@@ -41,6 +41,7 @@ public static class AppWindow {
   [DllImport("oleacc.dll")] static extern int AccessibleObjectFromWindow(IntPtr h, uint id, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object o);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string t);
   [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
+  [DllImport("user32.dll", EntryPoint="GetWindowLongW")] public static extern int GetWindowLong(IntPtr h, int index);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
@@ -64,12 +65,14 @@ public static class AppWindow {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder name, int count);
   [DllImport("user32.dll")] public static extern int MapWindowPoints(IntPtr from, IntPtr to, ref RECT r, uint count);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool SetWindowText(IntPtr h, string text);
   public static Accessibility.IAccessible Of(IntPtr h) {
     Guid iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71"); object o;
     Marshal.ThrowExceptionForHR(AccessibleObjectFromWindow(h, 0xFFFFFFFC, ref iid, out o));
     return (Accessibility.IAccessible)o;
   }
   public static void SetValue(IntPtr h, string value) { Of(h).set_accValue(0, value); }
+  public static void SetText(IntPtr h, string value) { if (!SetWindowText(h, value)) throw new Exception("SetWindowText failed"); }
 }
 '@
 
@@ -375,6 +378,49 @@ function Rect-OfId($ui, [int]$id) {
     if ($handle -eq [IntPtr]::Zero -or -not [AppWindow]::GetWindowRect($handle, [ref]$r)) { throw "GetWindowRect failed for control id $id" }
     return $r
 }
+function Assert-StatusRow($ui, [string]$detail) {
+    $status = Rect-OfId $ui 100
+    $detailRect = Rect-OfId $ui 101
+    $live = Rect-OfId $ui 102
+    $centers = @(
+        [int](($status.Top + $status.Bottom) / 2),
+        [int](($detailRect.Top + $detailRect.Bottom) / 2),
+        [int](($live.Top + $live.Bottom) / 2)
+    )
+    if ((($centers | Measure-Object -Maximum).Maximum - ($centers | Measure-Object -Minimum).Minimum) -gt 3) {
+        throw "status controls do not share one row: centers=$($centers -join ',')"
+    }
+    if ($status.Right -gt $detailRect.Left -or $detailRect.Right -gt $live.Left) {
+        throw "status controls overlap or are out of order: status=$($status.Left)-$($status.Right), detail=$($detailRect.Left)-$($detailRect.Right), live=$($live.Left)-$($live.Right)"
+    }
+    $fullDetail = 'This is a deliberately long status detail that must remain available in full to accessibility and the tooltip while the visible text truncates before the LIVE badge.'
+    [AppWindow]::SetText([AppWindow]::GetDlgItem($ui.Window, 101), $fullDetail)
+    if ((Text-Of $ui 101) -ne $fullDetail) { throw 'long status detail was not fully readable through MSAA' }
+    $detailRectLong = Rect-OfId $ui 101
+    $liveLong = Rect-OfId $ui 102
+    if ($detailRectLong.Right -gt $liveLong.Left) { throw 'long status detail overlaps the LIVE slot' }
+    if (($detailRectLong.Right - $detailRectLong.Left) -ge 300) { throw 'long status detail did not receive a truncating detail column' }
+    if (([AppWindow]::GetWindowLong([AppWindow]::GetDlgItem($ui.Window, 101), -16) -band 0x4000) -eq 0) {
+        throw 'status detail is missing the tail-ellipsis style'
+    }
+    [AppWindow]::SetText([AppWindow]::GetDlgItem($ui.Window, 101), $detail)
+}
+function Assert-StatusDpi($ui) {
+    $originalDpi = [int][AppWindow]::GetDpiForWindow($ui.Window)
+    $baseRect = New-Object AppWindow+RECT
+    if (-not [AppWindow]::GetWindowRect($ui.Window, [ref]$baseRect)) { throw 'GetWindowRect failed before status DPI checks' }
+    $detail = Text-Of $ui 101
+    try {
+        foreach ($dpi in @(96, 144, 192)) {
+            if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect }
+            Assert-StatusRow $ui $detail
+        }
+    } finally {
+        if ($originalDpi -ne [int][AppWindow]::GetDpiForWindow($ui.Window)) {
+            Set-TestDpi $ui $originalDpi $baseRect
+        }
+    }
+}
 function Assert-StripVisibility($ui, [int[]]$ids, [bool]$visible, [string]$name) {
     foreach ($id in $ids) {
         $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
@@ -532,6 +578,11 @@ $ui = $null
 try {
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
+    Assert-StatusDpi $ui
+    Assert-StatusRow $ui (Text-Of $ui 101)
+    $statusRowShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-row.png')
+    $statusRowShot.Dispose()
+    Write-Host "Status row snapshot: $(Join-Path $Artifacts 'app-status-row.png')"
     if ([AppWindow]::IsWindowVisible((Find $ui 'Camera brightness' $Slider).Handle)) { throw 'Camera strip is visible while Camera is off' }
     Assert-StripVisibility $ui @(320..331) $false 'Camera'
     Find $ui 'Screen' 41 | Out-Null
