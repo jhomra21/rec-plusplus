@@ -107,10 +107,19 @@ float4 color(Vertex v) {
     if (mode > 1.5) return float4(0, 0, 0, cover);
     if (mode > 0.5) return float4(fill.rgb, 1) * cover;
     float4 c = picture.Sample(smooth, v.uv);
-    float4 result = opaque > 0.5 ? float4(c.rgb, 1) : c * fade;
-    if (mode < 0.5 && color_active > 0.5) {
-        result.rgb = saturate(float3(dot(result.rgb, color0.xyz), dot(result.rgb, color1.xyz), dot(result.rgb, color2.xyz)) + color_offset.xyz);
+    return (opaque > 0.5 ? float4(c.rgb, 1) : c * fade) * cover;
+}
+float4 adjusted_color(Vertex v) {
+    float cover = 1;
+    if (shape >= 0) {
+        float d = edge(v.local);
+        cover = mode > 1.5 ? 0.45 * (1 - smoothstep(-size.w, size.w, d)) : saturate(0.5 - d);
     }
+    if (mode > 1.5) return float4(0, 0, 0, cover);
+    if (mode > 0.5) return float4(fill.rgb, 1) * cover;
+    float4 c = picture.Sample(smooth, v.uv);
+    float4 result = opaque > 0.5 ? float4(c.rgb, 1) : c * fade;
+    result.rgb = saturate(float3(dot(result.rgb, color0.xyz), dot(result.rgb, color1.xyz), dot(result.rgb, color2.xyz)) + color_offset.xyz);
     return result * cover;
 }
 static const float3 kLuma = float3(0.2126, 0.7152, 0.0722);
@@ -124,22 +133,32 @@ float4 chroma(Vertex v) : SV_Target {
     float2 uv = float2((c.b - y) / 1.8556, (c.r - y) / 1.5748);
     return float4(c.a * 128.0 / 255 + 224.0 / 255 * uv, 0, c.a);
 }
+float4 adjusted_luma(Vertex v) : SV_Target {
+    float4 c = adjusted_color(v);
+    return float4(c.a * 16.0 / 255 + 219.0 / 255 * dot(c.rgb, kLuma), 0, 0, c.a);
+}
+float4 adjusted_chroma(Vertex v) : SV_Target {
+    float4 c = adjusted_color(v);
+    float y = dot(c.rgb, kLuma);
+    float2 uv = float2((c.b - y) / 1.8556, (c.r - y) / 1.5748);
+    return float4(c.a * 128.0 / 255 + 224.0 / 255 * uv, 0, c.a);
+}
 Texture2D<float> plane_y : register(t1);
 Texture2D<float2> plane_uv : register(t2);
-float3 screen_rgb(Vertex v) {
+float4 screen_luma(Vertex v) : SV_Target { return float4(plane_y.Sample(smooth, v.uv), 0, 0, 1); }
+float4 screen_chroma(Vertex v) : SV_Target { return float4(plane_uv.Sample(smooth, v.uv), 0, 1); }
+float3 adjusted_screen_rgb(Vertex v) {
     float y = (plane_y.Sample(smooth, v.uv).r - 16.0 / 255) * 255.0 / 219;
     float2 c = (plane_uv.Sample(smooth, v.uv).rg - 128.0 / 255) * 255.0 / 224;
     float3 rgb = saturate(float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x));
-    return color_active > 0.5 ? saturate(float3(dot(rgb, color0.xyz), dot(rgb, color1.xyz), dot(rgb, color2.xyz)) + color_offset.xyz) : rgb;
+    return saturate(float3(dot(rgb, color0.xyz), dot(rgb, color1.xyz), dot(rgb, color2.xyz)) + color_offset.xyz);
 }
-float4 screen_luma(Vertex v) : SV_Target {
-    if (color_active < 0.5) return float4(plane_y.Sample(smooth, v.uv), 0, 0, 1);
-    float3 c = screen_rgb(v);
+float4 adjusted_screen_luma(Vertex v) : SV_Target {
+    float3 c = adjusted_screen_rgb(v);
     return float4(16.0 / 255 + 219.0 / 255 * dot(c, kLuma), 0, 0, 1);
 }
-float4 screen_chroma(Vertex v) : SV_Target {
-    if (color_active < 0.5) return float4(plane_uv.Sample(smooth, v.uv), 0, 1);
-    float3 c = screen_rgb(v); float y = dot(c, kLuma);
+float4 adjusted_screen_chroma(Vertex v) : SV_Target {
+    float3 c = adjusted_screen_rgb(v); float y = dot(c, kLuma);
     float2 uv = float2((c.b - y) / 1.8556, (c.r - y) / 1.5748);
     return float4(128.0 / 255 + 224.0 / 255 * uv, 0, 1);
 }
@@ -901,6 +920,28 @@ public:
         return {};
     }
 
+    bool needs_composition(std::size_t canvas) const {
+        std::lock_guard lock(mutex_);
+        if (canvas > kSecondCanvas || !canvases_[canvas].width) return false;
+        const auto& c = canvases_[canvas];
+        const bool screen_adjusted = screen_color_.brightness || screen_color_.contrast || screen_color_.saturation;
+        const auto full = [](const Area& a) { return a.x <= 0 && a.y <= 0 && a.width >= 1 && a.height >= 1; };
+        if (clicks_ || !c.screen.visible ||
+            (c.screen.visible && (!full(c.screen.area) || !full(c.screen.crop) || screen_adjusted)) ||
+            (canvas != kMainCanvas && c.screen.visible && (c.width != width_ || c.height != height_))) return true;
+        for (std::size_t i = 0; i < layers_.size(); ++i) {
+            if (!c.layers[i].visible) continue;
+            const auto kind = layers_[i].overlay.kind;
+            if (kind == Overlay::Kind::camera)
+                return true;
+            if (kind == Overlay::Kind::display || kind == Overlay::Kind::window)
+                return true;
+            if (kind == Overlay::Kind::image)
+                return true;
+        }
+        return false;
+    }
+
     std::uint64_t camera_frames() const {
         std::lock_guard lock(mutex_);
         std::uint64_t total = 0;
@@ -1056,7 +1097,9 @@ private:
         context->PSSetShaderResources(1, 2, views);
         const auto p = core::place(Overlay::Kind::image, layout.area, draw_width_, draw_height_, width_, height_, layout.crop);
         const double uv[4] = {p.u0, p.v0, p.u1, p.v1};
-        quad(context, target, p, uv, true, screen_luma_.Get(), screen_chroma_.Get(), 1, {}, adjustment);
+        const bool adjusted = adjustment.brightness || adjustment.contrast || adjustment.saturation;
+        quad(context, target, p, uv, true, adjusted ? adjusted_screen_luma_.Get() : screen_luma_.Get(),
+             adjusted ? adjusted_screen_chroma_.Get() : screen_chroma_.Get(), 1, {}, adjustment);
         return true;
     }
 
@@ -1162,7 +1205,9 @@ private:
             inside = shaping(0, d.border, 0);
         }
         context->PSSetShaderResources(0, 1, layer.view.GetAddressOf());
-        quad(context, target, p, uv, layer.camera || layer.screen, luma_.Get(), chroma_.Get(), 1, inside, adjustment);
+        const bool adjusted = adjustment.brightness || adjustment.contrast || adjustment.saturation;
+        quad(context, target, p, uv, layer.camera || layer.screen, adjusted ? adjusted_luma_.Get() : luma_.Get(),
+             adjusted ? adjusted_chroma_.Get() : chroma_.Get(), 1, inside, adjustment);
     }
 
     // Copies a display's or window's newest frame into the layer's texture.
@@ -1270,19 +1315,32 @@ private:
             }
             return {};
         };
-        ComPtr<ID3DBlob> vs, luma, chroma, screen_luma, screen_chroma;
+        ComPtr<ID3DBlob> vs, luma, chroma, adjusted_luma, adjusted_chroma, screen_luma, screen_chroma,
+            adjusted_screen_luma, adjusted_screen_chroma;
         if (auto c = compile("vs", "vs_4_0", vs); !c) return c;
         if (auto c = compile("luma", "ps_4_0", luma); !c) return c;
         if (auto c = compile("chroma", "ps_4_0", chroma); !c) return c;
+        if (auto c = compile("adjusted_luma", "ps_4_0", adjusted_luma); !c) return c;
+        if (auto c = compile("adjusted_chroma", "ps_4_0", adjusted_chroma); !c) return c;
         if (auto c = compile("screen_luma", "ps_4_0", screen_luma); !c) return c;
         if (auto c = compile("screen_chroma", "ps_4_0", screen_chroma); !c) return c;
+        if (auto c = compile("adjusted_screen_luma", "ps_4_0", adjusted_screen_luma); !c) return c;
+        if (auto c = compile("adjusted_screen_chroma", "ps_4_0", adjusted_screen_chroma); !c) return c;
         HRESULT hr = device_->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &vertex_);
         if (SUCCEEDED(hr)) hr = device_->CreatePixelShader(luma->GetBufferPointer(), luma->GetBufferSize(), nullptr, &luma_);
         if (SUCCEEDED(hr)) hr = device_->CreatePixelShader(chroma->GetBufferPointer(), chroma->GetBufferSize(), nullptr, &chroma_);
         if (SUCCEEDED(hr))
+            hr = device_->CreatePixelShader(adjusted_luma->GetBufferPointer(), adjusted_luma->GetBufferSize(), nullptr, &adjusted_luma_);
+        if (SUCCEEDED(hr))
+            hr = device_->CreatePixelShader(adjusted_chroma->GetBufferPointer(), adjusted_chroma->GetBufferSize(), nullptr, &adjusted_chroma_);
+        if (SUCCEEDED(hr))
             hr = device_->CreatePixelShader(screen_luma->GetBufferPointer(), screen_luma->GetBufferSize(), nullptr, &screen_luma_);
         if (SUCCEEDED(hr))
             hr = device_->CreatePixelShader(screen_chroma->GetBufferPointer(), screen_chroma->GetBufferSize(), nullptr, &screen_chroma_);
+        if (SUCCEEDED(hr))
+            hr = device_->CreatePixelShader(adjusted_screen_luma->GetBufferPointer(), adjusted_screen_luma->GetBufferSize(), nullptr, &adjusted_screen_luma_);
+        if (SUCCEEDED(hr))
+            hr = device_->CreatePixelShader(adjusted_screen_chroma->GetBufferPointer(), adjusted_screen_chroma->GetBufferSize(), nullptr, &adjusted_screen_chroma_);
         D3D11_BUFFER_DESC buffer{};
         buffer.ByteWidth = sizeof(Constants);
         buffer.Usage = D3D11_USAGE_DEFAULT;
@@ -1318,7 +1376,8 @@ private:
     std::uint32_t width_ = 0, height_ = 0;            // The main canvas, and the main capture's frames.
     std::uint32_t draw_width_ = 0, draw_height_ = 0;  // The canvas being drawn.
     ComPtr<ID3D11VertexShader> vertex_;
-    ComPtr<ID3D11PixelShader> luma_, chroma_, screen_luma_, screen_chroma_;
+    ComPtr<ID3D11PixelShader> luma_, chroma_, adjusted_luma_, adjusted_chroma_, screen_luma_, screen_chroma_,
+        adjusted_screen_luma_, adjusted_screen_chroma_;
     ComPtr<ID3D11Buffer> constants_;
     ComPtr<ID3D11SamplerState> sampler_;
     ComPtr<ID3D11BlendState> blend_;
@@ -1352,6 +1411,7 @@ Result Overlays::set_layout(std::size_t canvas, std::size_t layer, const Layout&
 }
 Result Overlays::set_style(std::size_t index, const Style& style) { return impl_->set_style(index, style); }
 Result Overlays::set_color(ColorTarget target, const ColorAdjust& color) { return impl_->set_color(target, color); }
+bool Overlays::needs_composition(std::size_t canvas) const { return impl_->needs_composition(canvas); }
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }
 Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { return impl_->set_screen(visible, area); }
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }

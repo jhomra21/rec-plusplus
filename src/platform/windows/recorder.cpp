@@ -1208,10 +1208,17 @@ private:
         ComPtr<ID3D11Texture2D> target;
         UINT subresource = 0;
         if (FAILED(sample->GetBufferByIndex(0, &buffer)) || FAILED(buffer.As(&dxgi)) ||
-            FAILED(dxgi->GetResource(IID_PPV_ARGS(&target))) || FAILED(dxgi->GetSubresourceIndex(&subresource)) ||
-            !overlays_->draw(kSecondCanvas, context_.Get(), slots_[frame].texture.Get(), target.Get(), subresource, shown_at_)) {
+            FAILED(dxgi->GetResource(IID_PPV_ARGS(&target))) || FAILED(dxgi->GetSubresourceIndex(&subresource))) {
             canvas2_dropped_.fetch_add(1);
             return;
+        }
+        if (overlays_->needs_composition(kSecondCanvas)) {
+            if (!overlays_->draw(kSecondCanvas, context_.Get(), slots_[frame].texture.Get(), target.Get(), subresource, shown_at_)) {
+                canvas2_dropped_.fetch_add(1);
+                return;
+            }
+        } else {
+            context_->CopySubresourceRegion(target.Get(), subresource, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
         }
         if (previewer2_ && preview2_.due(slot, options_.fps)) previewer2_->render(context_.Get(), target.Get(), subresource, preview2_);
         ComPtr<IMF2DBuffer> planar;
@@ -1671,7 +1678,12 @@ private:
 
     // The frame as encoded: the slot composed with the layers, or the slot as is.
     bool compose(int frame, ID3D11Texture2D* target, unsigned subresource) {
-        if (overlays_) return overlays_->draw(kMainCanvas, context_.Get(), slots_[frame].texture.Get(), target, subresource, shown_at_);
+        if (overlays_) {
+            if (overlays_->needs_composition(kMainCanvas))
+                return overlays_->draw(kMainCanvas, context_.Get(), slots_[frame].texture.Get(), target, subresource, shown_at_);
+            context_->CopySubresourceRegion(target, subresource, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
+            return true;
+        }
         context_->CopySubresourceRegion(target, subresource, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
         return true;
     }
@@ -1682,16 +1694,23 @@ private:
             return;
         }
         previewer_->render(context_.Get(), composed_.Get(), 0, preview_);
-        if (composed2_ && previewer2_ &&
-            overlays_->draw(kSecondCanvas, context_.Get(), slots_[frame].texture.Get(), composed2_.Get(), 0, shown_at_))
-            previewer2_->render(context_.Get(), composed2_.Get(), 0, preview2_);
+        if (composed2_ && previewer2_) {
+            bool drawn = true;
+            if (overlays_->needs_composition(kSecondCanvas))
+                drawn = overlays_->draw(kSecondCanvas, context_.Get(), slots_[frame].texture.Get(), composed2_.Get(), 0, shown_at_);
+            else
+                context_->CopySubresourceRegion(composed2_.Get(), 0, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
+            if (drawn) previewer2_->render(context_.Get(), composed2_.Get(), 0, preview2_);
+        }
     }
 
     enum class Write { done, busy, failed };
 
     Write write_video(std::uint64_t slot, int frame) {
         ComPtr<IMFSample> sample;
-        if (!allocator_) {
+        const bool direct_pattern = options_.test_pattern && overlays_ &&
+            !overlays_->needs_composition(kMainCanvas) && !options_.canvas2.width && !previewer_;
+        if (!allocator_ || direct_pattern) {
             if (FAILED(MFCreateSample(&sample)) || FAILED(sample->AddBuffer(pattern_[frame].Get()))) {
                 fail("could not create a video sample");
                 return Write::failed;

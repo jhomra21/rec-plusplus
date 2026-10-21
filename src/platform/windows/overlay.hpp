@@ -48,6 +48,7 @@ public:
     // sampled per plane. at is the instant the frame shows, for click marks.
     bool draw(std::size_t canvas, ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame,
               unsigned subresource, std::chrono::steady_clock::time_point at);
+    bool needs_composition(std::size_t canvas) const;
     // The main canvas: shows, hides or moves an overlay or the main capture, keeping its crop.
     Result set(std::size_t index, bool visible, const std::optional<Area>& area);
     Result set_screen(bool visible, const std::optional<Area>& area);
