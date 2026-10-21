@@ -170,11 +170,11 @@ function Get-Key($ui, [string]$name) {
     Wait-Until { (Text-Of $ui 101) -match '^Copy the ' } "Get Key did not ask for the server and key: $(Text-Of $ui 101)"
 }
 # Copies text the way a browser does; the app sees the clipboard change.
-# The app (or a clipboard manager) may hold the clipboard open for a moment as it reads it.
+# The app, a clipboard manager or the CI runner's session may hold the clipboard open for a while.
 function Copy-To-Rec([string]$text) {
     for ($try = 1; ; $try++) {
         try { Set-Clipboard -Value $text; break }
-        catch { if ($try -ge 10) { throw } Start-Sleep -Milliseconds 100 }
+        catch { if ($try -ge 50) { throw } Start-Sleep -Milliseconds 100 }
     }
     Start-Sleep -Milliseconds 300
 }
