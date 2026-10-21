@@ -63,16 +63,22 @@ try {
     $powerCheckPath = Join-Path $artifacts 'power-request.mp4'
     $powerRun = Start-RecProcess $rec @('record', '--test-pattern', '-t', '0', '-o', $powerCheckPath)
     try {
-        Start-Sleep -Milliseconds 1200
+        $newlyRequired = 0x3 -band (-bnot $executionBefore)
         $executionDuring = Get-ExecutionState
+        $powerDeadline = (Get-Date).AddSeconds(15)
+        while (-not $powerRun.Process.HasExited -and
+            ($executionDuring -band $newlyRequired) -ne $newlyRequired -and
+            (Get-Date) -lt $powerDeadline) {
+            Start-Sleep -Milliseconds 200
+            $executionDuring = Get-ExecutionState
+        }
         Write-Host ('Execution state before=0x{0:X}, during=0x{1:X}' -f $executionBefore, $executionDuring)
         $preexisting = $executionBefore -band 0x3
-        $newlyRequired = 0x3 -band (-bnot $executionBefore)
         if ($preexisting -ne 0) {
             Write-Host ('Execution-state check inconclusive for pre-existing bit(s): 0x{0:X}' -f $preexisting)
         }
-        if (($executionDuring -band $newlyRequired) -ne $newlyRequired) {
-            throw ('recording did not set the unheld system/display bit(s) (state=0x{0:X})' -f $executionDuring)
+        if ($powerRun.Process.HasExited -or ($executionDuring -band $newlyRequired) -ne $newlyRequired) {
+            throw ('recording did not set the unheld system/display bit(s) before exit or timeout (last state=0x{0:X})' -f $executionDuring)
         }
         if ($newlyRequired -eq 0) {
             Write-Host 'Execution-state check inconclusive: both bits were already set before recording.'

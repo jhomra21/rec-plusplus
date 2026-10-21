@@ -556,15 +556,15 @@ try {
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
     Wait-Recorded $ui 1
     # The preview: the camera in the bottom-right corner and the image's red block top left.
+    # On a busy runner recording/scene changes can precede the next rendered preview frame.
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-corner.png') @(0.76, 0.75, 0.18, 0.18) 'green'
     $picture = Snapshot-Preview $ui (Join-Path $Artifacts 'app-preview-corner.png')
-    Expect-Color (Picture-Color $picture 0.76 0.75 0.18 0.18) 'color' 'green'
     Expect-Color (Picture-Color $picture 0.02 0.03 0.15 0.15) 'color' 'red'
     $picture.Dispose()
     Wait-Recorded $ui 2
     Choose-Last $ui 'Scene'  # Camera only
-    Start-Sleep -Milliseconds 1500
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-camera.png') @(0.35, 0.4, 0.3, 0.2) 'green'
     $picture = Snapshot-Preview $ui (Join-Path $Artifacts 'app-preview-camera.png')
-    Expect-Color (Picture-Color $picture 0.35 0.4 0.3 0.2) 'color' 'green'
     $picture.Dispose()
     Wait-Recorded $ui 5
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]2001, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Screen only"
