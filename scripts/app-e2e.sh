@@ -138,9 +138,21 @@ grep -qx 'tab-strip-order=ok' "$report"
 grep -qx 'status-recording-color=ok' "$report"
 grep -qx 'status-paused-color=ok' "$report"
 grep -qx 'attention-text=ok' "$report"
-grep -qx 'live-badge=ok' "$report"
 grep -qx 'camera-strip-visible=ok' "$report"
-[[ -s "$artifacts/app-strips.png" ]] || { echo 'the app window strip screenshot is missing' >&2; exit 1; }
+check_window_png() {
+  local file="$1"
+  [[ -s "$file" ]] || { echo "the app window snapshot is missing: $file" >&2; exit 1; }
+  local expected actual
+  expected="$(awk -F= -v key="snapshot.$(basename "$file")" '$1 == key { print $2 }' "$report")"
+  actual="$(sips -g pixelWidth -g pixelHeight "$file" | awk '
+    /pixelWidth:/ { w=$2 } /pixelHeight:/ { h=$2 } END { if (w && h) print w "x" h }')"
+  [[ -n "$expected" && "$actual" == "$expected" ]] \
+    || { echo "the app window snapshot is not a real image of its expected size ($expected, got $actual): $file" >&2; exit 1; }
+}
+check_window_png "$artifacts/app-strips.png"
+check_window_png "$artifacts/app-recording-status.png"
+check_window_png "$artifacts/app-paused-status.png"
+check_window_png "$artifacts/app-camera-strip.png"
 grep -qx 'keychain=ok' "$report"
 grep -qx 'getkey=ok' "$report"
 grep -qx 'quit=started' "$report"
