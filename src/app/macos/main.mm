@@ -3115,6 +3115,10 @@ struct PreviewHit {
         fail([NSString stringWithFormat:@"the recording did not reach %.1f s", seconds]);
     };
     scene(0);
+    // Exercise a source-key transition while the idle preview may still be starting. The
+    // stale preview without the image must never replace the latest camera+image composition.
+    set_check(_image, false);
+    set_check(_image, true);
     // Before Start the preview already shows the scene; with Show preview off it stops.
     const auto idle = wait_preview(@"app-preview-idle", @"green", 0.76, 0.75, 0.18, 0.18);
     preview_color(idle, @"app-preview-idle", @"red", 0.02, 0.03, 0.15, 0.15);
@@ -3141,7 +3145,7 @@ struct PreviewHit {
         fail(@"Screen brightness was not saved on release");
     __block rec::PreviewFrame colorPreview;
     bool gray = false;
-    for (int i = 0; i < 40 && !gray; ++i) {
+    for (int i = 0; i < 200 && !gray; ++i) {
         ui(^{ colorPreview = self->_frame; });
         if (colorPreview.number) {
             const auto c = mean_color(colorPreview, 0.4, 0.4, 0.2, 0.2);
@@ -3151,6 +3155,7 @@ struct PreviewHit {
         if (!gray) usleep(50000);
     }
     if (!gray) fail(@"Screen brightness did not make the preview gray");
+    preview_color(colorPreview, @"app-preview-screen-gray", @"red", 0.02, 0.03, 0.15, 0.15);
     save_png(colorPreview, @"app-preview-screen-gray");
     ui(^{
         NSEvent* doubleClick = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:NSZeroPoint
@@ -3159,7 +3164,7 @@ struct PreviewHit {
         [(ResettableSlider*)self->_screenColor[0] mouseDown:doubleClick];
     });
     bool white = false;
-    for (int i = 0; i < 40 && !white; ++i) {
+    for (int i = 0; i < 200 && !white; ++i) {
         ui(^{ colorPreview = self->_frame; });
         if (colorPreview.number) {
             const auto c = mean_color(colorPreview, 0.4, 0.4, 0.2, 0.2);

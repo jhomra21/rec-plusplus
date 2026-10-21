@@ -1282,12 +1282,26 @@ void Session::run_idle() {
             started = recorder->start();
         }
         lock.lock();
+        // The UI may have changed sources while capture was starting. Do not publish a
+        // preview built from stale capture options, even if some of its overlays still match.
+        if (seen != idle_generation_) {
+            lock.unlock();
+            if (recorder) {
+                recorder->stop();
+                recorder.reset();
+            }
+            lock.lock();
+            idle_alive_ = false;
+            idle_wake_.notify_all();
+            changed();
+            continue;
+        }
         if (started) {
             running = std::move(recorder);
             idle_ = running.get();
             idle_indices_ = indices;
-            idle_->show_preview(true);
             place_idle();
+            idle_->show_preview(true);
         } else {
             idle_error_ = started.error;
             idle_alive_ = false;
