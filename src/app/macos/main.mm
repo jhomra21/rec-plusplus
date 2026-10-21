@@ -293,6 +293,39 @@ enum class Pointer { down, dragged, up, moved, exited };
 - (void)mouseExited:(NSEvent*)event { [self.delegate preview:self pointer:Pointer::exited event:event]; }
 @end
 
+@interface ResettableSlider : NSSlider
+@property(nonatomic, weak) id resetTarget;
+@property(nonatomic) SEL resetAction;
+@property(nonatomic, weak) id finishTarget;
+@property(nonatomic) SEL finishAction;
+@end
+
+@implementation ResettableSlider
+- (void)reset {
+    if (self.resetTarget && self.resetAction)
+        [NSApp sendAction:self.resetAction to:self.resetTarget from:self];
+}
+- (void)mouseDown:(NSEvent*)event {
+    if (event.clickCount == 2) {
+        [self reset];
+        return;
+    }
+    [super mouseDown:event];
+    if (self.finishTarget && self.finishAction)
+        [NSApp sendAction:self.finishAction to:self.finishTarget from:self];
+}
+- (void)keyDown:(NSEvent*)event {
+    if ((event.modifierFlags & NSEventModifierFlagCommand) &&
+        [event.charactersIgnoringModifiers isEqualToString:@"0"]) {
+        [self reset];
+        return;
+    }
+    [super keyDown:event];
+    if (self.finishTarget && self.finishAction)
+        [NSApp sendAction:self.finishAction to:self.finishTarget from:self];
+}
+@end
+
 // The phone camera's address as a QR code: black modules on white with the four-module quiet
 // zone, each module a whole number of pixels, centered.
 @interface QRView : NSView
@@ -362,6 +395,7 @@ struct PreviewHit {
     NSDate* _noteUntil;
     bool _noteAttention;
     bool _quitting;
+    bool _resettingSlider;
     bool _attention;
     bool _saved;
     State _state;
@@ -408,6 +442,7 @@ struct PreviewHit {
     NSPopUpButton *_cameraShape, *_cameraBorder;
     NSSlider* _roundness;
     NSSlider *_screenColor[3], *_cameraColor[3];
+    NSTextField *_screenColorValue[3], *_cameraColorValue[3];
     NSButton *_screenColorReset, *_cameraColorReset;
     NSButton* _shadow;
     NSTextField *_bitrate, *_imageFile;
@@ -904,10 +939,14 @@ struct PreviewHit {
 }
 
 - (NSSlider*)volumeSlider:(NSString*)name {
-    NSSlider* slider = [NSSlider sliderWithValue:0 minValue:rec::app::kVolumeMin maxValue:rec::app::kVolumeMax
-                                          target:self action:@selector(volumeChanged:)];
+    ResettableSlider* slider = [ResettableSlider sliderWithValue:0 minValue:rec::app::kVolumeMin maxValue:rec::app::kVolumeMax
+                                                          target:self action:@selector(volumeChanged:)];
     slider.continuous = YES;
     slider.accessibilityLabel = name;
+    slider.resetTarget = self;
+    slider.resetAction = @selector(resetSlider:);
+    slider.finishTarget = self;
+    slider.finishAction = @selector(sliderFinished:);
     return slider;
 }
 
@@ -1258,12 +1297,28 @@ struct PreviewHit {
                            camera ? "Camera saturation" : "Screen saturation"};
     NSMutableArray<NSArray<NSView*>*>* rows = [NSMutableArray array];
     for (int i = 0; i < 3; ++i) {
-        NSSlider* slider = [NSSlider sliderWithValue:0 minValue:-100 maxValue:100 target:self action:@selector(colorChanged:)];
+        ResettableSlider* slider = [ResettableSlider sliderWithValue:0 minValue:-100 maxValue:100 target:self action:@selector(colorChanged:)];
         slider.continuous = YES;
         slider.accessibilityLabel = [NSString stringWithUTF8String:names[i]];
+        slider.numberOfTickMarks = 3;
+        slider.allowsTickMarkValuesOnly = NO;
+        slider.resetTarget = self;
+        slider.resetAction = @selector(resetSlider:);
+        slider.finishTarget = self;
+        slider.finishAction = @selector(sliderFinished:);
         (camera ? _cameraColor : _screenColor)[i] = slider;
         NSString* title = @[@"Brightness", @"Contrast", @"Saturation"][i];
-        [rows addObject:@[label(title), slider]];
+        NSTextField* value = label(@"0");
+        NSTextField* titleLabel = label(title);
+        [titleLabel.widthAnchor constraintEqualToConstant:82].active = YES;
+        value.alignment = NSTextAlignmentRight;
+        value.accessibilityLabel = [NSString stringWithFormat:@"%s value", names[i]];
+        [value.widthAnchor constraintEqualToConstant:42].active = YES;
+        (camera ? _cameraColorValue : _screenColorValue)[i] = value;
+        NSStackView* row = [NSStackView stackViewWithViews:@[titleLabel, slider, value]];
+        row.spacing = 8;
+        [slider setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [rows addObject:@[row]];
     }
     NSButton* reset = [self button:camera ? @"Reset camera color" : @"Reset screen color" action:@selector(resetColor:)];
     reset.accessibilityLabel = reset.title;
@@ -1278,7 +1333,15 @@ struct PreviewHit {
 - (void)showColor:(BOOL)camera {
     const auto& color = camera ? _settings.camera_color : _settings.screen_color;
     const int values[] = {color.brightness, color.contrast, color.saturation};
-    for (int i = 0; i < 3; ++i) (camera ? _cameraColor : _screenColor)[i].integerValue = values[i];
+    for (int i = 0; i < 3; ++i) {
+        (camera ? _cameraColor : _screenColor)[i].integerValue = values[i];
+        [self showColorValue:camera index:i];
+    }
+}
+- (void)showColorValue:(BOOL)camera index:(int)index {
+    const NSInteger value = (camera ? _cameraColor : _screenColor)[index].integerValue;
+    (camera ? _cameraColorValue : _screenColorValue)[index].stringValue =
+        [NSString stringWithFormat:@"%@%ld", value > 0 ? @"+" : @"", (long)value];
 }
 
 - (void)applyColor:(BOOL)camera {
@@ -1291,12 +1354,20 @@ struct PreviewHit {
         _noteAttention = true;
         _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
     }
-    if (NSApp.currentEvent.type != NSEventTypeLeftMouseDragged) rec::app::save_settings(_settingsPath, _settings);
+    if (NSApp.currentEvent.type != NSEventTypeLeftMouseDragged &&
+        NSApp.currentEvent.type != NSEventTypeLeftMouseDown &&
+        NSApp.currentEvent.type != NSEventTypeLeftMouseUp &&
+        NSApp.currentEvent.type != NSEventTypeKeyDown && !_resettingSlider)
+        rec::app::save_settings(_settingsPath, _settings);
     [self refresh];
 }
 
 - (void)colorChanged:(NSSlider*)slider {
-    [self applyColor:slider == _cameraColor[0] || slider == _cameraColor[1] || slider == _cameraColor[2]];
+    const BOOL camera = slider == _cameraColor[0] || slider == _cameraColor[1] || slider == _cameraColor[2];
+    const int index = slider == (camera ? _cameraColor[0] : _screenColor[0]) ? 0 :
+                      slider == (camera ? _cameraColor[1] : _screenColor[1]) ? 1 : 2;
+    [self showColorValue:camera index:index];
+    [self applyColor:camera];
 }
 
 - (void)resetColor:(NSButton*)button {
@@ -1305,6 +1376,17 @@ struct PreviewHit {
     else _settings.screen_color = {};
     [self showColor:camera];
     [self applyScene];
+}
+- (void)resetSlider:(ResettableSlider*)slider {
+    slider.integerValue = 0;
+    _resettingSlider = true;
+    [NSApp sendAction:slider.action to:slider.target from:slider];
+    _resettingSlider = false;
+    rec::app::save_settings(_settingsPath, _settings);
+}
+- (void)sliderFinished:(ResettableSlider*)slider {
+    (void)slider;
+    rec::app::save_settings(_settingsPath, _settings);
 }
 
 - (void)showVolume:(rec::AudioInput)input {
@@ -1339,7 +1421,11 @@ struct PreviewHit {
         }
     }
     // A drag saves once, when it ends.
-    if (NSApp.currentEvent.type != NSEventTypeLeftMouseDragged) rec::app::save_settings(_settingsPath, _settings);
+    if (NSApp.currentEvent.type != NSEventTypeLeftMouseDragged &&
+        NSApp.currentEvent.type != NSEventTypeLeftMouseDown &&
+        NSApp.currentEvent.type != NSEventTypeLeftMouseUp &&
+        NSApp.currentEvent.type != NSEventTypeKeyDown && !_resettingSlider)
+        rec::app::save_settings(_settingsPath, _settings);
     [self refresh];
 }
 
@@ -2627,6 +2713,8 @@ struct PreviewHit {
                                      self->_systemMute, self->_micMute,
                                      self->_screenColor[0], self->_screenColor[1], self->_screenColor[2],
                                      self->_cameraColor[0], self->_cameraColor[1], self->_cameraColor[2],
+                                     self->_screenColorValue[0], self->_screenColorValue[1], self->_screenColorValue[2],
+                                     self->_cameraColorValue[0], self->_cameraColorValue[1], self->_cameraColorValue[2],
                                      self->_screenColorReset, self->_cameraColorReset]) {
             NSString* name = control.accessibilityLabel.length ? control.accessibilityLabel : control.accessibilityTitle;
             // Buttons are named by their title.
@@ -3039,11 +3127,18 @@ struct PreviewHit {
     if (!off) fail(@"Show preview off left the preview on");
     set_check(_showPreview, true);
     wait_preview(@"app-preview-idle", @"green", 0.76, 0.75, 0.18, 0.18);
-    // Screen brightness changes the synthetic preview live; Reset restores white.
+    // Color value updates, release persistence, double-click reset and Cmd+0 all use this
+    // window's own controls and the synthetic preview.
     ui(^{
         self->_screenColor[0].integerValue = -50;
         [self->_screenColor[0] sendAction:self->_screenColor[0].action to:self->_screenColor[0].target];
+        [self sliderFinished:(ResettableSlider*)self->_screenColor[0]];
     });
+    __block NSString* screenValue;
+    ui(^{ screenValue = self->_screenColorValue[0].stringValue; });
+    if (![screenValue isEqualToString:@"-50"]) fail([@"Screen brightness value is " stringByAppendingString:screenValue]);
+    if (rec::app::load_settings(_settingsPath).screen_color.brightness != -50)
+        fail(@"Screen brightness was not saved on release");
     __block rec::PreviewFrame colorPreview;
     bool gray = false;
     for (int i = 0; i < 40 && !gray; ++i) {
@@ -3057,7 +3152,12 @@ struct PreviewHit {
     }
     if (!gray) fail(@"Screen brightness did not make the preview gray");
     save_png(colorPreview, @"app-preview-screen-gray");
-    press(_screenColorReset);
+    ui(^{
+        NSEvent* doubleClick = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:NSZeroPoint
+            modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:self->_window.windowNumber
+            context:nil eventNumber:0 clickCount:2 pressure:1];
+        [(ResettableSlider*)self->_screenColor[0] mouseDown:doubleClick];
+    });
     bool white = false;
     for (int i = 0; i < 40 && !white; ++i) {
         ui(^{ colorPreview = self->_frame; });
@@ -3067,9 +3167,44 @@ struct PreviewHit {
         }
         if (!white) usleep(50000);
     }
-    if (!white) fail(@"Reset screen color did not restore the white preview");
+    if (!white) fail(@"Double-clicking Screen brightness did not restore the white preview");
+    ui(^{
+        self->_systemVolume.integerValue = -6;
+        [self->_systemVolume sendAction:self->_systemVolume.action to:self->_systemVolume.target];
+        [self sliderFinished:(ResettableSlider*)self->_systemVolume];
+    });
+    __block NSString* volumeValue;
+    ui(^{ volumeValue = self->_systemVolumeText.stringValue; });
+    if (![volumeValue isEqualToString:@"-6 dB"] || rec::app::load_settings(_settingsPath).system_volume != -6)
+        fail(@"System audio volume release did not update and save its dB value");
+    ui(^{
+        NSEvent* doubleClick = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:NSZeroPoint
+            modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:self->_window.windowNumber
+            context:nil eventNumber:0 clickCount:2 pressure:1];
+        [(ResettableSlider*)self->_systemVolume mouseDown:doubleClick];
+    });
+    ui(^{ volumeValue = self->_systemVolumeText.stringValue; });
+    if (![volumeValue isEqualToString:@"0 dB"] || rec::app::load_settings(_settingsPath).system_volume != 0)
+        fail(@"Double-clicking System audio volume did not reset and save 0 dB");
+    ui(^{
+        self->_screenColor[0].integerValue = -25;
+        [self->_screenColor[0] sendAction:self->_screenColor[0].action to:self->_screenColor[0].target];
+        [self->_window makeFirstResponder:self->_screenColor[0]];
+        NSEvent* commandZero = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+            modifierFlags:NSEventModifierFlagCommand timestamp:NSProcessInfo.processInfo.systemUptime
+            windowNumber:self->_window.windowNumber context:nil characters:@"0" charactersIgnoringModifiers:@"0"
+            isARepeat:NO keyCode:29];
+        [(ResettableSlider*)self->_screenColor[0] keyDown:commandZero];
+    });
+    ui(^{ screenValue = self->_screenColorValue[0].stringValue; });
+    if (![screenValue isEqualToString:@"0"] || rec::app::load_settings(_settingsPath).screen_color.brightness != 0)
+        fail(@"Cmd+0 did not reset and save Screen brightness");
     save_png(colorPreview, @"app-preview-screen-reset");
     note(@"screen-color=ok");
+    note(@"slider-values=ok");
+    note(@"slider-double-click=ok");
+    note(@"slider-command-zero=ok");
+    note(@"slider-release-save=ok");
     note(@"idle-preview=ok");
     press(_record);
     wait_for(recording, 20);
@@ -3104,11 +3239,13 @@ struct PreviewHit {
     ui(^{
         self->_screenColor[0].integerValue = -50;
         [self->_screenColor[0] sendAction:self->_screenColor[0].action to:self->_screenColor[0].target];
+        [self sliderFinished:(ResettableSlider*)self->_screenColor[0]];
     });
     recorded(7.5);
     press(_record);
     wait_for(@"Ready to record", 30);
     saved(@"camera");
+    press(_screenColorReset);
     save_png(idle, @"app-preview-idle");
     save_png(corner, @"app-preview-corner");
     save_png(full, @"app-preview-camera");

@@ -137,6 +137,10 @@ grep -qx 'getkey=ok' "$report"
 grep -qx 'quit=started' "$report"
 grep -qx 'idle-preview=ok' "$report"
 grep -qx 'screen-color=ok' "$report"
+grep -qx 'slider-values=ok' "$report"
+grep -qx 'slider-double-click=ok' "$report"
+grep -qx 'slider-command-zero=ok' "$report"
+grep -qx 'slider-release-save=ok' "$report"
 [[ -s "$artifacts/app-preview-screen-gray.png" && -s "$artifacts/app-preview-screen-reset.png" ]] \
   || { echo 'the screen color slider preview artifacts are missing' >&2; exit 1; }
 grep -qx 'preview=ok' "$report"
