@@ -22,6 +22,7 @@ Build a compact recorder for macOS (primary) and Windows. Keep the recording eng
 - Keep benchmarks reproducible: same machine, same screen content, codec, output frame rate, resolution, and recording duration. Include encoder backpressure and memory samples.
 - Add an abstraction only when a concrete second implementation needs it.
 - The native interface should feel joyful, clear and responsive: one-step recording, obvious status, accessible controls, and no hidden-preview background rendering. Keep the recording core independent from UI lifecycles.
+- Follow the design languages of Apple Logic Pro and Ableton Live: dense but calm panels, a dark neutral surface with one clear accent for state (recording, live), compact controls grouped by source like mixer channel strips, direct manipulation (drag to change a value, double-click to reset it to its default), values shown next to their controls, and no decoration that does not carry information.
 
 ## Reference codebases
 
