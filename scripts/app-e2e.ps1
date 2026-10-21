@@ -555,11 +555,11 @@ try {
     [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](-50)) | Out-Null
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
     if ((Find $ui 'Screen brightness value' 41).Item.accValue(0) -ne '-50') { throw 'screen brightness readout did not show -50' }
-    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-gray.png') @(0.4, 0.4, 0.2, 0.2) 'gray' -seconds 2 -pollMilliseconds 50
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-gray.png') @(0.4, 0.4, 0.2, 0.2) 'gray' -pollMilliseconds 50
     [AppWindow]::PostMessage($screenBrightness, 0x0203, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_LBUTTONDBLCLK, this app's slider
     Wait-Until { (Find $ui 'Screen brightness value' 41).Item.accValue(0) -eq '0' } 'double-click did not reset screen brightness'
     Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("screen_color=0,0,0`n") } 'double-click reset was not saved'
-    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-reset.png') @(0.4, 0.4, 0.2, 0.2) 'white' -seconds 2 -pollMilliseconds 50
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-reset.png') @(0.4, 0.4, 0.2, 0.2) 'white' -pollMilliseconds 50
     [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](20)) | Out-Null
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
     if ((Find $ui 'Screen brightness value' 41).Item.accValue(0) -ne '+20') { throw 'screen brightness readout did not show +20' }
