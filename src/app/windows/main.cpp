@@ -868,7 +868,7 @@ private:
             add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | WS_TABSTOP);
         for (int id : {kScreenBrightnessValue, kScreenContrastValue, kScreenSaturationValue})
             label(id, L"0");
-        button(kScreenColorReset, L"Reset screen color");
+        button(kScreenColorReset, L"Reset");
         label(kCameraColorLabel, L"Camera");
         label(kCameraBrightnessLabel, L"Brightness");
         label(kCameraContrastLabel, L"Contrast");
@@ -878,7 +878,7 @@ private:
             add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | WS_TABSTOP);
         for (int id : {kCameraBrightnessValue, kCameraContrastValue, kCameraSaturationValue})
             label(id, L"0");
-        button(kCameraColorReset, L"Reset camera color");
+        button(kCameraColorReset, L"Reset");
         button(kRecord, L"&Start Recording", BS_DEFPUSHBUTTON);
         button(kPause, L"&Pause");
         button(kSaveReplay, L"Save Rep&lay");
@@ -1022,15 +1022,8 @@ private:
                 {kCameraContrast, L"Camera contrast"}, {kCameraSaturation, L"Camera saturation"}};
             for (const auto& [id, name] : color_names)
                 access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, name);
-            const std::pair<int, const wchar_t*> color_values[] = {
-                {kScreenBrightnessValue, L"Screen brightness value"},
-                {kScreenContrastValue, L"Screen contrast value"},
-                {kScreenSaturationValue, L"Screen saturation value"},
-                {kCameraBrightnessValue, L"Camera brightness value"},
-                {kCameraContrastValue, L"Camera contrast value"},
-                {kCameraSaturationValue, L"Camera saturation value"}};
-            for (const auto& [id, name] : color_values)
-                access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, name);
+            access_->SetHwndPropStr(get(kScreenColorReset), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Reset screen color");
+            access_->SetHwndPropStr(get(kCameraColorReset), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Reset camera color");
         }
         for (int slider : {kSystemVolume, kMicVolume, kScreenBrightness, kScreenContrast,
                            kScreenSaturation, kCameraBrightness, kCameraContrast, kCameraSaturation})
@@ -1090,12 +1083,13 @@ private:
             place(control_id, x + label_width, y, width - label_width, px(240));
             y += row + gap;
         };
-        const auto color_slider = [&](int label_id, int slider_id, int value_id, int label_span, int strip_width) {
-            const int value_width = px(46);
-            place(label_id, x, y + px(3), label_span - gap, px(18));
-            place(slider_id, x + label_span, y, strip_width - label_span - value_width - gap, px(22));
-            place(value_id, x + strip_width - value_width, y + px(3), value_width, px(18));
-            y += px(22) + px(2);
+        const auto color_slider = [&](int label_id, int slider_id, int value_id) {
+            const int value = px(50), mute = px(110);
+            place(label_id, x, y, label_width - gap, px(18));
+            const int slider = width - value - mute - 2 * gap;
+            place(slider_id, x, y + px(14), slider, px(26));
+            place(value_id, x + slider + gap, y + px(17), value, px(20));
+            y += px(40);
         };
         const auto strip = [&](const rec::app::Strip& model) {
             if (model.kind != rec::app::Strip::Kind::visual || !model.color || !model.source) return;
@@ -1112,14 +1106,14 @@ private:
             const int values[]{camera_strip ? kCameraBrightnessValue : kScreenBrightnessValue,
                                camera_strip ? kCameraContrastValue : kScreenContrastValue,
                                camera_strip ? kCameraSaturationValue : kScreenSaturationValue};
-            const int strip_width = scenes_column;
             const int top = y;
-            place(header_id, x + px(10), y + px(2), strip_width - px(150), px(20));
-            place(reset_id, x + strip_width - px(112), y, px(104), row);
-            y += row + px(2);
-            for (int i = 0; i < 3; ++i) color_slider(labels[i], sliders[i], values[i], label_width, strip_width);
+            const int inset = px(8);
+            place(header_id, x + inset, y + px(2), width - px(120) - inset, px(20));
+            place(reset_id, x + width - px(8) - px(70), y + px(1), px(70), px(22));
+            y += px(24);
+            for (int i = 0; i < 3; ++i) color_slider(labels[i], sliders[i], values[i]);
             const int bottom = y + px(2);
-            place(box_id, x, top, strip_width, bottom - top);
+            place(box_id, x, top, width, bottom - top);
             y = bottom + gap;
         };
 
