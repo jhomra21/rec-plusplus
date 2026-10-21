@@ -70,7 +70,6 @@ cbuffer Placement : register(b0) {
     float4 color1;
     float4 color2;
     float4 color_offset;
-    float color_active;
 };
 struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; float2 local : TEXCOORD1; };
 Vertex vs(uint id : SV_VertexID) {
@@ -175,13 +174,10 @@ struct Constants {
     float size[4];
     float fill[4];
     float color0[4], color1[4], color2[4], color_offset[4];
-    float color_active;
-    float padding[3];
 };
 
 void color_constants(const ColorAdjust& c, Constants& out) {
     if (!c.brightness && !c.contrast && !c.saturation) return;
-    out.color_active = 1;
     const float saturation = 1.0f + c.saturation / 100.0f;
     const float contrast = 1.0f + c.contrast / 100.0f;
     const float luma[3] = {0.2126f, 0.7152f, 0.0722f};
@@ -927,18 +923,10 @@ public:
         const bool screen_adjusted = screen_color_.brightness || screen_color_.contrast || screen_color_.saturation;
         const auto full = [](const Area& a) { return a.x <= 0 && a.y <= 0 && a.width >= 1 && a.height >= 1; };
         if (clicks_ || !c.screen.visible ||
-            (c.screen.visible && (!full(c.screen.area) || !full(c.screen.crop) || screen_adjusted)) ||
+            (!full(c.screen.area) || !full(c.screen.crop) || screen_adjusted) ||
             (canvas != kMainCanvas && c.screen.visible && (c.width != width_ || c.height != height_))) return true;
-        for (std::size_t i = 0; i < layers_.size(); ++i) {
-            if (!c.layers[i].visible) continue;
-            const auto kind = layers_[i].overlay.kind;
-            if (kind == Overlay::Kind::camera)
-                return true;
-            if (kind == Overlay::Kind::display || kind == Overlay::Kind::window)
-                return true;
-            if (kind == Overlay::Kind::image)
-                return true;
-        }
+        for (std::size_t i = 0; i < layers_.size(); ++i)
+            if (c.layers[i].visible) return true;
         return false;
     }
 
@@ -957,6 +945,7 @@ public:
 
     bool draw(std::size_t canvas, ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame,
               unsigned subresource, std::chrono::steady_clock::time_point at) {
+        // needs_composition() and draw() take the lock separately, so a frame may use the previous state.
         struct Job { Layer* layer; Layout layout; Style style; ColorAdjust color; };
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
@@ -1062,15 +1051,17 @@ private:
               ID3D11PixelShader* luma, ID3D11PixelShader* chroma, double fade = 1, const Shaping& shaping = {},
               const ColorAdjust& color_adjust = {}) {
         const double w = draw_width_, h = draw_height_;
-        Constants constants{
-            {static_cast<float>(2 * p.left / w - 1), static_cast<float>(1 - 2 * p.top / h),
-             static_cast<float>(2 * p.right / w - 1), static_cast<float>(1 - 2 * p.bottom / h)},
-            {static_cast<float>(uv[0]), static_cast<float>(uv[1]), static_cast<float>(uv[2]), static_cast<float>(uv[3])},
-            opaque ? 1.0f : 0.0f,
-            static_cast<float>(fade),
-            shaping.mode,
-            shaping.shape,
-            {}, {}, {}, {}, {}, {}, {}};
+        Constants constants{};
+        const float dest[] = {static_cast<float>(2 * p.left / w - 1), static_cast<float>(1 - 2 * p.top / h),
+                              static_cast<float>(2 * p.right / w - 1), static_cast<float>(1 - 2 * p.bottom / h)};
+        const float source[] = {static_cast<float>(uv[0]), static_cast<float>(uv[1]),
+                                static_cast<float>(uv[2]), static_cast<float>(uv[3])};
+        std::copy(std::begin(dest), std::end(dest), constants.dest);
+        std::copy(std::begin(source), std::end(source), constants.source);
+        constants.opaque = opaque ? 1.0f : 0.0f;
+        constants.fade = static_cast<float>(fade);
+        constants.mode = shaping.mode;
+        constants.shape = shaping.shape;
         std::copy(std::begin(shaping.box), std::end(shaping.box), constants.box);
         std::copy(std::begin(shaping.size), std::end(shaping.size), constants.size);
         std::copy(std::begin(shaping.fill), std::end(shaping.fill), constants.fill);

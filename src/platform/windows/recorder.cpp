@@ -859,9 +859,9 @@ public:
             pattern_[0] = pattern_frame(size_, false);
             pattern_[1] = pattern_frame(size_, true);
             if (!pattern_[0] || !pattern_[1]) { stop(); return {"synthetic frame allocation failed"}; }
-            // Keep the compositor ready even for a plain synthetic recording: color changes
-            // can arrive at any point through the live control interface.
-            if (auto created = create_pattern_device(); !created) { stop(); return created; }
+            if ((layered() || options_.preview_width) && !device_) {
+                if (auto created = create_pattern_device(); !created) { stop(); return created; }
+            }
             // Marks land as if display options_.display were captured.
             if (const auto list = monitors(); options_.display >= 1 && options_.display <= list.size())
                 click_source_.monitor = list[options_.display - 1].handle;
@@ -1049,6 +1049,7 @@ public:
         stats.captured = captured_.load();
         stats.written = written_.load();
         stats.dropped = dropped_.load();
+        stats.composed_frames = composed_frames_.load();
         stats.audio_written = audio_[kSystem].written.load();
         stats.audio_dropped = audio_[kSystem].dropped.load() +
             (audio_[kSystem].capture ? audio_[kSystem].capture->overflowed() : 0);
@@ -1677,19 +1678,18 @@ private:
     }
 
     // The frame as encoded: the slot composed with the layers, or the slot as is.
-    bool compose(int frame, ID3D11Texture2D* target, unsigned subresource) {
-        if (overlays_) {
-            if (overlays_->needs_composition(kMainCanvas))
-                return overlays_->draw(kMainCanvas, context_.Get(), slots_[frame].texture.Get(), target, subresource, shown_at_);
-            context_->CopySubresourceRegion(target, subresource, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
-            return true;
+    bool compose(int frame, ID3D11Texture2D* target, unsigned subresource, bool count = true) {
+        if (overlays_ && overlays_->needs_composition(kMainCanvas)) {
+            const bool drawn = overlays_->draw(kMainCanvas, context_.Get(), slots_[frame].texture.Get(), target, subresource, shown_at_);
+            if (drawn && count) composed_frames_.fetch_add(1);
+            return drawn;
         }
         context_->CopySubresourceRegion(target, subresource, 0, 0, 0, slots_[frame].texture.Get(), 0, nullptr);
         return true;
     }
 
     void draw_preview(int frame) {
-        if (!compose(frame, composed_.Get(), 0)) {
+        if (!compose(frame, composed_.Get(), 0, false)) {
             fail("could not draw the overlays");
             return;
         }
@@ -1708,9 +1708,7 @@ private:
 
     Write write_video(std::uint64_t slot, int frame) {
         ComPtr<IMFSample> sample;
-        const bool direct_pattern = options_.test_pattern && overlays_ &&
-            !overlays_->needs_composition(kMainCanvas) && !options_.canvas2.width && !previewer_;
-        if (!allocator_ || direct_pattern) {
+        if (!allocator_) {
             if (FAILED(MFCreateSample(&sample)) || FAILED(sample->AddBuffer(pattern_[frame].Get()))) {
                 fail("could not create a video sample");
                 return Write::failed;
@@ -2044,6 +2042,7 @@ private:
     ComPtr<IMFVideoSampleAllocatorEx> allocator2_;
     std::unique_ptr<win::LiveStream> live2_;  // With servers or a movie; kept after stop() for its counters.
     std::atomic<std::uint64_t> canvas2_frames_{0}, canvas2_dropped_{0};
+    std::atomic<std::uint64_t> composed_frames_{0};
     ComPtr<IMFVideoSampleAllocatorEx> allocator_;
 
     ComPtr<IMFSinkWriter> writer_;

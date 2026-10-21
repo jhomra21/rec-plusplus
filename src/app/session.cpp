@@ -807,6 +807,8 @@ Result capture_options(const Settings& s, bool test_pattern, Options& o, SourceI
     o.fps = s.fps;
     o.codec = s.codec == "h264" ? Codec::h264 : s.codec == "hevc" ? Codec::hevc :
               s.codec == "prores" ? Codec::prores : Codec::automatic;
+    o.screen_color = s.screen_color;
+    o.camera_color = s.camera_color;
     o.cursor = s.cursor;
     o.clicks = s.clicks;
     o.system_gain_db = std::clamp(s.system_volume, kVolumeMin, kVolumeMax);
@@ -928,7 +930,6 @@ std::string preview_key(const Settings& s, bool test_pattern) {
     std::string key = s.source + '\n' + std::to_string(s.display) + '\n' + s.window_app + '\n' + s.window_title +
                       '\n' + s.region + '\n' + s.resolution + '\n' + (s.cursor ? "1" : "0") + (s.clicks ? "1" : "0") +
                       (test_pattern ? "1" : "0") + (uses_vertical(s) ? "v" : "");
-    key += "\nscreen-color " + core::color_text(s.screen_color) + "\ncamera-color " + core::color_text(s.camera_color);
     if (s.camera) key += "\ncamera " + s.camera_device;
     if (s.image) key += "\nimage " + s.image_path;
     for (const Layer& layer : s.layers)
@@ -959,8 +960,6 @@ Result Session::start(const Settings& s, const std::vector<std::string>& keys, b
     Options o;
     SourceIndices indices;
     if (auto built = capture_options(s, test_pattern, o, indices); !built) return built;
-    o.screen_color = s.screen_color;
-    o.camera_color = s.camera_color;
     if (s.folder.empty()) return {"choose a folder for recordings"};
     std::error_code error;
     std::filesystem::create_directories(utf8_path(s.folder), error);

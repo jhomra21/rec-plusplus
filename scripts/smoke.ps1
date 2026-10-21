@@ -108,6 +108,7 @@ try {
     Expect-Field $h264.Probe 'frames' '60'
     Expect-Field $h264.Probe 'audio_tracks' '0'
     Expect-Text $h264.Log 'written 60, dropped 0'
+    Expect-Text $h264.Log 'Composed 0 frames'
 
     # Flash + beep through the AAC encoder: measured A/V offset in the decoded file.
     $av = Record 'av' 'av.mp4' @('--test-pattern', '--test-tone', '-r', '1080p', '-f', '30', '-t', '2', '--codec', 'h264')
@@ -363,18 +364,33 @@ try {
     Expect-Color $cameraColor 'sample_1' 'neutral'
     $imageColor = Get-Probe $rec $colorPath (Join-Path $artifacts 'color-adjust-image.probe') @('--sample', '150,100,250,100')
     Expect-Color $imageColor 'sample_0' 'red'
+    if ($colored.Log -notmatch 'Composed ([1-9]\d*) frames') { throw "color-adjust path was not composed: $($colored.Log)" }
     Write-Host "color-adjust static: screen=$($screenColor['sample_0']), camera=$($cameraColor['sample_1']), image=$($imageColor['sample_0'])"
     $liveColorPath = Join-Path $artifacts 'color-adjust-live.mp4'
-    $liveColor = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '4', '-o', $liveColorPath)
+    $liveColor = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '4', '--camera', 'test', '-o', $liveColorPath)
     Start-Sleep -Milliseconds 1500
+    Send-RecCommand $liveColor 'color camera 0,0,-100'
     Send-RecCommand $liveColor 'color screen -50,0,0'
     $liveColorResult = Stop-RecProcess $liveColor
     if ($liveColorResult.Code -ne 0) { throw "live color recording failed: $($liveColorResult.Text)" }
     Expect-Text $liveColorResult.Text 'Screen color -50,0,0'
+    Expect-Text $liveColorResult.Text 'Camera color 0,0,-100'
+    if ($liveColorResult.Text -notmatch 'Composed ([1-9]\d*) frames') { throw "live color path was not composed: $($liveColorResult.Text)" }
     $liveColorProbe = Get-Probe $rec $liveColorPath (Join-Path $artifacts 'color-adjust-live.probe') @('--sample', '600,100,300,100')
     Expect-Color $liveColorProbe 'sample_0' 'white'
     Expect-Color $liveColorProbe 'sample_2' 'gray'
-    Write-Host "color-adjust live: before=$($liveColorProbe['sample_0']), after=$($liveColorProbe['sample_2'])"
+    $liveCameraProbe = Get-Probe $rec $liveColorPath (Join-Path $artifacts 'color-adjust-live-camera.probe') @('--sample', '1450,800,380,200')
+    Expect-Color $liveCameraProbe 'sample_0' 'green'
+    Expect-Color $liveCameraProbe 'sample_2' 'neutral'
+    Write-Host "color-adjust live: screen before=$($liveColorProbe['sample_0']), after=$($liveColorProbe['sample_2']); camera before=$($liveCameraProbe['sample_0']), after=$($liveCameraProbe['sample_2'])"
+    $plainColorPath = Join-Path $artifacts 'color-adjust-plain-live.mp4'
+    $plainColor = Start-RecProcess $rec @('record', '--test-pattern', '-f', '30', '-t', '3', '-o', $plainColorPath)
+    Start-Sleep -Milliseconds 700
+    Send-RecCommand $plainColor 'color screen -50,0,0'
+    $plainColorResult = Stop-RecProcess $plainColor
+    if ($plainColorResult.Code -ne 0) { throw "plain live color recording failed: $($plainColorResult.Text)" }
+    Expect-Text $plainColorResult.Text 'color adjustment requires GPU composition'
+    if ($plainColorResult.Text -notmatch 'Composed 0 frames') { throw "plain identity path composed frames: $($plainColorResult.Text)" }
     # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
     # test pattern fills it and the camera sits near the bottom; mid-recording
     # "place canvas2 1 0 ..." hides the camera there while the main movie keeps showing it.
@@ -410,6 +426,17 @@ try {
     $mainCamera = Get-Probe $rec $mainPath (Join-Path $artifacts 'canvas2-main-camera.probe') @('--sample', '1450,800,380,200')
     Expect-Color $mainCamera 'sample_1' 'green'
     Expect-Color $mainCamera 'sample_4' 'green'
+    $canvasColorVerticalPath = Join-Path $artifacts 'canvas2-color-vertical.mp4'
+    $canvasColor = Record 'canvas2-color' 'canvas2-color.mp4' @('--test-pattern', '-r', '1080p', '-f', '30', '-t', '2',
+        '--screen-color', '-50,0,0', '--canvas2', '720x1280', '--canvas2-place', 'screen:0,0,1,1:0.34,0,0.32,1',
+        '--canvas2-output', $canvasColorVerticalPath)
+    if ($canvasColor.Log -notmatch 'Composed ([1-9]\d*) frames') { throw "second-canvas color path was not composed: $($canvasColor.Log)" }
+    Expect-Field $canvasColor.Probe 'frames' '60'
+    $canvasColorMain = Get-Probe $rec (Join-Path $artifacts 'canvas2-color.mp4') (Join-Path $artifacts 'canvas2-color-main.probe') @('--sample', '600,100,300,100')
+    $canvasColorVertical = Get-Probe $rec $canvasColorVerticalPath (Join-Path $artifacts 'canvas2-color-vertical.probe') @('--sample', '260,100,200,100')
+    Expect-Color $canvasColorMain 'sample_0' 'gray'
+    Expect-Color $canvasColorVertical 'sample_0' 'gray'
+    Write-Host "canvas2 color: landscape=$($canvasColorMain['sample_0']), vertical=$($canvasColorVertical['sample_0'])"
     Expect-Field (Get-Probe $rec $mainPath (Join-Path $artifacts 'canvas2-main.probe')) 'width' '1920'    # Scene layers: the test pattern in the bottom middle, a blue window as a window layer top
     # left, and the part of the display it covers top right. Mid-recording "hide 1" hides the
     # window layer and "move screen" moves the pattern to the bottom left.
@@ -794,6 +821,7 @@ try {
 
     if ($env:REC_E2E_CAPTURE -eq '1') {
         $screen = Record 'screen' 'screen.mp4' @('--display', '1', '-r', '1080p', '-f', '30', '-t', '3', '--codec', 'h264')
+        Expect-Text $screen.Log 'Composed 0 frames'
         Expect-Field $screen.Probe 'codec' 'h264'
         Expect-Field $screen.Probe 'frames' '90'
         $region = Record 'region' 'region.mp4' @('--display', '1', '--region', '0,0,640,360', '-f', '30', '-t', '3', '--codec', 'h264')

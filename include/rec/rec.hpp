@@ -202,6 +202,7 @@ struct Stats {
     std::uint64_t captured = 0;
     std::uint64_t written = 0;
     std::uint64_t dropped = 0;
+    std::uint64_t composed_frames = 0; // Main-canvas frames drawn by the compositor.
     std::uint64_t audio_written = 0; // System audio buffers.
     std::uint64_t audio_dropped = 0;
     std::uint64_t mic_written = 0;

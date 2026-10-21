@@ -578,6 +578,7 @@ std::string redact(const std::string& url) {
 std::string summary(const Options& options, const Stats& stats, double wall_seconds) {
     std::ostringstream out;
     out << "Captured " << stats.captured << ", written " << stats.written << ", dropped " << stats.dropped << '\n';
+    out << "Composed " << stats.composed_frames << " frames\n";
     if (options.system_audio || options.test_tone)
         out << "System audio buffers written " << stats.audio_written << ", dropped " << stats.audio_dropped << " (offset "
             << std::fixed << std::setprecision(1) << stats.system_audio_offset_ms << " ms)\n";

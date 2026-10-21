@@ -552,9 +552,9 @@ try {
     $screenBrightness = (Find $ui 'Screen brightness' $Slider).Handle
     [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](-50)) | Out-Null
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
-    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-gray.png') @(0.4, 0.4, 0.2, 0.2) 'gray' -pollMilliseconds 50
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-gray.png') @(0.4, 0.4, 0.2, 0.2) 'gray' -seconds 2 -pollMilliseconds 50
     Press $ui 'Reset screen color'
-    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-reset.png') @(0.4, 0.4, 0.2, 0.2) 'white' -pollMilliseconds 50
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-reset.png') @(0.4, 0.4, 0.2, 0.2) 'white' -seconds 2 -pollMilliseconds 50
     Set-Check $ui 'Show preview' $false
     Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-off.png') @(0.76, 0.75, 0.18, 0.18) 'green' -Not
     Set-Check $ui 'Show preview' $true
@@ -575,6 +575,14 @@ try {
     $picture.Dispose()
     Wait-Recorded $ui 5
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]2001, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Screen only"
+    $screenBrightness = (Find $ui 'Screen brightness' $Slider).Handle
+    [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](-50)) | Out-Null
+    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]5, $screenBrightness) | Out-Null
+    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
+    Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("screen_color=-50,0,0") } 'screen color was not saved after slider end-track'
+    $settingsAfterColor = [IO.File]::ReadAllText((Join-Path $appHome 'settings.conf'))
+    Expect-Text $settingsAfterColor 'screen_color=-50,0,0'
+    Expect-Text $settingsAfterColor 'camera_color=0,0,0'
     Wait-Recorded $ui 7
     $counted = Text-Of $ui 101
     Press $ui 'Stop Recording'
@@ -584,17 +592,21 @@ try {
     $corner = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-camera-corner.probe') @('--sample', '1450,800,380,200')
     $center = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-camera-center.probe') @('--sample', '800,400,300,200')
     $logo = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-camera-image.probe') @('--sample', '40,40,300,150')
+    $screenColorMovie = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-camera-screen-color.probe') @('--sample', '800,400,300,200')
     Expect-Color $corner 'sample_1' 'green'
     Expect-Color $center 'sample_1' 'white'
     Expect-Color $center 'sample_3' 'green'
     Expect-Color $center 'sample_4' 'green'
+    Expect-Color $screenColorMovie 'sample_1' 'white'
+    Expect-Color $screenColorMovie 'sample_6' 'gray'
     # A slow runner can drop slots and shorten the movie, so the hidden camera is checked in
     # the last sampled second rather than a fixed one.
     $last = 0
     while ($corner.ContainsKey("sample_$($last + 1)")) { $last++ }
     if ($last -lt 5) { throw "the camera recording is too short: $($corner['duration']) s; the app showed '$counted' at Stop" }
-    Expect-Color $corner "sample_$last" 'white'
+    Expect-Color $corner "sample_$last" 'gray'
     foreach ($second in 0..$last) { Expect-Color $logo "sample_$second" 'red' }
+    Press $ui 'Reset screen color'
     Write-Host "6. camera and image: $($corner['frames']) frames ($counted at Stop), corner, full frame, hidden; the preview matched, before Start too"
 
     # 6b. Camera layout: before Start, drag the camera from its corner to the middle and its

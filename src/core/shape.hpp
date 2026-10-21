@@ -226,7 +226,7 @@ inline bool parse_color(std::string_view text, ColorAdjust& out, std::string& er
         !integer(text.substr(0, first), c.brightness) ||
         !integer(text.substr(first + 1, second - first - 1), c.contrast) ||
         !integer(text.substr(second + 1), c.saturation)) {
-        error = "color must be B,C,S (brightness, contrast, saturation), each -100 to 100";
+        error = "color must be B,C,S (brightness, contrast, saturation), each an integer from -100 to 100";
         return false;
     }
     if (auto why = check_color(c); !why.empty()) { error = why; return false; }

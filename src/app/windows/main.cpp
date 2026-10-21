@@ -657,8 +657,10 @@ private:
                 change_volume(id == kSystemVolume ? rec::AudioInput::system : rec::AudioInput::microphone,
                               LOWORD(w) == TB_ENDTRACK);
             else if (id == kRoundness) change_camera_style();
-            else if (id == kScreenBrightness || id == kScreenContrast || id == kScreenSaturation) change_color(false);
-            else if (id == kCameraBrightness || id == kCameraContrast || id == kCameraSaturation) change_color(true);
+            else if (id == kScreenBrightness || id == kScreenContrast || id == kScreenSaturation)
+                change_color(false, LOWORD(w) == TB_ENDTRACK);
+            else if (id == kCameraBrightness || id == kCameraContrast || id == kCameraSaturation)
+                change_color(true, LOWORD(w) == TB_ENDTRACK);
             return 0;
         }
         case WM_TIMER:
@@ -1238,7 +1240,7 @@ private:
         for (int i = 0; i < 3; ++i) SendMessageW(get(ids[i]), TBM_SETPOS, TRUE, values[i]);
     }
 
-    void change_color(bool camera) {
+    void change_color(bool camera, bool save) {
         auto& color = camera ? settings_.camera_color : settings_.screen_color;
         const int ids[] = {camera ? kCameraBrightness : kScreenBrightness,
                            camera ? kCameraContrast : kScreenContrast,
@@ -1246,8 +1248,8 @@ private:
         color = {static_cast<int>(SendMessageW(get(ids[0]), TBM_GETPOS, 0, 0)),
                  static_cast<int>(SendMessageW(get(ids[1]), TBM_GETPOS, 0, 0)),
                  static_cast<int>(SendMessageW(get(ids[2]), TBM_GETPOS, 0, 0))};
-        apply_scene();
-        rec::app::save_settings(settings_path_, settings_);
+        apply_scene(false);
+        if (save) rec::app::save_settings(settings_path_, settings_);
     }
 
     void show_decibels(bool system, int volume) {
@@ -1899,13 +1901,13 @@ private:
     }
 
     // Shows the current scene in the recording or the preview, and saves it.
-    void apply_scene() {
+    void apply_scene(bool save = true) {
         if (auto shown = session_.show_scene(settings_); !shown) {
             note_ = L"Scene not changed: " + wide(shown.error);
             note_attention_ = true;
             note_until_ = GetTickCount64() + 5000;
         }
-        rec::app::save_settings(settings_path_, settings_);
+        if (save) rec::app::save_settings(settings_path_, settings_);
         refresh();
     }
 

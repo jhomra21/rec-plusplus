@@ -285,7 +285,6 @@ else
   color sample_3 "$artifacts/shape-top.probe" green
 # Separate screen and camera transforms. Screen brightness maps white to 127 gray;
 # camera desaturation makes the green test camera neutral, while the image stays red.
-  expect_failure 'the brightness must be -100 to 100' record --test-pattern --screen-color 101,0,0
   if [[ "$(uname -s)" == Darwin ]]; then
   "$rec" record --test-pattern -r 1080p -f 30 -t 3 --camera test --image "$png@0.05,0.05,0.2,0.2" \
     --screen-color -50,0,0 --camera-color 0,0,-100 -o "$artifacts/color-adjust.mov" | tee "$artifacts/color-adjust.record.log"

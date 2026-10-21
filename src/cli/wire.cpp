@@ -233,6 +233,7 @@ std::string encode_stats(const Stats& s) {
     add("captured", std::to_string(s.captured));
     add("written", std::to_string(s.written));
     add("dropped", std::to_string(s.dropped));
+    add("composed_frames", std::to_string(s.composed_frames));
     add("audio_written", std::to_string(s.audio_written));
     add("audio_dropped", std::to_string(s.audio_dropped));
     add("mic_written", std::to_string(s.mic_written));
@@ -276,6 +277,7 @@ bool decode_stat(std::string_view key, std::string_view v, Stats& s) {
     if (key == "captured") return integer(v, s.captured);
     if (key == "written") return integer(v, s.written);
     if (key == "dropped") return integer(v, s.dropped);
+    if (key == "composed_frames") return integer(v, s.composed_frames);
     if (key == "audio_written") return integer(v, s.audio_written);
     if (key == "audio_dropped") return integer(v, s.audio_dropped);
     if (key == "mic_written") return integer(v, s.mic_written);
