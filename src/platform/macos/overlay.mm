@@ -708,6 +708,7 @@ public:
         }
         const bool fits = CVPixelBufferGetWidth(base) == width && CVPixelBufferGetHeight(base) == height;
         const bool screen_adjusted = screen_adjustment.brightness || screen_adjustment.contrast || screen_adjustment.saturation;
+        // Identity colors keep the original full-screen zero-copy path, with no CI pass.
         if (index == kMainCanvas && whole && fits && !count && !mark_count && !screen_adjusted) return CVPixelBufferRetain(base);
         @autoreleasepool {
             CVPixelBufferRef out = nullptr;
@@ -721,6 +722,7 @@ public:
             const CGRect frame = CGRectMake(0, 0, width, height);
             CIImage* result = nil;
             CIImage* screen_picture = [CIImage imageWithCVPixelBuffer:base];
+            // Attach the color filter graph only for a non-identity screen adjustment.
             if (screen.visible && screen_adjusted) screen_picture = color_adjusted(screen_picture, screen_adjustment);
             if (whole && fits) {
                 result = screen.visible ? screen_picture :
@@ -744,6 +746,7 @@ public:
                 const Style& style = jobs[i].style;
                 Layout layout = jobs[i].layout;
                 layout.area = core::shaped_area(style, layout.area, width, height);
+                // Camera and display/window transforms likewise stay off the identity path.
                 if (jobs[i].color.brightness || jobs[i].color.contrast || jobs[i].color.saturation)
                     picture = color_adjusted(picture, jobs[i].color);
                 CGRect target;
