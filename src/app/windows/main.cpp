@@ -50,6 +50,35 @@ constexpr UINT kTrayId = 1;
 // Sent as the WM_COMMAND code for the Source list once its selection change is handled.
 constexpr int kPickRegion = 0x7001;
 
+struct Palette {
+    COLORREF accent = RGB(225, 40, 40);
+    COLORREF surface = RGB(28, 28, 32);
+    COLORREF text = GetSysColor(COLOR_WINDOWTEXT);
+    COLORREF dim_text = GetSysColor(COLOR_GRAYTEXT);
+    bool high_contrast = false;
+
+    static Palette current() {
+        Palette p;
+        HIGHCONTRASTW contrast{sizeof contrast};
+        if (SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof contrast, &contrast, 0) &&
+            (contrast.dwFlags & HCF_HIGHCONTRASTON)) {
+            p.high_contrast = true;
+            p.accent = GetSysColor(COLOR_HIGHLIGHT);
+            p.surface = GetSysColor(COLOR_WINDOW);
+            p.text = GetSysColor(COLOR_WINDOWTEXT);
+            p.dim_text = GetSysColor(COLOR_GRAYTEXT);
+        }
+        return p;
+    }
+    COLORREF paused_accent() const {
+        if (high_contrast) return dim_text;
+        const COLORREF background = GetSysColor(COLOR_WINDOW);
+        return RGB((GetRValue(accent) + GetRValue(background)) / 2,
+                   (GetGValue(accent) + GetGValue(background)) / 2,
+                   (GetBValue(accent) + GetBValue(background)) / 2);
+    }
+};
+
 enum Control : int {
     kStatus = 100, kDetail, kLive, kSystemLabel, kSystemMeter, kSystemVolume, kSystemVolumeText, kSystemMute,
     kMicLabel, kMicMeter, kMicVolume, kMicVolumeText, kMicMute,
@@ -72,6 +101,7 @@ enum Control : int {
     kCameraColorLabel, kCameraBrightnessLabel, kCameraContrastLabel, kCameraSaturationLabel,
     kCameraBrightness, kCameraContrast, kCameraSaturation, kCameraBrightnessValue, kCameraContrastValue,
     kCameraSaturationValue, kCameraColorReset,
+    kScreenStripBox, kCameraStripBox,
     // Each destination's row: kDestination + 10 * index + one of DestinationField.
     kDestination = 400,
 };
@@ -228,8 +258,8 @@ struct RegionPick {
     bool done = false, dragging = false, chosen = false;
     POINT from{}, to{};
     int dpi = 96;
+    COLORREF hole = 0;
 };
-constexpr COLORREF kHole = RGB(255, 0, 255);
 
 RECT span(POINT a, POINT b) { return {std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x), std::max(a.y, b.y)}; }
 
@@ -285,7 +315,7 @@ LRESULT CALLBACK region_procedure(HWND window, UINT message, WPARAM w, LPARAM l)
         SetTextColor(buffer, RGB(255, 255, 255));
         if (pick->dragging) {
             const RECT r = span(pick->from, pick->to);
-            HBRUSH hole = CreateSolidBrush(kHole);
+            HBRUSH hole = CreateSolidBrush(pick->hole);
             FillRect(buffer, &r, hole);
             DeleteObject(hole);
             RECT frame = r;
@@ -332,13 +362,14 @@ std::optional<RECT> pick_region(HINSTANCE instance, UINT dpi) {
     }();
     if (!kind) return std::nullopt;
     RegionPick pick;
+    pick.hole = Palette::current().accent;
     pick.dpi = static_cast<int>(dpi);
     const int x = GetSystemMetrics(SM_XVIRTUALSCREEN), y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     HWND overlay = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"RecRegionPicker",
                                    L"Select a region to record", WS_POPUP, x, y, GetSystemMetrics(SM_CXVIRTUALSCREEN),
                                    GetSystemMetrics(SM_CYVIRTUALSCREEN), nullptr, nullptr, instance, &pick);
     if (!overlay) return std::nullopt;
-    SetLayeredWindowAttributes(overlay, kHole, 150, LWA_ALPHA | LWA_COLORKEY);
+    SetLayeredWindowAttributes(overlay, pick.hole, 150, LWA_ALPHA | LWA_COLORKEY);
     ShowWindow(overlay, SW_SHOW);
     SetForegroundWindow(overlay);
     SetFocus(overlay);
@@ -645,7 +676,7 @@ private:
         FillRect(dc, &area, preview_brush_);
         if (!frame_.number) {
             SetBkMode(dc, TRANSPARENT);
-            SetTextColor(dc, RGB(160, 160, 168));
+            SetTextColor(dc, palette_.dim_text);
             SelectObject(dc, font_);
             InflateRect(&area, -px(16), 0);
             DrawTextW(dc, vertical ? L"9:16" : preview_hint_.c_str(), -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
@@ -779,7 +810,8 @@ private:
         title_ = CreateFontIndirectW(&title);
         for (auto& [id, hwnd] : controls_) {
             const bool header = id == kCaptureHeader || id == kQualityHeader || id == kStreamHeader || id == kReplayHeader ||
-                                id == kCameraHeader || id == kFolderHeader || id == kScenesHeader;
+                                id == kCameraHeader || id == kFolderHeader || id == kScenesHeader ||
+                                id == kScreenColorLabel || id == kCameraColorLabel;
             const HFONT font = id == kStatus ? title_ : header || id == kLive ? bold_ : font_;
             SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
@@ -808,6 +840,7 @@ private:
 
     void create() {
         dpi_ = GetDpiForWindow(window_);
+        palette_ = Palette::current();
         taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
         // Labels come right before their control: screen readers name the control after them.
         label(kStatus, L"Ready to record");
@@ -824,6 +857,28 @@ private:
         add(kMicVolume, TRACKBAR_CLASSW, L"Microphone volume", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
         label(kMicVolumeText, L"");
         check(kMicMute, L"Mute mic");
+        // These color controls are created directly after audio controls so keyboard focus
+        // advances in mixer-strip order.
+        label(kScreenColorLabel, L"Screen");
+        label(kScreenBrightnessLabel, L"Brightness");
+        label(kScreenContrastLabel, L"Contrast");
+        label(kScreenSaturationLabel, L"Saturation");
+        add(kScreenStripBox, WC_BUTTONW, L"", BS_GROUPBOX);
+        for (int id : {kScreenBrightness, kScreenContrast, kScreenSaturation})
+            add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | WS_TABSTOP);
+        for (int id : {kScreenBrightnessValue, kScreenContrastValue, kScreenSaturationValue})
+            label(id, L"0");
+        button(kScreenColorReset, L"Reset screen color");
+        label(kCameraColorLabel, L"Camera");
+        label(kCameraBrightnessLabel, L"Brightness");
+        label(kCameraContrastLabel, L"Contrast");
+        label(kCameraSaturationLabel, L"Saturation");
+        add(kCameraStripBox, WC_BUTTONW, L"", BS_GROUPBOX);
+        for (int id : {kCameraBrightness, kCameraContrast, kCameraSaturation})
+            add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | WS_TABSTOP);
+        for (int id : {kCameraBrightnessValue, kCameraContrastValue, kCameraSaturationValue})
+            label(id, L"0");
+        button(kCameraColorReset, L"Reset camera color");
         button(kRecord, L"&Start Recording", BS_DEFPUSHBUTTON);
         button(kPause, L"&Pause");
         button(kSaveReplay, L"Save Rep&lay");
@@ -832,7 +887,7 @@ private:
         button(kOpenPrivacy, L"Open privacy settings");
         add(kPreview, L"RecPreview", L"Preview", 0);
         add(kPreview2, L"RecPreview", L"Vertical video preview", 0);
-        preview_brush_ = CreateSolidBrush(RGB(28, 28, 32));
+        preview_brush_ = CreateSolidBrush(palette_.surface);
         check(kShowPreview, L"Show pre&view");
 
         label(kCaptureHeader, L"Capture");
@@ -843,17 +898,6 @@ private:
         HWND mic = combo(kMicDevice);
         check(kCursor, L"Show &cursor");
         check(kClicks, L"Show c&licks");
-        label(kScreenColorLabel, L"Screen color");
-        label(kScreenBrightnessLabel, L"Brightness");
-        label(kScreenContrastLabel, L"Contrast");
-        label(kScreenSaturationLabel, L"Saturation");
-        for (int id : {kScreenBrightness, kScreenContrast, kScreenSaturation})
-            add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | WS_TABSTOP);
-        for (int id : {kScreenBrightnessValue, kScreenContrastValue, kScreenSaturationValue,
-                       kCameraBrightnessValue, kCameraContrastValue, kCameraSaturationValue})
-            label(id, L"0");
-        button(kScreenColorReset, L"Reset screen color");
-
         label(kQualityHeader, L"Quality");
         label(kResolutionLabel, L"&Resolution");
         HWND resolution = combo(kResolution);
@@ -923,13 +967,6 @@ private:
         label(kBorderLabel, L"Border");
         HWND border = combo(kBorder);
         check(kShadow, L"Drop shadow");
-        label(kCameraColorLabel, L"Camera color");
-        label(kCameraBrightnessLabel, L"Brightness");
-        label(kCameraContrastLabel, L"Contrast");
-        label(kCameraSaturationLabel, L"Saturation");
-        for (int id : {kCameraBrightness, kCameraContrast, kCameraSaturation})
-            add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | WS_TABSTOP);
-        button(kCameraColorReset, L"Reset camera color");
         button(kPhoneCode, L"Show Phone Code...");
         check(kImage, L"Image overla&y");
         label(kImageFile, L"");
@@ -1004,9 +1041,10 @@ private:
         make_fonts();
         layout();
         fit();
-        idle_icon_ = dot_icon(GetSystemMetricsForDpi(SM_CXSMICON, dpi_), RGB(120, 120, 128), true);
-        recording_icon_ = dot_icon(GetSystemMetricsForDpi(SM_CXSMICON, dpi_), RGB(225, 40, 40), false);
-        HICON big = dot_icon(GetSystemMetricsForDpi(SM_CXICON, dpi_), RGB(225, 40, 40), false);
+        idle_icon_ = dot_icon(GetSystemMetricsForDpi(SM_CXSMICON, dpi_), palette_.dim_text, true);
+        recording_icon_ = dot_icon(GetSystemMetricsForDpi(SM_CXSMICON, dpi_), palette_.accent, false);
+        paused_icon_ = dot_icon(GetSystemMetricsForDpi(SM_CXSMICON, dpi_), palette_.paused_accent(), false);
+        HICON big = dot_icon(GetSystemMetricsForDpi(SM_CXICON, dpi_), palette_.accent, false);
         SendMessageW(window_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
         SendMessageW(window_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(recording_icon_));
         add_tray();
@@ -1052,12 +1090,37 @@ private:
             place(control_id, x + label_width, y, width - label_width, px(240));
             y += row + gap;
         };
-        const auto color_slider = [&](int label_id, int slider_id, int value_id, int label_span) {
+        const auto color_slider = [&](int label_id, int slider_id, int value_id, int label_span, int strip_width) {
             const int value_width = px(46);
             place(label_id, x, y + px(3), label_span - gap, px(18));
-            place(slider_id, x + label_span, y, width - label_span - value_width - gap, px(22));
-            place(value_id, x + width - value_width, y + px(3), value_width, px(18));
+            place(slider_id, x + label_span, y, strip_width - label_span - value_width - gap, px(22));
+            place(value_id, x + strip_width - value_width, y + px(3), value_width, px(18));
             y += px(22) + px(2);
+        };
+        const auto strip = [&](const rec::app::Strip& model) {
+            if (model.kind != rec::app::Strip::Kind::visual || !model.color || !model.source) return;
+            const bool camera_strip = model.source->kind == rec::app::SourceRef::Kind::camera;
+            const int header_id = camera_strip ? kCameraColorLabel : kScreenColorLabel;
+            const int reset_id = camera_strip ? kCameraColorReset : kScreenColorReset;
+            const int box_id = camera_strip ? kCameraStripBox : kScreenStripBox;
+            const int labels[]{camera_strip ? kCameraBrightnessLabel : kScreenBrightnessLabel,
+                               camera_strip ? kCameraContrastLabel : kScreenContrastLabel,
+                               camera_strip ? kCameraSaturationLabel : kScreenSaturationLabel};
+            const int sliders[]{camera_strip ? kCameraBrightness : kScreenBrightness,
+                                camera_strip ? kCameraContrast : kScreenContrast,
+                                camera_strip ? kCameraSaturation : kScreenSaturation};
+            const int values[]{camera_strip ? kCameraBrightnessValue : kScreenBrightnessValue,
+                               camera_strip ? kCameraContrastValue : kScreenContrastValue,
+                               camera_strip ? kCameraSaturationValue : kScreenSaturationValue};
+            const int strip_width = scenes_column;
+            const int top = y;
+            place(header_id, x + px(10), y + px(2), strip_width - px(150), px(20));
+            place(reset_id, x + strip_width - px(112), y, px(104), row);
+            y += row + px(2);
+            for (int i = 0; i < 3; ++i) color_slider(labels[i], sliders[i], values[i], label_width, strip_width);
+            const int bottom = y + px(2);
+            place(box_id, x, top, strip_width, bottom - top);
+            y = bottom + gap;
         };
 
         // Status, levels and the record buttons on the left, the preview on the right.
@@ -1099,12 +1162,8 @@ private:
         place(kCursor, x, y, label_width - gap, px(22));
         place(kClicks, x + label_width, y, width - label_width, px(22));
         y += px(22) + gap;
-        line(kScreenColorLabel, px(20));
-        color_slider(kScreenBrightnessLabel, kScreenBrightness, kScreenBrightnessValue, label_width);
-        color_slider(kScreenContrastLabel, kScreenContrast, kScreenContrastValue, label_width);
-        color_slider(kScreenSaturationLabel, kScreenSaturation, kScreenSaturationValue, label_width);
-        place(kScreenColorReset, x + label_width, y, px(120), row);
-        y += row + gap;
+        for (const auto& model : rec::app::mixer_strips(settings_))
+            if (model.source && model.source->kind == rec::app::SourceRef::Kind::screen) strip(model);
 
         header(kQualityHeader);
         pair(kResolutionLabel, kResolution, row);
@@ -1201,12 +1260,13 @@ private:
         row_of(kBorderLabel, kBorder, true);
         place(kShadow, x + short_label, y, width - short_label, px(22));
         y += row + gap;
-        line(kCameraColorLabel, px(20));
-        color_slider(kCameraBrightnessLabel, kCameraBrightness, kCameraBrightnessValue, short_label);
-        color_slider(kCameraContrastLabel, kCameraContrast, kCameraContrastValue, short_label);
-        color_slider(kCameraSaturationLabel, kCameraSaturation, kCameraSaturationValue, short_label);
-        place(kCameraColorReset, x + short_label, y, px(120), row);
-        y += row + gap;
+        const int camera_strip_controls[]{kCameraColorLabel, kCameraStripBox, kCameraBrightnessLabel,
+            kCameraContrastLabel, kCameraSaturationLabel, kCameraBrightness, kCameraContrast,
+            kCameraSaturation, kCameraBrightnessValue, kCameraContrastValue, kCameraColorReset};
+        for (int id : camera_strip_controls)
+            ShowWindow(get(id), settings_.camera ? SW_SHOWNA : SW_HIDE);
+        for (const auto& model : rec::app::mixer_strips(settings_))
+            if (model.source && model.source->kind == rec::app::SourceRef::Kind::camera) strip(model);
         place(kImage, x, y, box - gap, px(22));
         place(kImageFile, x + box, y + px(4), width - box, px(20));
         y += row;
@@ -1225,14 +1285,21 @@ private:
     }
 
     COLORREF color_for(int id) const {
-        if (id == kLive) return RGB(150, 40, 200);
-        if (id == kStatus) {
-            if (state_ == State::recording) return RGB(210, 30, 30);
-            if (state_ == State::paused) return RGB(190, 120, 0);
+        if (palette_.high_contrast) {
+            if (id == kLive) return palette_.accent;
+            if (id == kStatus && state_ == State::recording) return palette_.accent;
+            if (id == kStatus && state_ == State::paused) return palette_.dim_text;
+            if (id == kPermission) return palette_.dim_text;
+            return (id == kDetail || id == kFolder || id == kImageFile) ? palette_.dim_text : palette_.text;
         }
-        if ((id == kDetail && attention_) || id == kPermission) return RGB(190, 60, 0);
-        if (id == kDetail || id == kFolder || id == kImageFile) return GetSysColor(COLOR_GRAYTEXT);
-        return GetSysColor(COLOR_WINDOWTEXT);
+        if (id == kLive) return palette_.accent;
+        if (id == kStatus) {
+            if (state_ == State::recording) return palette_.accent;
+            if (state_ == State::paused) return palette_.paused_accent();
+        }
+        if ((id == kDetail && attention_) || id == kPermission) return palette_.dim_text;
+        if (id == kDetail || id == kFolder || id == kImageFile) return palette_.dim_text;
+        return palette_.text;
     }
 
     void select(int id, int index) { SendMessageW(get(id), CB_SETCURSEL, static_cast<WPARAM>(index), 0); }
@@ -1766,6 +1833,8 @@ private:
         case kCamera: case kImage:
             if (code == BN_CLICKED) {
                 read_settings();
+                layout();
+                fit();
                 show_scene_sources();
             }
             return;
@@ -2262,11 +2331,8 @@ private:
         DestroyMenu(menu);
     }
 
-    void meter(int id, float peak, float& shown) {
-        // dB scale over the last 60 dB, falling back at about 20 dB a second.
-        const float level = peak > 0 ? std::clamp((20.0f * std::log10(peak) + 60.0f) / 60.0f, 0.0f, 1.0f) : 0.0f;
-        shown = std::max(level, shown - 0.017f);
-        const auto position = static_cast<int>(shown * 1000);
+    void meter(int id, float peak, rec::app::Meter& meter_state) {
+        const auto position = static_cast<int>(meter_state.feed(peak) * 1000);
         // Setting one past and back skips the progress bar's smoothing animation.
         SendMessageW(get(id), PBM_SETPOS, static_cast<WPARAM>(std::min(1000, position + 1)), 0);
         SendMessageW(get(id), PBM_SETPOS, static_cast<WPARAM>(position), 0);
@@ -2329,6 +2395,7 @@ private:
             detail = note_;
             attention_ = note_attention_;
         }
+        if (attention_ && !detail.empty()) detail = L"! " + detail;
         set_text(kStatus, status);
         set_text(kDetail, detail);
         std::wstring live;
@@ -2344,9 +2411,9 @@ private:
         }
         set_text(kLive, live);
         // Hide the last level once recording ends; polling stops with it.
-        if (!active) system_shown_ = mic_shown_ = 0;
-        meter(kSystemMeter, s.system_peak, system_shown_);
-        meter(kMicMeter, s.mic_peak, mic_shown_);
+        if (!active) system_meter_.shown = mic_meter_.shown = 0;
+        meter(kSystemMeter, s.system_peak, system_meter_);
+        meter(kMicMeter, s.mic_peak, mic_meter_);
         if (changed) {
             InvalidateRect(get(kStatus), nullptr, TRUE);
         }
@@ -2441,7 +2508,7 @@ private:
         if (poll && !polling_) SetTimer(window_, kPollTimer, 50, nullptr);
         if (!poll && polling_) KillTimer(window_, kPollTimer);
         polling_ = poll;
-        update_tray(active ? recording_icon_ : idle_icon_,
+        update_tray(active ? (s.state == State::paused ? paused_icon_ : recording_icon_) : idle_icon_,
                     active ? (s.state == State::paused ? L"Rec: paused " : L"Rec: recording ") + clock(s.seconds) +
                                  (s.live ? L", live" : L"")
                            : L"Rec");
@@ -2611,7 +2678,7 @@ private:
     UINT taskbar_created_ = 0;
     HFONT font_ = nullptr, bold_ = nullptr, title_ = nullptr;
     IAccPropServices* access_ = nullptr;
-    HICON idle_icon_ = nullptr, recording_icon_ = nullptr;
+    HICON idle_icon_ = nullptr, recording_icon_ = nullptr, paused_icon_ = nullptr;
     NOTIFYICONDATAW tray_{};
     std::vector<std::pair<int, HWND>> controls_;
     std::array<bool, 500> slider_key_pending_{};
@@ -2657,10 +2724,11 @@ private:
     }
     std::wstring preview_hint_;  // Shown while the preview has no frame.
     HBRUSH preview_brush_ = nullptr;
+    Palette palette_;
     bool quitting_ = false;
     bool attention_ = false;
     State state_ = State::idle;
-    float system_shown_ = 0, mic_shown_ = 0;
+    rec::app::Meter system_meter_, mic_meter_;
     std::string settings_path_;
     Settings settings_;
     std::vector<rec::Display> displays_;
