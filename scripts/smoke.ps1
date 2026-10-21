@@ -350,6 +350,31 @@ try {
     Expect-Color $shape.center 'sample_3' 'green'
     Expect-Color $shape.box 'sample_3' 'green'
     Expect-Color $shape.top 'sample_3' 'green'
+    # Color adjustments are applied by the GPU compositor to the synthetic screen and camera.
+    Expect-Failure 'the brightness must be -100 to 100' @('record', '--test-pattern', '--screen-color', '101,0,0')
+    Expect-Failure 'the saturation must be -100 to 100' @('record', '--test-pattern', '--camera-color', '0,0,-101')
+    $colorPath = Join-Path $artifacts 'color-adjust.mp4'
+    $png = Join-Path $PSScriptRoot 'overlay-test.png'
+    $colored = Record 'color-adjust' 'color-adjust.mp4' @('--test-pattern', '-r', '1080p', '-f', '30', '-t', '3',
+        '--camera', 'test', '--image', "$png@0.05,0.05,0.2,0.2", '--screen-color', '-50,0,0', '--camera-color', '0,0,-100')
+    $screenColor = Get-Probe $rec $colorPath (Join-Path $artifacts 'color-adjust-screen.probe') @('--sample', '600,100,300,100')
+    $cameraColor = Get-Probe $rec $colorPath (Join-Path $artifacts 'color-adjust-camera.probe') @('--sample', '1450,800,380,200')
+    Expect-Color $screenColor 'sample_0' 'gray'
+    Expect-Color $cameraColor 'sample_1' 'neutral'
+    $imageColor = Get-Probe $rec $colorPath (Join-Path $artifacts 'color-adjust-image.probe') @('--sample', '150,100,250,100')
+    Expect-Color $imageColor 'sample_0' 'red'
+    Write-Host "color-adjust static: screen=$($screenColor['sample_0']), camera=$($cameraColor['sample_1']), image=$($imageColor['sample_0'])"
+    $liveColorPath = Join-Path $artifacts 'color-adjust-live.mp4'
+    $liveColor = Start-RecProcess $rec @('record', '--test-pattern', '-r', '1080p', '-f', '30', '-t', '4', '-o', $liveColorPath)
+    Start-Sleep -Milliseconds 1500
+    Send-RecCommand $liveColor 'color screen -50,0,0'
+    $liveColorResult = Stop-RecProcess $liveColor
+    if ($liveColorResult.Code -ne 0) { throw "live color recording failed: $($liveColorResult.Text)" }
+    Expect-Text $liveColorResult.Text 'Screen color -50,0,0'
+    $liveColorProbe = Get-Probe $rec $liveColorPath (Join-Path $artifacts 'color-adjust-live.probe') @('--sample', '600,100,300,100')
+    Expect-Color $liveColorProbe 'sample_0' 'white'
+    Expect-Color $liveColorProbe 'sample_2' 'gray'
+    Write-Host "color-adjust live: before=$($liveColorProbe['sample_0']), after=$($liveColorProbe['sample_2'])"
     # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
     # test pattern fills it and the camera sits near the bottom; mid-recording
     # "place canvas2 1 0 ..." hides the camera there while the main movie keeps showing it.

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <charconv>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -197,6 +198,39 @@ inline bool parse_style(std::string_view text, Style& out, std::string& error) {
     }
     if (auto why = check_style(s); !why.empty()) return bad(why);
     out = s;
+    return true;
+}
+
+inline std::string check_color(const ColorAdjust& c) {
+    if (c.brightness < -100 || c.brightness > 100) return "the brightness must be -100 to 100";
+    if (c.contrast < -100 || c.contrast > 100) return "the contrast must be -100 to 100";
+    if (c.saturation < -100 || c.saturation > 100) return "the saturation must be -100 to 100";
+    return {};
+}
+
+inline std::string color_text(const ColorAdjust& c) {
+    return std::to_string(c.brightness) + ',' + std::to_string(c.contrast) + ',' + std::to_string(c.saturation);
+}
+
+inline bool parse_color(std::string_view text, ColorAdjust& out, std::string& error) {
+    ColorAdjust c;
+    const auto first = text.find(',');
+    const auto second = first == std::string_view::npos ? first : text.find(',', first + 1);
+    const auto integer = [](std::string_view value, int& result) {
+        if (value.empty()) return false;
+        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+        return parsed.ec == std::errc{} && parsed.ptr == value.data() + value.size();
+    };
+    if (first == std::string_view::npos || second == std::string_view::npos ||
+        text.find(',', second + 1) != std::string_view::npos ||
+        !integer(text.substr(0, first), c.brightness) ||
+        !integer(text.substr(first + 1, second - first - 1), c.contrast) ||
+        !integer(text.substr(second + 1), c.saturation)) {
+        error = "color must be B,C,S (brightness, contrast, saturation), each -100 to 100";
+        return false;
+    }
+    if (auto why = check_color(c); !why.empty()) { error = why; return false; }
+    out = c;
     return true;
 }
 

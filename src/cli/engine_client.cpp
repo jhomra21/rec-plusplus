@@ -242,6 +242,9 @@ Result EngineRecorder::set_volume(AudioInput input, double gain_db, bool muted) 
 Result EngineRecorder::set_style(std::size_t index, const Style& style) {
     return simple("style " + std::to_string(index + 1) + ' ' + core::style_text(style));
 }
+Result EngineRecorder::set_color(ColorTarget target, const ColorAdjust& color) {
+    return simple("color " + std::string(target == ColorTarget::screen ? "screen " : "camera ") + core::color_text(color));
+}
 
 Result EngineRecorder::set_layout(std::size_t canvas, std::size_t layer, const Layout& layout) {
     const std::string source = layer == kScreenLayer ? std::string("screen") : std::to_string(layer + 1);

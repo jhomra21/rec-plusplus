@@ -67,6 +67,8 @@ function Expect-Color($probe, [string]$key, [string]$color) {
         'green' { $g -gt 120 -and $g -gt $r + 60 -and $g -gt $b + 60 }
         'red' { $r -gt 170 -and $r -gt $g + 100 -and $r -gt $b + 100 }
         'white' { $r -gt 190 -and $g -gt 190 -and $b -gt 190 }
+        'gray' { $r -ge 100 -and $r -le 160 -and $g -ge 100 -and $g -le 160 -and $b -ge 100 -and $b -le 160 -and [Math]::Max($r, [Math]::Max($g, $b)) - [Math]::Min($r, [Math]::Min($g, $b)) -lt 25 }
+        'neutral' { [Math]::Max($r, [Math]::Max($g, $b)) - [Math]::Min($r, [Math]::Min($g, $b)) -lt 18 }
         'blue' { $b -gt 170 -and $b -gt $r + 100 -and $b -gt $g + 100 }
         'black' { $r -lt 40 -and $g -lt 40 -and $b -lt 40 }
         'yellow' { $r -gt 190 -and $g -gt 150 -and $b -lt $r - 70 }

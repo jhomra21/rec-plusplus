@@ -40,6 +40,10 @@ color() {
       if (want == "green") ok = c[2] > 120 && c[2] > c[1] + 60 && c[2] > c[3] + 60
       if (want == "red") ok = c[1] > 170 && c[1] > c[2] + 100 && c[1] > c[3] + 100
       if (want == "white") ok = c[1] > 190 && c[2] > 190 && c[3] > 190
+      hi = c[1]; if (c[2] > hi) hi = c[2]; if (c[3] > hi) hi = c[3]
+      lo = c[1]; if (c[2] < lo) lo = c[2]; if (c[3] < lo) lo = c[3]
+      if (want == "gray") ok = c[1] >= 100 && c[1] <= 160 && c[2] >= 100 && c[2] <= 160 && c[3] >= 100 && c[3] <= 160 && hi - lo < 25
+      if (want == "neutral") ok = hi - lo < 18
       if (want == "black") ok = c[1] < 40 && c[2] < 40 && c[3] < 40
       if (want == "yellow") ok = c[1] > 190 && c[2] > 150 && c[3] < c[1] - 70
       print key "=" $2
@@ -47,6 +51,10 @@ color() {
     END { exit !(found && ok) }' "$2" || { echo "$1 is not $3" >&2; exit 1; }
 }
 
+# Color controls: Windows implements the GPU transform; macOS currently reports the
+# explicit unsupported-platform error, while still validating the shared CLI values.
+expect_failure 'the brightness must be -100 to 100' record --test-pattern --screen-color 101,0,0
+expect_failure 'the saturation must be -100 to 100' record --test-pattern --camera-color 0,0,-101
 "$rec" --help | grep -q 'native screen recorder'
 expect_failure 'fps must be' record --fps invalid
 expect_failure 'resolution must be' record --resolution gigantic
@@ -276,6 +284,34 @@ else
   color sample_3 "$artifacts/shape-center.probe" green
   color sample_3 "$artifacts/shape-box.probe" green
   color sample_3 "$artifacts/shape-top.probe" green
+  # Separate screen and camera transforms; the Mac path reports its explicit unsupported
+  # message until the Core Image/Metal implementation lands.
+  expect_failure 'the brightness must be -100 to 100' record --test-pattern --screen-color 101,0,0
+  if [[ "$(uname -s)" == Darwin ]]; then
+    if "$rec" record --test-pattern -r 1080p -f 30 -t 3 --camera test --image "$png@0.05,0.05,0.2,0.2" \
+        --screen-color -50,0,0 --camera-color 0,0,-100 -o "$artifacts/color-adjust.mov" >"$tmp/color-adjust.log" 2>&1; then
+      "$rec" probe "$artifacts/color-adjust.mov" --sample 600,100,300,100 | tee "$artifacts/color-adjust-screen.probe"
+      "$rec" probe "$artifacts/color-adjust.mov" --sample 1450,800,380,200 | tee "$artifacts/color-adjust-camera.probe"
+      "$rec" probe "$artifacts/color-adjust.mov" --sample 150,100,250,100 | tee "$artifacts/color-adjust-image.probe"
+      color sample_0 "$artifacts/color-adjust-screen.probe" gray
+      color sample_1 "$artifacts/color-adjust-camera.probe" neutral
+      color sample_0 "$artifacts/color-adjust-image.probe" red
+      printf '%s\n' 'color-adjust static: macOS probes passed'
+      { sleep 1.5; echo 'color screen -50,0,0'; } |
+        "$rec" record --test-pattern -r 1080p -f 30 -t 4 -o "$artifacts/color-adjust-live.mov" >"$artifacts/color-adjust-live.log" 2>&1
+      grep -q 'Screen color -50,0,0' "$artifacts/color-adjust-live.log"
+      "$rec" probe "$artifacts/color-adjust-live.mov" --sample 600,100,300,100 | tee "$artifacts/color-adjust-live.probe"
+      color sample_0 "$artifacts/color-adjust-live.probe" white
+      color sample_2 "$artifacts/color-adjust-live.probe" gray
+      printf '%s\n' 'color-adjust live: macOS probes passed'
+    elif grep -q 'color adjustment is not yet supported on macOS' "$tmp/color-adjust.log"; then
+      printf '%s\n' 'color-adjust: skipped image assertions, macOS reports not yet supported'
+      expect_failure 'color adjustment is not yet supported on macOS' record --test-pattern --camera test --camera-color 0,0,-100
+    else
+      cat "$tmp/color-adjust.log" >&2
+      exit 1
+    fi
+  fi
   # A second canvas: a vertical 720x1280 movie of the same recording. The middle third of the
   # pattern fills it and the camera sits near the bottom; mid-recording "place canvas2 1 0 ..."
   # hides the camera there while the main movie keeps showing it.

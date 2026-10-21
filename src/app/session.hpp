@@ -100,6 +100,7 @@ struct Settings {
     std::string camera_device = "default";  // default, test, phone_camera_id(), or a camera ID.
     std::string phone_token;          // The secret in the phone camera's address; made once, kept.
     rec::Style camera_style;          // The camera's shape, border and shadow in every scene; changeable while recording.
+    rec::ColorAdjust screen_color, camera_color;
     bool image = false;               // Use an image (PNG, JPEG) in the scenes, drawn over everything, fitted.
     std::string image_path;
     std::vector<Layer> layers;        // Drawn above the screen and below the camera, in order.

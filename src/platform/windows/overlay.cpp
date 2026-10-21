@@ -66,6 +66,11 @@ cbuffer Placement : register(b0) {
     float4 box;     // Pixels from the shape box's top-left at the quad's left, top, right, bottom
     float4 size;    // The shape box's width and height, its roundness (a squircle's exponent), the shadow's reach
     float4 fill;    // A border's color
+    float4 color0;
+    float4 color1;
+    float4 color2;
+    float4 color_offset;
+    float color_active;
 };
 struct Vertex { float4 position : SV_Position; float2 uv : TEXCOORD0; float2 local : TEXCOORD1; };
 Vertex vs(uint id : SV_VertexID) {
@@ -102,7 +107,11 @@ float4 color(Vertex v) {
     if (mode > 1.5) return float4(0, 0, 0, cover);
     if (mode > 0.5) return float4(fill.rgb, 1) * cover;
     float4 c = picture.Sample(smooth, v.uv);
-    return (opaque > 0.5 ? float4(c.rgb, 1) : c * fade) * cover;
+    float4 result = opaque > 0.5 ? float4(c.rgb, 1) : c * fade;
+    if (mode < 0.5 && color_active > 0.5) {
+        result.rgb = saturate(float3(dot(result.rgb, color0.xyz), dot(result.rgb, color1.xyz), dot(result.rgb, color2.xyz)) + color_offset.xyz);
+    }
+    return result * cover;
 }
 static const float3 kLuma = float3(0.2126, 0.7152, 0.0722);
 float4 luma(Vertex v) : SV_Target {
@@ -117,8 +126,23 @@ float4 chroma(Vertex v) : SV_Target {
 }
 Texture2D<float> plane_y : register(t1);
 Texture2D<float2> plane_uv : register(t2);
-float4 screen_luma(Vertex v) : SV_Target { return float4(plane_y.Sample(smooth, v.uv), 0, 0, 1); }
-float4 screen_chroma(Vertex v) : SV_Target { return float4(plane_uv.Sample(smooth, v.uv), 0, 1); }
+float3 screen_rgb(Vertex v) {
+    float y = (plane_y.Sample(smooth, v.uv).r - 16.0 / 255) * 255.0 / 219;
+    float2 c = (plane_uv.Sample(smooth, v.uv).rg - 128.0 / 255) * 255.0 / 224;
+    float3 rgb = saturate(float3(y + 1.5748 * c.y, y - 0.1873 * c.x - 0.4681 * c.y, y + 1.8556 * c.x));
+    return color_active > 0.5 ? saturate(float3(dot(rgb, color0.xyz), dot(rgb, color1.xyz), dot(rgb, color2.xyz)) + color_offset.xyz) : rgb;
+}
+float4 screen_luma(Vertex v) : SV_Target {
+    if (color_active < 0.5) return float4(plane_y.Sample(smooth, v.uv), 0, 0, 1);
+    float3 c = screen_rgb(v);
+    return float4(16.0 / 255 + 219.0 / 255 * dot(c, kLuma), 0, 0, 1);
+}
+float4 screen_chroma(Vertex v) : SV_Target {
+    if (color_active < 0.5) return float4(plane_uv.Sample(smooth, v.uv), 0, 1);
+    float3 c = screen_rgb(v); float y = dot(c, kLuma);
+    float2 uv = float2((c.b - y) / 1.8556, (c.r - y) / 1.5748);
+    return float4(128.0 / 255 + 224.0 / 255 * uv, 0, 1);
+}
 )";
 
 struct Constants {
@@ -131,7 +155,24 @@ struct Constants {
     float box[4];
     float size[4];
     float fill[4];
+    float color0[4], color1[4], color2[4], color_offset[4];
+    float color_active;
+    float padding[3];
 };
+
+void color_constants(const ColorAdjust& c, Constants& out) {
+    if (!c.brightness && !c.contrast && !c.saturation) return;
+    out.color_active = 1;
+    const float saturation = 1.0f + c.saturation / 100.0f;
+    const float contrast = 1.0f + c.contrast / 100.0f;
+    const float luma[3] = {0.2126f, 0.7152f, 0.0722f};
+    float* rows[3] = {out.color0, out.color1, out.color2};
+    for (int r = 0; r < 3; ++r)
+        for (int col = 0; col < 3; ++col)
+            rows[r][col] = contrast * (saturation * (r == col ? 1.0f : 0.0f) + (1.0f - saturation) * luma[col]);
+    const float offset = 0.5f * (1.0f - contrast) + c.brightness / 100.0f;
+    out.color_offset[0] = out.color_offset[1] = out.color_offset[2] = offset;
+}
 
 // How a quad is cut to a shape; see the shader's Placement.
 struct Shaping {
@@ -729,6 +770,10 @@ public:
     Result start(ID3D11Device* device, std::uint32_t width, std::uint32_t height, const Options& options,
                  const ClickSource& clicks) {
         if (auto error = core::check_overlays(options.overlays); !error.empty()) return {error};
+        if (auto error = core::check_color(options.screen_color); !error.empty()) return {error};
+        if (auto error = core::check_color(options.camera_color); !error.empty()) return {error};
+        screen_color_ = options.screen_color;
+        camera_color_ = options.camera_color;
         if (!core::valid(options.screen_area)) return {"the screen area must lie inside the frame: x, y, width and height are fractions of it"};
         if (auto error = core::check_crop("the screen", options.screen_crop); !error.empty()) return {error};
         if (auto error = core::check_canvas(options); !error.empty()) return {error};
@@ -849,6 +894,13 @@ public:
         return {};
     }
 
+    Result set_color(ColorTarget target, const ColorAdjust& color) {
+        if (auto error = core::check_color(color); !error.empty()) return {error};
+        std::lock_guard lock(mutex_);
+        (target == ColorTarget::screen ? screen_color_ : camera_color_) = color;
+        return {};
+    }
+
     std::uint64_t camera_frames() const {
         std::lock_guard lock(mutex_);
         std::uint64_t total = 0;
@@ -864,17 +916,24 @@ public:
 
     bool draw(std::size_t canvas, ID3D11DeviceContext* context, ID3D11Texture2D* screen, ID3D11Texture2D* frame,
               unsigned subresource, std::chrono::steady_clock::time_point at) {
-        struct Job { Layer* layer; Layout layout; Style style; };
+        struct Job { Layer* layer; Layout layout; Style style; ColorAdjust color; };
         Job jobs[core::kMaxOverlays];
         std::size_t count = 0;
         Layout shown;
+        ColorAdjust screen_adjustment;
         {
             std::lock_guard lock(mutex_);
             if (canvas > kSecondCanvas || !canvases_[canvas].width) return false;
             const auto& c = canvases_[canvas];
             for (std::size_t i = 0; i < layers_.size(); ++i)
-                if (c.layers[i].visible) jobs[count++] = {&layers_[i], c.layers[i], layers_[i].overlay.style};
+                if (c.layers[i].visible) {
+                    const auto kind = layers_[i].overlay.kind;
+                    const ColorAdjust adjustment = kind == Overlay::Kind::camera ? camera_color_ :
+                        (kind == Overlay::Kind::display || kind == Overlay::Kind::window) ? screen_color_ : ColorAdjust{};
+                    jobs[count++] = {&layers_[i], c.layers[i], layers_[i].overlay.style, adjustment};
+                }
             shown = c.screen;
+            screen_adjustment = screen_color_;
             draw_width_ = c.width;
             draw_height_ = c.height;
         }
@@ -882,7 +941,8 @@ public:
         const std::size_t mark_count = clicks_ && shown.visible
             ? clicks_->marks(at, click_area(), width_, height_, draw_width_, draw_height_, shown.area, shown.crop, marks) : 0;
         const auto full = [](const Area& a) { return a.x <= 0 && a.y <= 0 && a.width >= 1 && a.height >= 1; };
-        const bool whole = canvas == kMainCanvas && shown.visible && full(shown.area) && full(shown.crop);
+        const bool whole = canvas == kMainCanvas && shown.visible && full(shown.area) && full(shown.crop) &&
+                           !screen_adjustment.brightness && !screen_adjustment.contrast && !screen_adjustment.saturation;
         if (whole) context->CopySubresourceRegion(frame, subresource, 0, 0, 0, screen, 0, nullptr);
         if (whole && !count && !mark_count) return true;
         // Before taking the device lock: closing a capture frame takes its frame pool's lock,
@@ -900,10 +960,11 @@ public:
                 const float black[4] = {16.0f / 255, 0, 0, 0}, neutral[4] = {128.0f / 255, 128.0f / 255, 0, 0};
                 context->ClearRenderTargetView(target->luma.Get(), black);
                 context->ClearRenderTargetView(target->chroma.Get(), neutral);
-                if (shown.visible) drawn = draw_screen(context, *target, screen, shown);
+                if (shown.visible) drawn = draw_screen(context, *target, screen, shown, screen_adjustment);
             }
             for (std::size_t i = 0; i < mark_count && drawn; ++i) draw_mark(context, *target, marks[i]);
-            for (std::size_t i = 0; i < count && drawn; ++i) draw_layer(context, *target, *jobs[i].layer, jobs[i].layout, jobs[i].style);
+            for (std::size_t i = 0; i < count && drawn; ++i)
+                draw_layer(context, *target, *jobs[i].layer, jobs[i].layout, jobs[i].style, jobs[i].color);
             end(context);
         }
         if (multithread) multithread->Leave();
@@ -957,7 +1018,8 @@ private:
 
     // One picture into both planes of the frame.
     void quad(ID3D11DeviceContext* context, Target& target, const core::Placement& p, const double (&uv)[4], bool opaque,
-              ID3D11PixelShader* luma, ID3D11PixelShader* chroma, double fade = 1, const Shaping& shaping = {}) {
+              ID3D11PixelShader* luma, ID3D11PixelShader* chroma, double fade = 1, const Shaping& shaping = {},
+              const ColorAdjust& color_adjust = {}) {
         const double w = draw_width_, h = draw_height_;
         Constants constants{
             {static_cast<float>(2 * p.left / w - 1), static_cast<float>(1 - 2 * p.top / h),
@@ -967,10 +1029,11 @@ private:
             static_cast<float>(fade),
             shaping.mode,
             shaping.shape,
-            {}, {}, {}};
+            {}, {}, {}, {}, {}, {}, {}};
         std::copy(std::begin(shaping.box), std::end(shaping.box), constants.box);
         std::copy(std::begin(shaping.size), std::end(shaping.size), constants.size);
         std::copy(std::begin(shaping.fill), std::end(shaping.fill), constants.fill);
+        color_constants(color_adjust, constants);
         context->UpdateSubresource(constants_.Get(), 0, nullptr, &constants, 0, 0);
         const D3D11_VIEWPORT full{0, 0, static_cast<float>(draw_width_), static_cast<float>(draw_height_), 0, 1};
         const D3D11_VIEWPORT half{0, 0, static_cast<float>(draw_width_ / 2), static_cast<float>(draw_height_ / 2), 0, 1};
@@ -985,14 +1048,15 @@ private:
     }
 
     // The main capture, already fitted into a whole main-canvas frame, fitted again into its area.
-    bool draw_screen(ID3D11DeviceContext* context, Target& target, ID3D11Texture2D* screen, const Layout& layout) {
+    bool draw_screen(ID3D11DeviceContext* context, Target& target, ID3D11Texture2D* screen, const Layout& layout,
+                     const ColorAdjust& adjustment) {
         Planes* planes = planes_for(screen);
         if (!planes) return false;
         ID3D11ShaderResourceView* views[2] = {planes->luma.Get(), planes->chroma.Get()};
         context->PSSetShaderResources(1, 2, views);
         const auto p = core::place(Overlay::Kind::image, layout.area, draw_width_, draw_height_, width_, height_, layout.crop);
         const double uv[4] = {p.u0, p.v0, p.u1, p.v1};
-        quad(context, target, p, uv, true, screen_luma_.Get(), screen_chroma_.Get());
+        quad(context, target, p, uv, true, screen_luma_.Get(), screen_chroma_.Get(), 1, {}, adjustment);
         return true;
     }
 
@@ -1052,7 +1116,8 @@ private:
         return {};
     }
 
-    void draw_layer(ID3D11DeviceContext* context, Target& target, Layer& layer, const Layout& layout, const Style& style) {
+    void draw_layer(ID3D11DeviceContext* context, Target& target, Layer& layer, const Layout& layout, const Style& style,
+                    const ColorAdjust& adjustment) {
         if (layer.camera) {
             layer.camera->upload(layer.seen, [&](const std::uint8_t* pixels, std::size_t row, UINT width, UINT height) {
                 if ((width != layer.width || height != layer.height || !layer.texture) && !camera_texture(layer, width, height))
@@ -1097,7 +1162,7 @@ private:
             inside = shaping(0, d.border, 0);
         }
         context->PSSetShaderResources(0, 1, layer.view.GetAddressOf());
-        quad(context, target, p, uv, layer.camera || layer.screen, luma_.Get(), chroma_.Get(), 1, inside);
+        quad(context, target, p, uv, layer.camera || layer.screen, luma_.Get(), chroma_.Get(), 1, inside, adjustment);
     }
 
     // Copies a display's or window's newest frame into the layer's texture.
@@ -1268,6 +1333,7 @@ private:
     ClickSource click_source_;
     core::DesktopRect click_rect_;
     std::uint64_t click_lookups_ = 0;
+    ColorAdjust screen_color_, camera_color_;
     ComPtr<ID3D11ShaderResourceView> click_marks_[2];
 };
 
@@ -1285,6 +1351,7 @@ Result Overlays::set_layout(std::size_t canvas, std::size_t layer, const Layout&
     return impl_->set_layout(canvas, layer, layout);
 }
 Result Overlays::set_style(std::size_t index, const Style& style) { return impl_->set_style(index, style); }
+Result Overlays::set_color(ColorTarget target, const ColorAdjust& color) { return impl_->set_color(target, color); }
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }
 Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { return impl_->set_screen(visible, area); }
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }

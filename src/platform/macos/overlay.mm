@@ -794,6 +794,11 @@ public:
         layers_[index].overlay.style = style;
         return {};
     }
+    Result set_color(ColorTarget, const ColorAdjust& color) {
+        if (auto error = core::check_color(color); !error.empty()) return {error};
+        if (color.brightness || color.contrast || color.saturation) return {"color adjustment is not yet supported on macOS"};
+        return {};
+    }
 
     std::uint64_t camera_frames() const {
         std::lock_guard lock(mutex_);
@@ -973,6 +978,7 @@ Result Overlays::set_layout(std::size_t canvas, std::size_t layer, const Layout&
     return impl_->set_layout(canvas, layer, layout);
 }
 Result Overlays::set_style(std::size_t index, const Style& style) { return impl_->set_style(index, style); }
+Result Overlays::set_color(ColorTarget target, const ColorAdjust& color) { return impl_->set_color(target, color); }
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }
 bool Overlays::camera_lost() const { return impl_->camera_lost(); }
 void Overlays::stop() { impl_->stop(); }

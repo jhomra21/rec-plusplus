@@ -55,6 +55,7 @@ public:
     Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout);
     // A camera's shape, border and shadow, in both canvases.
     Result set_style(std::size_t index, const Style& style);
+    Result set_color(ColorTarget target, const ColorAdjust& color);
     std::uint64_t camera_frames() const;
     bool camera_lost() const;  // A camera stopped delivering frames.
     void stop();

@@ -231,6 +231,10 @@ bool parse_options(const std::vector<std::string>& args, Options& o, std::string
             o.overlays.push_back(overlay(camera ? Overlay::Kind::camera : Overlay::Kind::image, value,
                                          camera ? Area{0.73, 0.715, 0.25, 0.25} : Area{}));
             if (camera && o.overlays.back().source == "phone") o.overlays.back().source = "phone:" + phone_token();
+        } else if (arg == "--screen-color") {
+            if (!core::parse_color(value, o.screen_color, error)) return false;
+        } else if (arg == "--camera-color") {
+            if (!core::parse_color(value, o.camera_color, error)) return false;
         } else if (arg == "--camera-style") {
             if (o.overlays.empty() || o.overlays.back().kind != Overlay::Kind::camera) {
                 error = "--camera-style follows the --camera it styles"; return false;
@@ -402,6 +406,17 @@ std::optional<Request> parse_request(std::string_view line, std::string& error) 
         }
         r.action = Action::style;
         r.layer = *layer;
+    } else if (line.rfind("color ", 0) == 0) {
+        const auto space = line.find(' ', 6);
+        const auto target = space == std::string_view::npos ? line.substr(6) : line.substr(6, space - 6);
+        std::string why;
+        if (space == std::string_view::npos || (target != "screen" && target != "camera") ||
+            !core::parse_color(rest(space + 1), r.color, why)) {
+            error = why.empty() ? "Use: color screen|camera B,C,S" : "Use: color screen|camera B,C,S (" + why + ")";
+            return std::nullopt;
+        }
+        r.action = Action::color;
+        r.color_target = target == "screen" ? ColorTarget::screen : ColorTarget::camera;
     } else if (line.rfind("level ", 0) == 0) {
         const auto args = std::string(rest(6));
         const auto first = args.find(' ');
@@ -514,6 +529,12 @@ Result Controls::apply(const Request& request, double recorded, std::string& mes
         if (n >= visible_.size()) return {"No overlay " + std::to_string(n + 1)};
         if (auto changed = recorder_.set_style(n, request.style); !changed) return changed;
         out << "Styled " << layer_name(n) << ' ' << core::style_text(request.style) << at;
+        break;
+    }
+    case Action::color: {
+        if (auto changed = recorder_.set_color(request.color_target, request.color); !changed) return changed;
+        out << (request.color_target == ColorTarget::screen ? "Screen" : "Camera")
+            << " color " << core::color_text(request.color) << at;
         break;
     }
     case Action::save_replay: {

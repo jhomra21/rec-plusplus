@@ -168,6 +168,14 @@ Settings load_settings(const std::string& path) {
             std::string error;
             if (core::parse_style(value, style, error) && core::check_style(style).empty()) s.camera_style = style;
         }
+        else if (key == "screen_color" || key == "camera_color") {
+            rec::ColorAdjust color;
+            std::string error;
+            if (core::parse_color(value, color, error)) {
+                if (key == "screen_color") s.screen_color = color;
+                else s.camera_color = color;
+            }
+        }
         else if (key == "camera_corner" && known(kCorners, value)) old_corner = value;
         else if (key == "camera_size" && known(kCameraSizes, value)) old_size = value;
         else if (key == "camera_custom") old_custom = parse_area(value);
@@ -292,6 +300,8 @@ bool save_settings(const std::string& path, const Settings& s) {
             << "\ncamera=" << s.camera << "\ncamera_device=" << one_line(s.camera_device)
             << "\nphone_token=" << s.phone_token
             << "\ncamera_style=" << core::style_text(s.camera_style)
+            << "\nscreen_color=" << core::color_text(s.screen_color)
+            << "\ncamera_color=" << core::color_text(s.camera_color)
             << "\nimage=" << s.image << "\nimage_path=" << one_line(s.image_path) << "\npreview=" << s.preview
             << "\nkeep_recording=" << s.keep_recording
             << "\nlast_recording=" << s.last_recording << '\n';
@@ -888,6 +898,8 @@ Result capture_options(const Settings& s, bool test_pattern, Options& o, SourceI
 template <typename Capture>
 Result show(Capture& recorder, const SourceIndices& indices, const Settings& s) {
     const Scene& scene = current_scene(s);
+    if (auto set = recorder.set_color(ColorTarget::screen, s.screen_color); !set) return set;
+    if (auto set = recorder.set_color(ColorTarget::camera, s.camera_color); !set) return set;
     if (indices.camera)
         if (auto set = recorder.set_style(*indices.camera, s.camera_style); !set) return set;
     if (auto set = recorder.set_screen(scene.screen.visible, scene.screen.area); !set) return set;
@@ -916,6 +928,7 @@ std::string preview_key(const Settings& s, bool test_pattern) {
     std::string key = s.source + '\n' + std::to_string(s.display) + '\n' + s.window_app + '\n' + s.window_title +
                       '\n' + s.region + '\n' + s.resolution + '\n' + (s.cursor ? "1" : "0") + (s.clicks ? "1" : "0") +
                       (test_pattern ? "1" : "0") + (uses_vertical(s) ? "v" : "");
+    key += "\nscreen-color " + core::color_text(s.screen_color) + "\ncamera-color " + core::color_text(s.camera_color);
     if (s.camera) key += "\ncamera " + s.camera_device;
     if (s.image) key += "\nimage " + s.image_path;
     for (const Layer& layer : s.layers)
@@ -946,6 +959,8 @@ Result Session::start(const Settings& s, const std::vector<std::string>& keys, b
     Options o;
     SourceIndices indices;
     if (auto built = capture_options(s, test_pattern, o, indices); !built) return built;
+    o.screen_color = s.screen_color;
+    o.camera_color = s.camera_color;
     if (s.folder.empty()) return {"choose a folder for recordings"};
     std::error_code error;
     std::filesystem::create_directories(utf8_path(s.folder), error);
@@ -1161,6 +1176,12 @@ Result Session::show_scene(const Settings& settings) {
         idle_settings_->scenes = settings.scenes;
         idle_settings_->scene = settings.scene;
         idle_settings_->camera_style = settings.camera_style;
+        idle_settings_->screen_color = settings.screen_color;
+        idle_settings_->camera_color = settings.camera_color;
+        if (idle_) {
+            if (auto set = idle_->set_color(ColorTarget::screen, settings.screen_color); !set) return set;
+            if (auto set = idle_->set_color(ColorTarget::camera, settings.camera_color); !set) return set;
+        }
         place_idle();
     }
     return {};
@@ -1194,6 +1215,12 @@ void Session::idle_preview(const Settings* settings, bool test_pattern) {
                 idle_settings_->scenes = settings->scenes;
                 idle_settings_->scene = settings->scene;
                 idle_settings_->camera_style = settings->camera_style;
+                idle_settings_->screen_color = settings->screen_color;
+                idle_settings_->camera_color = settings->camera_color;
+                if (idle_) {
+                    idle_->set_color(ColorTarget::screen, settings->screen_color);
+                    idle_->set_color(ColorTarget::camera, settings->camera_color);
+                }
                 place_idle();
             }
             return;

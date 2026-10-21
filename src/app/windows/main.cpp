@@ -66,6 +66,10 @@ enum Control : int {
     kAddDisplay, kAddWindow, kRemoveSource,
     kVerticalMovie, kVerticalLayoutLabel, kVerticalLayout, kPreview2, kAddDestination,
     kPermission, kOpenPrivacy,
+    kScreenColorLabel, kScreenBrightnessLabel, kScreenContrastLabel, kScreenSaturationLabel,
+    kScreenBrightness, kScreenContrast, kScreenSaturation, kScreenColorReset,
+    kCameraColorLabel, kCameraBrightnessLabel, kCameraContrastLabel, kCameraSaturationLabel,
+    kCameraBrightness, kCameraContrast, kCameraSaturation, kCameraColorReset,
     // Each destination's row: kDestination + 10 * index + one of DestinationField.
     kDestination = 400,
 };
@@ -653,6 +657,8 @@ private:
                 change_volume(id == kSystemVolume ? rec::AudioInput::system : rec::AudioInput::microphone,
                               LOWORD(w) == TB_ENDTRACK);
             else if (id == kRoundness) change_camera_style();
+            else if (id == kScreenBrightness || id == kScreenContrast || id == kScreenSaturation) change_color(false);
+            else if (id == kCameraBrightness || id == kCameraContrast || id == kCameraSaturation) change_color(true);
             return 0;
         }
         case WM_TIMER:
@@ -799,6 +805,13 @@ private:
         HWND mic = combo(kMicDevice);
         check(kCursor, L"Show &cursor");
         check(kClicks, L"Show c&licks");
+        label(kScreenColorLabel, L"Screen color");
+        label(kScreenBrightnessLabel, L"Brightness");
+        label(kScreenContrastLabel, L"Contrast");
+        label(kScreenSaturationLabel, L"Saturation");
+        for (int id : {kScreenBrightness, kScreenContrast, kScreenSaturation})
+            add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
+        button(kScreenColorReset, L"Reset screen color");
 
         label(kQualityHeader, L"Quality");
         label(kResolutionLabel, L"&Resolution");
@@ -869,6 +882,13 @@ private:
         label(kBorderLabel, L"Border");
         HWND border = combo(kBorder);
         check(kShadow, L"Drop shadow");
+        label(kCameraColorLabel, L"Camera color");
+        label(kCameraBrightnessLabel, L"Brightness");
+        label(kCameraContrastLabel, L"Contrast");
+        label(kCameraSaturationLabel, L"Saturation");
+        for (int id : {kCameraBrightness, kCameraContrast, kCameraSaturation})
+            add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
+        button(kCameraColorReset, L"Reset camera color");
         button(kPhoneCode, L"Show Phone Code...");
         check(kImage, L"Image overla&y");
         label(kImageFile, L"");
@@ -894,6 +914,11 @@ private:
         SendMessageW(get(kRoundness), TBM_SETRANGEMIN, FALSE, 0);
         SendMessageW(get(kRoundness), TBM_SETRANGEMAX, FALSE, 100);
         SendMessageW(get(kRoundness), TBM_SETPAGESIZE, 0, 10);
+        for (int id : {kScreenBrightness, kScreenContrast, kScreenSaturation, kCameraBrightness, kCameraContrast, kCameraSaturation}) {
+            SendMessageW(get(id), TBM_SETRANGEMIN, FALSE, -100);
+            SendMessageW(get(id), TBM_SETRANGEMAX, FALSE, 100);
+            SendMessageW(get(id), TBM_SETPAGESIZE, 0, 10);
+        }
         for (const auto& c : cameras_) SendMessageW(camera, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(c.name).c_str()));
         for (auto seconds : rec::app::kReplayLengths)
             SendMessageW(replay, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(duration_label(seconds).c_str()));
@@ -911,6 +936,12 @@ private:
             access_->SetHwndPropStr(get(kMicVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Microphone volume");
             access_->SetHwndPropStr(get(kRoundness), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Camera roundness");
             access_->SetHwndPropStr(get(kCameraDevice), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Camera device");
+            const std::pair<int, const wchar_t*> color_names[] = {
+                {kScreenBrightness, L"Screen brightness"}, {kScreenContrast, L"Screen contrast"},
+                {kScreenSaturation, L"Screen saturation"}, {kCameraBrightness, L"Camera brightness"},
+                {kCameraContrast, L"Camera contrast"}, {kCameraSaturation, L"Camera saturation"}};
+            for (const auto& [id, name] : color_names)
+                access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, name);
         }
 
         show_settings();
@@ -965,6 +996,11 @@ private:
             place(control_id, x + label_width, y, width - label_width, px(240));
             y += row + gap;
         };
+        const auto color_slider = [&](int label_id, int slider_id) {
+            place(label_id, x, y + px(3), label_width - gap, px(18));
+            place(slider_id, x + label_width, y, width - label_width, px(22));
+            y += px(22) + px(2);
+        };
 
         // Status, levels and the record buttons on the left, the preview on the right.
         width = column;
@@ -1005,6 +1041,12 @@ private:
         place(kCursor, x, y, label_width - gap, px(22));
         place(kClicks, x + label_width, y, width - label_width, px(22));
         y += px(22) + gap;
+        line(kScreenColorLabel, px(20));
+        color_slider(kScreenBrightnessLabel, kScreenBrightness);
+        color_slider(kScreenContrastLabel, kScreenContrast);
+        color_slider(kScreenSaturationLabel, kScreenSaturation);
+        place(kScreenColorReset, x + label_width, y, px(120), row);
+        y += row + gap;
 
         header(kQualityHeader);
         pair(kResolutionLabel, kResolution, row);
@@ -1101,6 +1143,12 @@ private:
         row_of(kBorderLabel, kBorder, true);
         place(kShadow, x + short_label, y, width - short_label, px(22));
         y += row + gap;
+        line(kCameraColorLabel, px(20));
+        color_slider(kCameraBrightnessLabel, kCameraBrightness);
+        color_slider(kCameraContrastLabel, kCameraContrast);
+        color_slider(kCameraSaturationLabel, kCameraSaturation);
+        place(kCameraColorReset, x + short_label, y, px(120), row);
+        y += row + gap;
         place(kImage, x, y, box - gap, px(22));
         place(kImageFile, x + box, y + px(4), width - box, px(20));
         y += row;
@@ -1147,6 +1195,7 @@ private:
         show_volume(rec::AudioInput::microphone);
         set_check(kCursor, s.cursor);
         set_check(kClicks, s.clicks);
+        show_color(false);
         select(kResolution, choice_index(kResolutions, s.resolution));
         select(kFps, static_cast<int>(std::find(kFrameRates.begin(), kFrameRates.end(), s.fps) - kFrameRates.begin()) % static_cast<int>(kFrameRates.size()));
         select(kCodec, choice_index(kCodecs, s.codec));
@@ -1163,6 +1212,7 @@ private:
             if (cameras_[i].id == s.camera_device) camera = static_cast<int>(i);
         select(kCameraDevice, camera);
         show_camera_style();
+        show_color(true);
         set_check(kImage, s.image);
         set_check(kShowPreview, s.preview);
         show_image();
@@ -1177,6 +1227,27 @@ private:
         SendMessageW(get(system ? kSystemVolume : kMicVolume), TBM_SETPOS, TRUE, volume);
         show_decibels(system, volume);
         set_check(system ? kSystemMute : kMicMute, system ? settings_.system_muted : settings_.mic_muted);
+    }
+
+    void show_color(bool camera) {
+        const auto& color = camera ? settings_.camera_color : settings_.screen_color;
+        const int ids[] = {camera ? kCameraBrightness : kScreenBrightness,
+                           camera ? kCameraContrast : kScreenContrast,
+                           camera ? kCameraSaturation : kScreenSaturation};
+        const int values[] = {color.brightness, color.contrast, color.saturation};
+        for (int i = 0; i < 3; ++i) SendMessageW(get(ids[i]), TBM_SETPOS, TRUE, values[i]);
+    }
+
+    void change_color(bool camera) {
+        auto& color = camera ? settings_.camera_color : settings_.screen_color;
+        const int ids[] = {camera ? kCameraBrightness : kScreenBrightness,
+                           camera ? kCameraContrast : kScreenContrast,
+                           camera ? kCameraSaturation : kScreenSaturation};
+        color = {static_cast<int>(SendMessageW(get(ids[0]), TBM_GETPOS, 0, 0)),
+                 static_cast<int>(SendMessageW(get(ids[1]), TBM_GETPOS, 0, 0)),
+                 static_cast<int>(SendMessageW(get(ids[2]), TBM_GETPOS, 0, 0))};
+        apply_scene();
+        rec::app::save_settings(settings_path_, settings_);
     }
 
     void show_decibels(bool system, int volume) {
@@ -1499,6 +1570,20 @@ private:
         case kRecord: case kMenuRecord: toggle_record(); return;
         case kPause: case kMenuPause: toggle_pause(); return;
         case kSaveReplay: case kMenuReplay: save_replay(); return;
+        case kScreenColorReset:
+            settings_.screen_color = {};
+            show_color(false);
+            rec::app::save_settings(settings_path_, settings_);
+            apply_scene();
+            refresh();
+            return;
+        case kCameraColorReset:
+            settings_.camera_color = {};
+            show_color(true);
+            rec::app::save_settings(settings_path_, settings_);
+            apply_scene();
+            refresh();
+            return;
         case kMenuShow: show_window(); return;
         case kOpenFolder: case kMenuFolder: open_folder(); return;
         case kMenuQuit: quit(); return;

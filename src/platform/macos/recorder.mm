@@ -630,6 +630,9 @@ public:
     Result start() {
         @autoreleasepool {
             if (active_) return {"already recording"};
+            if (options_.screen_color.brightness || options_.screen_color.contrast || options_.screen_color.saturation ||
+                options_.camera_color.brightness || options_.camera_color.contrast || options_.camera_color.saturation)
+                return {"color adjustment is not yet supported on macOS"};
             window_closed_.store(false);
             if (options_.preview_only) {
                 if (!options_.preview_width) return {"a preview needs a preview width"};
@@ -952,6 +955,12 @@ public:
     Result set_style(std::size_t index, const Style& style) {
         if (!overlays_) return {"no overlay " + std::to_string(index + 1)};
         return overlays_->set_style(index, style);
+    }
+    Result set_color(ColorTarget target, const ColorAdjust& color) {
+        if (auto error = core::check_color(color); !error.empty()) return {error};
+        if (color.brightness || color.contrast || color.saturation) return {"color adjustment is not yet supported on macOS"};
+        if (!overlays_) return {};
+        return overlays_->set_color(target, color);
     }
     Result set_volume(AudioInput input, double gain_db, bool muted) {
         if (!(gain_db >= -60 && gain_db <= 24)) return {"volume must be between -60 and 24 dB"};
@@ -1964,6 +1973,7 @@ Result Recorder::set_layout(std::size_t canvas, std::size_t layer, const Layout&
     return impl_->capture.set_layout(canvas, layer, layout);
 }
 Result Recorder::set_style(std::size_t index, const Style& style) { return impl_->capture.set_style(index, style); }
+Result Recorder::set_color(ColorTarget target, const ColorAdjust& color) { return impl_->capture.set_color(target, color); }
 bool Recorder::preview(PreviewFrame& frame) const { return impl_->capture.preview(frame, kMainCanvas); }
 bool Recorder::preview(PreviewFrame& frame, std::size_t canvas) const { return impl_->capture.preview(frame, canvas); }
 void Recorder::show_preview(bool on) noexcept { impl_->capture.show_preview(on); }

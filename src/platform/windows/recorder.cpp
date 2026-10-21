@@ -859,8 +859,9 @@ public:
             pattern_[0] = pattern_frame(size_, false);
             pattern_[1] = pattern_frame(size_, true);
             if (!pattern_[0] || !pattern_[1]) { stop(); return {"synthetic frame allocation failed"}; }
-            if (layered() || options_.preview_width)
-                if (auto created = create_pattern_device(); !created) { stop(); return created; }
+            // Keep the compositor ready even for a plain synthetic recording: color changes
+            // can arrive at any point through the live control interface.
+            if (auto created = create_pattern_device(); !created) { stop(); return created; }
             // Marks land as if display options_.display were captured.
             if (const auto list = monitors(); options_.display >= 1 && options_.display <= list.size())
                 click_source_.monitor = list[options_.display - 1].handle;
@@ -1121,6 +1122,14 @@ public:
         if (!overlays_) return {"no overlay " + std::to_string(index + 1)};
         return overlays_->set_style(index, style);
     }
+    Result set_color(ColorTarget target, const ColorAdjust& color) {
+        if (auto error = core::check_color(color); !error.empty()) return {error};
+        if (!overlays_) {
+            if (!color.brightness && !color.contrast && !color.saturation) return {};
+            return {"color adjustment requires GPU composition"};
+        }
+        return overlays_->set_color(target, color);
+    }
     Result set_volume(AudioInput input, double gain_db, bool muted) {
         if (!(gain_db >= -60 && gain_db <= 24)) return {"volume must be between -60 and 24 dB"};
         auto& source = audio_[input == AudioInput::system ? kSystem : kMic];
@@ -1153,7 +1162,9 @@ private:
     bool layered() const {
         const auto& a = options_.screen_area;
         const auto& c = options_.screen_crop;
-        return !options_.overlays.empty() || options_.clicks || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 ||
+        return !options_.overlays.empty() || options_.clicks || options_.screen_color.brightness || options_.screen_color.contrast ||
+               options_.screen_color.saturation || options_.camera_color.brightness || options_.camera_color.contrast ||
+               options_.camera_color.saturation || !options_.screen_visible || a.x > 0 || a.y > 0 || a.width < 1 ||
                a.height < 1 || c.x > 0 || c.y > 0 || c.width < 1 || c.height < 1 || options_.canvas2.width;
     }
 
@@ -2292,6 +2303,7 @@ Result Recorder::set_layout(std::size_t canvas, std::size_t layer, const Layout&
     return impl_->capture.set_layout(canvas, layer, layout);
 }
 Result Recorder::set_style(std::size_t index, const Style& style) { return impl_->capture.set_style(index, style); }
+Result Recorder::set_color(ColorTarget target, const ColorAdjust& color) { return impl_->capture.set_color(target, color); }
 bool Recorder::preview(PreviewFrame& frame) const { return impl_->capture.preview(frame, kMainCanvas); }
 bool Recorder::preview(PreviewFrame& frame, std::size_t canvas) const { return impl_->capture.preview(frame, canvas); }
 void Recorder::show_preview(bool on) noexcept { impl_->capture.show_preview(on); }

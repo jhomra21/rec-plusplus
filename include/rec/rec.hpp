@@ -65,6 +65,12 @@ struct Style {
     bool shadow = false;                  // A soft drop shadow below the camera.
 };
 
+// Color adjustment applied independently to screen-type sources or camera sources.
+struct ColorAdjust {
+    int brightness = 0, contrast = 0, saturation = 0;
+};
+enum class ColorTarget { screen, camera };
+
 // A picture drawn over the capture in every frame: an image file, a camera, or another
 // display or window captured live. Overlays draw in order, later ones on top.
 struct Overlay {
@@ -143,6 +149,8 @@ struct Options {
     Area screen_area;
     bool screen_visible = true;
     Area screen_crop; // The part of the capture shown, in fractions of it.
+    ColorAdjust screen_color;
+    ColorAdjust camera_color;
     std::vector<Overlay> overlays; // At most 15, drawn over the capture.
     Canvas canvas2; // A second canvas, usually vertical; off while its width is 0.
     // Make preview() frames up to this many pixels wide, in the output's shape; 0 = no preview.
@@ -323,6 +331,8 @@ public:
     Result set_layout(std::size_t canvas, std::size_t layer, const Layout& layout);
     // Changes a camera overlay's shape, border and shadow from the next frame on.
     Result set_style(std::size_t index, const Style& style);
+    // Applies to every matching source from the next frame on.
+    Result set_color(ColorTarget target, const ColorAdjust& color);
     // Changes a source's volume (-60 to 24 dB) and mute in the program audio while
     // recording, ramped over one audio buffer.
     Result set_volume(AudioInput input, double gain_db, bool muted);

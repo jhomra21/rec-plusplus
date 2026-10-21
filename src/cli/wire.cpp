@@ -119,6 +119,10 @@ std::vector<std::string> encode_options(const Options& o) {
     add("screen_area", area_text(o.screen_area));
     add("screen_visible", yes(o.screen_visible));
     add("screen_crop", area_text(o.screen_crop));
+    if (o.screen_color.brightness || o.screen_color.contrast || o.screen_color.saturation)
+        add("screen_color", core::color_text(o.screen_color));
+    if (o.camera_color.brightness || o.camera_color.contrast || o.camera_color.saturation)
+        add("camera_color", core::color_text(o.camera_color));
     add("preview_width", std::to_string(o.preview_width));
     add("preview_only", yes(o.preview_only));
     for (const auto& l : o.overlays) {
@@ -186,6 +190,8 @@ bool decode_options(const std::vector<std::string>& words, Options& o, std::stri
         else if (key == "screen_area") ok = area(v, o.screen_area);
         else if (key == "screen_visible") ok = flag(v, o.screen_visible);
         else if (key == "screen_crop") ok = area(v, o.screen_crop);
+        else if (key == "screen_color") { std::string why; ok = core::parse_color(v, o.screen_color, why); }
+        else if (key == "camera_color") { std::string why; ok = core::parse_color(v, o.camera_color, why); }
         else if (key == "canvas2") {
             const auto x = v.find('x');
             ok = x != std::string_view::npos && integer(v.substr(0, x), o.canvas2.width) && integer(v.substr(x + 1), o.canvas2.height);

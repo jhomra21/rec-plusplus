@@ -236,7 +236,7 @@ function Picture-Color($bitmap, [double]$x, [double]$y, [double]$w, [double]$h) 
     return @{ color = "$([int]($r / 100)),$([int]($g / 100)),$([int]($b / 100))" }
 }
 # Waits until the preview's color over part of it is (or with -Not, is not) the given one.
-function Wait-PreviewColor($ui, [string]$path, [double[]]$area, [string]$color, [switch]$Not, [int]$seconds = 15) {
+function Wait-PreviewColor($ui, [string]$path, [double[]]$area, [string]$color, [switch]$Not, [int]$seconds = 15, [int]$pollMilliseconds = 200) {
     $deadline = (Get-Date).AddSeconds($seconds)
     for (;;) {
         $picture = Snapshot-Preview $ui $path
@@ -246,7 +246,7 @@ function Wait-PreviewColor($ui, [string]$path, [double[]]$area, [string]$color, 
         try { Expect-Color $seen 'color' $color } catch { $same = $false }
         if ($same -ne [bool]$Not) { return }
         if ((Get-Date) -gt $deadline) { throw "the preview at $($area -join ',') is $($seen['color']); expected $(if ($Not) { 'not ' })$color" }
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Milliseconds $pollMilliseconds
     }
 }
 # Drags in the preview from one point to another, given as fractions of the 16:9 frame,
@@ -548,6 +548,13 @@ try {
     $idle = Join-Path $Artifacts 'app-preview-idle.png'
     Wait-PreviewColor $ui $idle @(0.76, 0.75, 0.18, 0.18) 'green'
     Wait-PreviewColor $ui $idle @(0.02, 0.03, 0.15, 0.15) 'red'
+    # Screen brightness changes the test-pattern preview live; Reset restores white.
+    $screenBrightness = (Find $ui 'Screen brightness' $Slider).Handle
+    [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](-50)) | Out-Null
+    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-gray.png') @(0.4, 0.4, 0.2, 0.2) 'gray' -pollMilliseconds 50
+    Press $ui 'Reset screen color'
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-reset.png') @(0.4, 0.4, 0.2, 0.2) 'white' -pollMilliseconds 50
     Set-Check $ui 'Show preview' $false
     Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-off.png') @(0.76, 0.75, 0.18, 0.18) 'green' -Not
     Set-Check $ui 'Show preview' $true
