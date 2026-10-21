@@ -557,6 +557,39 @@ try {
         Expect-Text $canvases.Log 'Streaming to rtmp://127.0.0.1:1935/live/****; the second canvas: rtmp://127.0.0.1:1935/live/****'
         if ($canvases.Log -notmatch 'Second canvas 720x1280: (11[5-9]|120) frames, skipped [0-5](\D|$)') { throw "the second canvas lost frames: $($canvases.Log)" }
         if ($canvases.Log.Contains('smokekey')) { throw 'a stream key was printed' }
+        # A TikTok-shaped signed key: MediaMTX routes without the query, which stays out of the log.
+        $tiktokKey = 'stream-REHEARSAL_ID?expire=EXAMPLE_EXPIRY&sign=EXAMPLE_SIGNATURE'
+        $tiktok = Record 'stream-tiktok' 'stream-tiktok-local.mp4' @('--test-pattern', '--test-tone', '-r', '1080p', '-f', '30', '-t', '6', '--stream-bitrate', '6000',
+            '--stream', 'rtmp://127.0.0.1:1935/live/tiktok-landscape', '--canvas2', 'vertical', '--canvas2-place', 'screen:0,0,1,1:0.34,0,0.32,1',
+            '--canvas2-stream', "rtmp://127.0.0.1:1935/game/$tiktokKey")
+        if ($tiktok.Log -match 'REHEARSAL_ID|EXAMPLE_SIGNATURE') { throw 'the TikTok stream key or signature was printed' }
+        $behind = if ($env:GITHUB_ACTIONS -eq 'true') { 0.25 } else { 0 }
+        if ($tiktok.Log -notmatch 'Second canvas 1080x1920: (13[5-9]|1[4-7][0-9]|180) frames, skipped ([0-9]|[1-3][0-9]|4[0-5])(\D|$)') {
+            throw "the TikTok second canvas lost frames: $($tiktok.Log)"
+        }
+        $tiktokPath = Join-Path $received 'game\stream-REHEARSAL_ID'
+        $file = Get-ChildItem -Recurse -Filter *.mp4 $tiktokPath | Select-Object -First 1
+        if (-not $file) { throw 'MediaMTX recorded nothing for the TikTok-shaped stream' }
+        $tiktokReceived = Get-Probe $rec $file.FullName (Join-Path $artifacts 'stream-tiktok-received.probe')
+        Expect-Field $tiktokReceived 'codec' 'h264'
+        Expect-Field $tiktokReceived 'width' '1080'
+        Expect-Field $tiktokReceived 'height' '1920'
+        Expect-Field $tiktokReceived 'audio_codec' 'aac'
+        Expect-Within $tiktokReceived 'frames' $(if ($behind -gt 0) { 135 } else { 129 }) 180
+        Expect-Within $tiktokReceived 'av_sync_events' 5 6
+        Expect-Within $tiktokReceived 'av_offset_max_ms' 0 $(if ($behind -gt 0) { 35 } else { 20 })
+        $file = Get-ChildItem -Recurse -Filter *.mp4 (Join-Path $received 'live\tiktok-landscape') | Select-Object -First 1
+        if (-not $file) { throw 'MediaMTX recorded nothing for the accompanying landscape stream' }
+        $tiktokLandscape = Get-Probe $rec $file.FullName (Join-Path $artifacts 'stream-tiktok-landscape-received.probe')
+        Expect-Field $tiktokLandscape 'codec' 'h264'
+        Expect-Field $tiktokLandscape 'width' '1920'
+        Expect-Field $tiktokLandscape 'height' '1080'
+        Expect-Field $tiktokLandscape 'audio_codec' 'aac'
+        Expect-Within $tiktokLandscape 'frames' $(if ($behind -gt 0) { 135 } else { 174 }) 180
+        Expect-Within $tiktokLandscape 'av_sync_events' 5 6
+        Expect-Within $tiktokLandscape 'av_offset_max_ms' 0 $(if ($behind -gt 0) { 35 } else { 20 })
+        $canvasLine = ($tiktok.Log -split "`n" | Where-Object { $_ -match 'Second canvas 1080x1920:' } | Select-Object -First 1).Trim()
+        Write-Host "$canvasLine; TikTok-shaped stream received $($tiktokReceived['frames']) vertical and $($tiktokLandscape['frames']) landscape frames"
         # Losing one server ends only its stream.
         $relay = Start-TcpRelay 1937 1935
         $onePath = Join-Path $artifacts 'stream-one-lost.mp4'
