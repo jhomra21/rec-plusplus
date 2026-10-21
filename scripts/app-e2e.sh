@@ -137,6 +137,7 @@ grep -qx 'camera-strip-hidden=ok' "$report"
 grep -qx 'tab-strip-order=ok' "$report"
 grep -qx 'status-recording-color=ok' "$report"
 grep -qx 'status-paused-color=ok' "$report"
+grep -qx 'attention-text=ok' "$report"
 grep -qx 'live-badge=ok' "$report"
 grep -qx 'camera-strip-visible=ok' "$report"
 [[ -s "$artifacts/app-strips.png" ]] || { echo 'the app window strip screenshot is missing' >&2; exit 1; }
