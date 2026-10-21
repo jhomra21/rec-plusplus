@@ -46,6 +46,9 @@ using rec::app::Settings;
 using rec::app::State;
 using rec::app::Status;
 
+constexpr CGFloat kControlTitleWidth = 82;
+constexpr CGFloat kControlValueWidth = 42;
+
 NSString* ns(const std::string& text) { return [NSString stringWithUTF8String:text.c_str()] ?: @""; }
 std::string utf8(NSString* text) { return text.UTF8String ? std::string(text.UTF8String) : std::string(); }
 
@@ -395,7 +398,6 @@ struct PreviewHit {
     NSDate* _noteUntil;
     bool _noteAttention;
     bool _quitting;
-    bool _resettingSlider;
     bool _attention;
     bool _saved;
     State _state;
@@ -780,6 +782,7 @@ struct PreviewHit {
     [app addItemWithTitle:@"Quit Rec" action:@selector(terminate:) keyEquivalent:@"q"];
     // Text fields need the Edit menu's key equivalents to paste a stream key.
     NSMenu* edit = [[NSMenu alloc] initWithTitle:@"Edit"];
+    // Cmd+0 resets the focused slider; a future Cmd+0 menu item would steal that shortcut.
     [edit addItemWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@"z"];
     [edit addItemWithTitle:@"Redo" action:@selector(redo:) keyEquivalent:@"Z"];
     [edit addItem:NSMenuItem.separatorItem];
@@ -982,7 +985,7 @@ struct PreviewHit {
     _micMute = [self check:@"Mute mic"];
     // A source's name and meter, then its volume, value and mute below.
     const auto volumeRow = ^NSStackView*(NSSlider* slider, NSTextField* value, NSButton* mute) {
-        [value.widthAnchor constraintEqualToConstant:50].active = YES;
+        [value.widthAnchor constraintEqualToConstant:kControlValueWidth].active = YES;
         [mute.widthAnchor constraintEqualToConstant:110].active = YES;
         NSStackView* row = [NSStackView stackViewWithViews:@[slider, value, mute]];
         row.distribution = NSStackViewDistributionFill;
@@ -991,8 +994,12 @@ struct PreviewHit {
         [slider.widthAnchor constraintGreaterThanOrEqualToConstant:120].active = YES;
         return row;
     };
-    NSGridView* meters = [self grid:@[@[label(@"System audio"), _systemMeter], @[volumeRow(_systemVolume, _systemVolumeText, _systemMute)],
-                                      @[label(@"Microphone"), _micMeter], @[volumeRow(_micVolume, _micVolumeText, _micMute)]]];
+    NSTextField* systemTitle = label(@"System audio");
+    NSTextField* micTitle = label(@"Microphone");
+    [systemTitle.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
+    [micTitle.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
+    NSGridView* meters = [self grid:@[@[systemTitle, _systemMeter], @[volumeRow(_systemVolume, _systemVolumeText, _systemMute)],
+                                      @[micTitle, _micMeter], @[volumeRow(_micVolume, _micVolumeText, _micMute)]]];
 
     // The newest frame as encoded, in the output's shape on dark gray.
     _preview = [[PreviewView alloc] init];
@@ -1310,10 +1317,10 @@ struct PreviewHit {
         NSString* title = @[@"Brightness", @"Contrast", @"Saturation"][i];
         NSTextField* value = label(@"0");
         NSTextField* titleLabel = label(title);
-        [titleLabel.widthAnchor constraintEqualToConstant:82].active = YES;
+        [titleLabel.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
         value.alignment = NSTextAlignmentRight;
         value.accessibilityLabel = [NSString stringWithFormat:@"%s value", names[i]];
-        [value.widthAnchor constraintEqualToConstant:42].active = YES;
+        [value.widthAnchor constraintEqualToConstant:kControlValueWidth].active = YES;
         (camera ? _cameraColorValue : _screenColorValue)[i] = value;
         NSStackView* row = [NSStackView stackViewWithViews:@[titleLabel, slider, value]];
         row.spacing = 8;
@@ -1344,7 +1351,7 @@ struct PreviewHit {
         [NSString stringWithFormat:@"%@%ld", value > 0 ? @"+" : @"", (long)value];
 }
 
-- (void)applyColor:(BOOL)camera {
+- (void)applyColor:(BOOL)camera save:(BOOL)save {
     auto& color = camera ? _settings.camera_color : _settings.screen_color;
     color = {static_cast<int>((camera ? _cameraColor : _screenColor)[0].integerValue),
              static_cast<int>((camera ? _cameraColor : _screenColor)[1].integerValue),
@@ -1354,11 +1361,7 @@ struct PreviewHit {
         _noteAttention = true;
         _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
     }
-    if (NSApp.currentEvent.type != NSEventTypeLeftMouseDragged &&
-        NSApp.currentEvent.type != NSEventTypeLeftMouseDown &&
-        NSApp.currentEvent.type != NSEventTypeLeftMouseUp &&
-        NSApp.currentEvent.type != NSEventTypeKeyDown && !_resettingSlider)
-        rec::app::save_settings(_settingsPath, _settings);
+    if (save) rec::app::save_settings(_settingsPath, _settings);
     [self refresh];
 }
 
@@ -1367,7 +1370,7 @@ struct PreviewHit {
     const int index = slider == (camera ? _cameraColor[0] : _screenColor[0]) ? 0 :
                       slider == (camera ? _cameraColor[1] : _screenColor[1]) ? 1 : 2;
     [self showColorValue:camera index:index];
-    [self applyColor:camera];
+    [self applyColor:camera save:NO];
 }
 
 - (void)resetColor:(NSButton*)button {
@@ -1379,9 +1382,7 @@ struct PreviewHit {
 }
 - (void)resetSlider:(ResettableSlider*)slider {
     slider.integerValue = 0;
-    _resettingSlider = true;
     [NSApp sendAction:slider.action to:slider.target from:slider];
-    _resettingSlider = false;
     rec::app::save_settings(_settingsPath, _settings);
 }
 - (void)sliderFinished:(ResettableSlider*)slider {
@@ -1405,7 +1406,7 @@ struct PreviewHit {
 }
 
 // Reads a source's slider and mute box, and applies them at once while recording.
-- (void)changeVolume:(rec::AudioInput)input {
+- (void)changeVolume:(rec::AudioInput)input save:(BOOL)save {
     const bool system = input == rec::AudioInput::system;
     int& volume = system ? _settings.system_volume : _settings.mic_volume;
     bool& muted = system ? _settings.system_muted : _settings.mic_muted;
@@ -1420,23 +1421,18 @@ struct PreviewHit {
             _noteUntil = [NSDate dateWithTimeIntervalSinceNow:5];
         }
     }
-    // A drag saves once, when it ends.
-    if (NSApp.currentEvent.type != NSEventTypeLeftMouseDragged &&
-        NSApp.currentEvent.type != NSEventTypeLeftMouseDown &&
-        NSApp.currentEvent.type != NSEventTypeLeftMouseUp &&
-        NSApp.currentEvent.type != NSEventTypeKeyDown && !_resettingSlider)
-        rec::app::save_settings(_settingsPath, _settings);
+    if (save) rec::app::save_settings(_settingsPath, _settings);
     [self refresh];
 }
 
 - (void)volumeChanged:(NSSlider*)slider {
-    [self changeVolume:slider == _systemVolume ? rec::AudioInput::system : rec::AudioInput::microphone];
+    [self changeVolume:slider == _systemVolume ? rec::AudioInput::system : rec::AudioInput::microphone save:NO];
 }
 
 - (void)toggleMute:(NSMenuItem*)item {
     NSButton* box = item.tag == 0 ? _systemMute : _micMute;
     box.state = box.state == NSControlStateValueOn ? NSControlStateValueOff : NSControlStateValueOn;
-    [self changeVolume:item.tag == 0 ? rec::AudioInput::system : rec::AudioInput::microphone];
+    [self changeVolume:item.tag == 0 ? rec::AudioInput::system : rec::AudioInput::microphone save:YES];
 }
 
 - (void)showImage {
@@ -1716,7 +1712,7 @@ struct PreviewHit {
         return;
     }
     if (sender == _systemMute || sender == _micMute) {
-        [self changeVolume:sender == _systemMute ? rec::AudioInput::system : rec::AudioInput::microphone];
+        [self changeVolume:sender == _systemMute ? rec::AudioInput::system : rec::AudioInput::microphone save:YES];
         return;
     }
     if (sender == _scene) {
@@ -3106,6 +3102,21 @@ struct PreviewHit {
         fail([NSString stringWithFormat:@"%@: the preview never showed %@", name, want]);
         return rec::PreviewFrame{};
     };
+    const auto wait_preview_colors = [&](NSString* name, NSString* first, double x1, double y1, double w1, double h1,
+                                         NSString* second, double x2, double y2, double w2, double h2) {
+        for (int i = 0; i < 100; ++i) {
+            __block rec::PreviewFrame shot;
+            ui(^{ shot = self->_frame; });
+            if (shot.number && is_color(mean_color(shot, x1, y1, w1, h1), first) &&
+                is_color(mean_color(shot, x2, y2, w2, h2), second)) return shot;
+            usleep(100000);
+        }
+        __block rec::PreviewFrame last;
+        ui(^{ last = self->_frame; });
+        if (last.number) save_png(last, [name stringByAppendingString:@"-failed"]);
+        fail([NSString stringWithFormat:@"%@: one preview frame did not show %@ and %@", name, first, second]);
+        return rec::PreviewFrame{};
+    };
     // Steps land at movie times the script checks, however slow the machine is.
     const auto recorded = [&](double seconds) {
         for (int i = 0; i < 1000; ++i) {
@@ -3120,8 +3131,8 @@ struct PreviewHit {
     set_check(_image, false);
     set_check(_image, true);
     // Before Start the preview already shows the scene; with Show preview off it stops.
-    const auto idle = wait_preview(@"app-preview-idle", @"green", 0.76, 0.75, 0.18, 0.18);
-    preview_color(idle, @"app-preview-idle", @"red", 0.02, 0.03, 0.15, 0.15);
+    const auto idle = wait_preview_colors(@"app-preview-idle", @"green", 0.76, 0.75, 0.18, 0.18,
+                                          @"red", 0.02, 0.03, 0.15, 0.15);
     set_check(_showPreview, false);
     __block BOOL off = NO;
     for (int i = 0; i < 50 && !off; ++i) {
@@ -3134,15 +3145,30 @@ struct PreviewHit {
     // Color value updates, release persistence, double-click reset and Cmd+0 all use this
     // window's own controls and the synthetic preview.
     ui(^{
-        self->_screenColor[0].integerValue = -50;
+        self->_screenColor[0].integerValue = -49;
         [self->_screenColor[0] sendAction:self->_screenColor[0].action to:self->_screenColor[0].target];
-        [self sliderFinished:(ResettableSlider*)self->_screenColor[0]];
     });
     __block NSString* screenValue;
     ui(^{ screenValue = self->_screenColorValue[0].stringValue; });
-    if (![screenValue isEqualToString:@"-50"]) fail([@"Screen brightness value is " stringByAppendingString:screenValue]);
-    if (rec::app::load_settings(_settingsPath).screen_color.brightness != -50)
-        fail(@"Screen brightness was not saved on release");
+    if (![screenValue isEqualToString:@"-49"]) fail([@"Screen brightness value is " stringByAppendingString:screenValue]);
+    if (rec::app::load_settings(_settingsPath).screen_color.brightness != 0)
+        fail(@"Screen brightness was saved before slider release");
+    ui(^{
+        [self->_window makeFirstResponder:self->_screenColor[0]];
+        NSEvent* arrow = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+            modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
+            windowNumber:self->_window.windowNumber context:nil characters:@"\uF702"
+            charactersIgnoringModifiers:@"\uF702" isARepeat:NO keyCode:123];
+        [(ResettableSlider*)self->_screenColor[0] keyDown:arrow];
+    });
+    __block NSInteger screenAfterArrow = 0;
+    ui(^{
+        screenValue = self->_screenColorValue[0].stringValue;
+        screenAfterArrow = self->_screenColor[0].integerValue;
+    });
+    if (screenAfterArrow == -49 || rec::app::load_settings(_settingsPath).screen_color.brightness != screenAfterArrow)
+        fail([NSString stringWithFormat:@"Keyboard slider release left Screen brightness at %@ (saved %d)",
+              screenValue, rec::app::load_settings(_settingsPath).screen_color.brightness]);
     __block rec::PreviewFrame colorPreview;
     bool gray = false;
     for (int i = 0; i < 200 && !gray; ++i) {
@@ -3176,12 +3202,27 @@ struct PreviewHit {
     ui(^{
         self->_systemVolume.integerValue = -6;
         [self->_systemVolume sendAction:self->_systemVolume.action to:self->_systemVolume.target];
-        [self sliderFinished:(ResettableSlider*)self->_systemVolume];
     });
     __block NSString* volumeValue;
     ui(^{ volumeValue = self->_systemVolumeText.stringValue; });
-    if (![volumeValue isEqualToString:@"-6 dB"] || rec::app::load_settings(_settingsPath).system_volume != -6)
-        fail(@"System audio volume release did not update and save its dB value");
+    if (![volumeValue isEqualToString:@"-6 dB"] || rec::app::load_settings(_settingsPath).system_volume != 0)
+        fail(@"System audio volume was saved before slider release");
+    ui(^{
+        [self->_window makeFirstResponder:self->_systemVolume];
+        NSEvent* arrow = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+            modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime
+            windowNumber:self->_window.windowNumber context:nil characters:@"\uF702"
+            charactersIgnoringModifiers:@"\uF702" isARepeat:NO keyCode:123];
+        [(ResettableSlider*)self->_systemVolume keyDown:arrow];
+    });
+    __block NSInteger volumeAfterArrow = 0;
+    ui(^{
+        volumeValue = self->_systemVolumeText.stringValue;
+        volumeAfterArrow = self->_systemVolume.integerValue;
+    });
+    if (volumeAfterArrow == -6 || rec::app::load_settings(_settingsPath).system_volume != volumeAfterArrow)
+        fail([NSString stringWithFormat:@"Keyboard slider release left System audio volume at %@ (saved %d)",
+              volumeValue, rec::app::load_settings(_settingsPath).system_volume]);
     ui(^{
         NSEvent* doubleClick = [NSEvent mouseEventWithType:NSEventTypeLeftMouseDown location:NSZeroPoint
             modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:self->_window.windowNumber
@@ -3210,6 +3251,7 @@ struct PreviewHit {
     note(@"slider-double-click=ok");
     note(@"slider-command-zero=ok");
     note(@"slider-release-save=ok");
+    note(@"slider-mouse-release=not-synthesized");
     note(@"idle-preview=ok");
     press(_record);
     wait_for(recording, 20);
@@ -3244,7 +3286,6 @@ struct PreviewHit {
     ui(^{
         self->_screenColor[0].integerValue = -50;
         [self->_screenColor[0] sendAction:self->_screenColor[0].action to:self->_screenColor[0].target];
-        [self sliderFinished:(ResettableSlider*)self->_screenColor[0]];
     });
     recorded(7.5);
     press(_record);
@@ -3568,6 +3609,9 @@ struct PreviewHit {
         }
     });
     if (!unmuted) fail(@"the menu bar item's menu has no checked Mute System Audio");
+    if (rec::app::load_settings(_settingsPath).system_muted)
+        fail(@"the status-item menu did not save the unmuted system audio setting");
+    note(@"menu-mute-save=ok");
     usleep(2000000);
     press(_record);
     wait_for(@"Ready to record", 30);
