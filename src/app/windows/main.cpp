@@ -67,9 +67,11 @@ enum Control : int {
     kVerticalMovie, kVerticalLayoutLabel, kVerticalLayout, kPreview2, kAddDestination,
     kPermission, kOpenPrivacy,
     kScreenColorLabel, kScreenBrightnessLabel, kScreenContrastLabel, kScreenSaturationLabel,
-    kScreenBrightness, kScreenContrast, kScreenSaturation, kScreenColorReset,
+    kScreenBrightness, kScreenContrast, kScreenSaturation, kScreenBrightnessValue, kScreenContrastValue,
+    kScreenSaturationValue, kScreenColorReset,
     kCameraColorLabel, kCameraBrightnessLabel, kCameraContrastLabel, kCameraSaturationLabel,
-    kCameraBrightness, kCameraContrast, kCameraSaturation, kCameraColorReset,
+    kCameraBrightness, kCameraContrast, kCameraSaturation, kCameraBrightnessValue, kCameraContrastValue,
+    kCameraSaturationValue, kCameraColorReset,
     // Each destination's row: kDestination + 10 * index + one of DestinationField.
     kDestination = 400,
 };
@@ -431,6 +433,31 @@ private:
         return app ? app->handle(message, w, l) : DefWindowProcW(window, message, w, l);
     }
 
+    static LRESULT CALLBACK slider_procedure(HWND slider, UINT message, WPARAM w, LPARAM l,
+                                             UINT_PTR subclass, DWORD_PTR data) {
+        auto* app = reinterpret_cast<App*>(data);
+        const int id = static_cast<int>(subclass);
+        if (!app) return DefSubclassProc(slider, message, w, l);
+        if (message == WM_LBUTTONDBLCLK) {
+            app->reset_slider(id);
+            return 0;
+        }
+        if (message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000) &&
+            (w == '0' || w == VK_NUMPAD0)) {
+            app->reset_slider(id);
+            return 0;
+        }
+        const bool change_key = w == VK_LEFT || w == VK_RIGHT || w == VK_UP || w == VK_DOWN ||
+                                w == VK_PRIOR || w == VK_NEXT || w == VK_HOME || w == VK_END;
+        if (message == WM_KEYDOWN && change_key) app->slider_key_pending_[id] = true;
+        const LRESULT result = DefSubclassProc(slider, message, w, l);
+        if (message == WM_KEYUP && app->slider_key_pending_[id]) {
+            app->slider_key_pending_[id] = false;
+            app->finish_slider_change(id);
+        }
+        return result;
+    }
+
     static LRESULT CALLBACK preview_procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
         auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(GetParent(window), GWLP_USERDATA));
         switch (message) {
@@ -655,12 +682,12 @@ private:
             const int id = GetDlgCtrlID(reinterpret_cast<HWND>(l));
             if (id == kSystemVolume || id == kMicVolume)
                 change_volume(id == kSystemVolume ? rec::AudioInput::system : rec::AudioInput::microphone,
-                              LOWORD(w) == TB_ENDTRACK);
+                              LOWORD(w) == TB_ENDTRACK && !slider_key_pending_[id]);
             else if (id == kRoundness) change_camera_style();
             else if (id == kScreenBrightness || id == kScreenContrast || id == kScreenSaturation)
-                change_color(false, LOWORD(w) == TB_ENDTRACK);
+                change_color(false, LOWORD(w) == TB_ENDTRACK && !slider_key_pending_[id]);
             else if (id == kCameraBrightness || id == kCameraContrast || id == kCameraSaturation)
-                change_color(true, LOWORD(w) == TB_ENDTRACK);
+                change_color(true, LOWORD(w) == TB_ENDTRACK && !slider_key_pending_[id]);
             return 0;
         }
         case WM_TIMER:
@@ -714,9 +741,15 @@ private:
                 const MSAAPROPID props[]{PROPID_ACC_NAME, PROPID_ACC_VALUE};
                 for (int slider : {kSystemVolume, kMicVolume})
                     access_->ClearHwndProps(get(slider), OBJID_CLIENT, CHILDID_SELF, props, 2);
+                for (int slider : {kScreenBrightness, kScreenContrast, kScreenSaturation,
+                                   kCameraBrightness, kCameraContrast, kCameraSaturation})
+                    access_->ClearHwndProps(get(slider), OBJID_CLIENT, CHILDID_SELF, props, 2);
                 access_->Release();
                 access_ = nullptr;
             }
+            for (int slider : {kSystemVolume, kMicVolume, kScreenBrightness, kScreenContrast,
+                               kScreenSaturation, kCameraBrightness, kCameraContrast, kCameraSaturation})
+                RemoveWindowSubclass(get(slider), &App::slider_procedure, static_cast<UINT_PTR>(slider));
             UnregisterHotKey(window_, kHotkey);
             UnregisterHotKey(window_, kReplayHotkey);
             Shell_NotifyIconW(NIM_DELETE, &tray_);
@@ -763,7 +796,10 @@ private:
     HWND label(int id, const wchar_t* text) {
         const bool plain = id == kStatus || id == kDetail || id == kLive || id == kFolder || id == kImageFile ||
                            id == kSystemVolumeText || id == kMicVolumeText;
-        return add(id, WC_STATICW, text, SS_LEFT | (plain ? SS_NOPREFIX : 0) | (id == kDetail ? SS_ENDELLIPSIS : 0));
+        const bool value = id == kScreenBrightnessValue || id == kScreenContrastValue || id == kScreenSaturationValue ||
+                           id == kCameraBrightnessValue || id == kCameraContrastValue || id == kCameraSaturationValue;
+        return add(id, WC_STATICW, text, (value ? SS_RIGHT : SS_LEFT) |
+                   ((plain || value) ? SS_NOPREFIX : 0) | (id == kDetail ? SS_ENDELLIPSIS : 0));
     }
     HWND combo(int id) { return add(id, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP); }
     HWND check(int id, const wchar_t* text) { return add(id, WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP); }
@@ -812,7 +848,10 @@ private:
         label(kScreenContrastLabel, L"Contrast");
         label(kScreenSaturationLabel, L"Saturation");
         for (int id : {kScreenBrightness, kScreenContrast, kScreenSaturation})
-            add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
+            add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | WS_TABSTOP);
+        for (int id : {kScreenBrightnessValue, kScreenContrastValue, kScreenSaturationValue,
+                       kCameraBrightnessValue, kCameraContrastValue, kCameraSaturationValue})
+            label(id, L"0");
         button(kScreenColorReset, L"Reset screen color");
 
         label(kQualityHeader, L"Quality");
@@ -889,7 +928,7 @@ private:
         label(kCameraContrastLabel, L"Contrast");
         label(kCameraSaturationLabel, L"Saturation");
         for (int id : {kCameraBrightness, kCameraContrast, kCameraSaturation})
-            add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
+            add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | WS_TABSTOP);
         button(kCameraColorReset, L"Reset camera color");
         button(kPhoneCode, L"Show Phone Code...");
         check(kImage, L"Image overla&y");
@@ -920,6 +959,8 @@ private:
             SendMessageW(get(id), TBM_SETRANGEMIN, FALSE, -100);
             SendMessageW(get(id), TBM_SETRANGEMAX, FALSE, 100);
             SendMessageW(get(id), TBM_SETPAGESIZE, 0, 10);
+            SendMessageW(get(id), TBM_CLEARTICS, FALSE, 0);
+            SendMessageW(get(id), TBM_SETTIC, 0, 0);
         }
         for (const auto& c : cameras_) SendMessageW(camera, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(c.name).c_str()));
         for (auto seconds : rec::app::kReplayLengths)
@@ -944,7 +985,20 @@ private:
                 {kCameraContrast, L"Camera contrast"}, {kCameraSaturation, L"Camera saturation"}};
             for (const auto& [id, name] : color_names)
                 access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, name);
+            const std::pair<int, const wchar_t*> color_values[] = {
+                {kScreenBrightnessValue, L"Screen brightness value"},
+                {kScreenContrastValue, L"Screen contrast value"},
+                {kScreenSaturationValue, L"Screen saturation value"},
+                {kCameraBrightnessValue, L"Camera brightness value"},
+                {kCameraContrastValue, L"Camera contrast value"},
+                {kCameraSaturationValue, L"Camera saturation value"}};
+            for (const auto& [id, name] : color_values)
+                access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, name);
         }
+        for (int slider : {kSystemVolume, kMicVolume, kScreenBrightness, kScreenContrast,
+                           kScreenSaturation, kCameraBrightness, kCameraContrast, kCameraSaturation})
+            SetWindowSubclass(get(slider), &App::slider_procedure, static_cast<UINT_PTR>(slider),
+                              reinterpret_cast<DWORD_PTR>(this));
 
         show_settings();
         make_fonts();
@@ -998,9 +1052,11 @@ private:
             place(control_id, x + label_width, y, width - label_width, px(240));
             y += row + gap;
         };
-        const auto color_slider = [&](int label_id, int slider_id) {
-            place(label_id, x, y + px(3), label_width - gap, px(18));
-            place(slider_id, x + label_width, y, width - label_width, px(22));
+        const auto color_slider = [&](int label_id, int slider_id, int value_id, int label_span) {
+            const int value_width = px(46);
+            place(label_id, x, y + px(3), label_span - gap, px(18));
+            place(slider_id, x + label_span, y, width - label_span - value_width - gap, px(22));
+            place(value_id, x + width - value_width, y + px(3), value_width, px(18));
             y += px(22) + px(2);
         };
 
@@ -1044,9 +1100,9 @@ private:
         place(kClicks, x + label_width, y, width - label_width, px(22));
         y += px(22) + gap;
         line(kScreenColorLabel, px(20));
-        color_slider(kScreenBrightnessLabel, kScreenBrightness);
-        color_slider(kScreenContrastLabel, kScreenContrast);
-        color_slider(kScreenSaturationLabel, kScreenSaturation);
+        color_slider(kScreenBrightnessLabel, kScreenBrightness, kScreenBrightnessValue, label_width);
+        color_slider(kScreenContrastLabel, kScreenContrast, kScreenContrastValue, label_width);
+        color_slider(kScreenSaturationLabel, kScreenSaturation, kScreenSaturationValue, label_width);
         place(kScreenColorReset, x + label_width, y, px(120), row);
         y += row + gap;
 
@@ -1146,9 +1202,9 @@ private:
         place(kShadow, x + short_label, y, width - short_label, px(22));
         y += row + gap;
         line(kCameraColorLabel, px(20));
-        color_slider(kCameraBrightnessLabel, kCameraBrightness);
-        color_slider(kCameraContrastLabel, kCameraContrast);
-        color_slider(kCameraSaturationLabel, kCameraSaturation);
+        color_slider(kCameraBrightnessLabel, kCameraBrightness, kCameraBrightnessValue, short_label);
+        color_slider(kCameraContrastLabel, kCameraContrast, kCameraContrastValue, short_label);
+        color_slider(kCameraSaturationLabel, kCameraSaturation, kCameraSaturationValue, short_label);
         place(kCameraColorReset, x + short_label, y, px(120), row);
         y += row + gap;
         place(kImage, x, y, box - gap, px(22));
@@ -1237,7 +1293,13 @@ private:
                            camera ? kCameraContrast : kScreenContrast,
                            camera ? kCameraSaturation : kScreenSaturation};
         const int values[] = {color.brightness, color.contrast, color.saturation};
-        for (int i = 0; i < 3; ++i) SendMessageW(get(ids[i]), TBM_SETPOS, TRUE, values[i]);
+        const int value_ids[] = {camera ? kCameraBrightnessValue : kScreenBrightnessValue,
+                                 camera ? kCameraContrastValue : kScreenContrastValue,
+                                 camera ? kCameraSaturationValue : kScreenSaturationValue};
+        for (int i = 0; i < 3; ++i) {
+            SendMessageW(get(ids[i]), TBM_SETPOS, TRUE, values[i]);
+            show_color_value(value_ids[i], values[i]);
+        }
     }
 
     void change_color(bool camera, bool save) {
@@ -1245,11 +1307,38 @@ private:
         const int ids[] = {camera ? kCameraBrightness : kScreenBrightness,
                            camera ? kCameraContrast : kScreenContrast,
                            camera ? kCameraSaturation : kScreenSaturation};
-        color = {static_cast<int>(SendMessageW(get(ids[0]), TBM_GETPOS, 0, 0)),
-                 static_cast<int>(SendMessageW(get(ids[1]), TBM_GETPOS, 0, 0)),
-                 static_cast<int>(SendMessageW(get(ids[2]), TBM_GETPOS, 0, 0))};
+        const int value_ids[] = {camera ? kCameraBrightnessValue : kScreenBrightnessValue,
+                                 camera ? kCameraContrastValue : kScreenContrastValue,
+                                 camera ? kCameraSaturationValue : kScreenSaturationValue};
+        const int values[] = {static_cast<int>(SendMessageW(get(ids[0]), TBM_GETPOS, 0, 0)),
+                              static_cast<int>(SendMessageW(get(ids[1]), TBM_GETPOS, 0, 0)),
+                              static_cast<int>(SendMessageW(get(ids[2]), TBM_GETPOS, 0, 0))};
+        color = {values[0], values[1], values[2]};
+        for (int i = 0; i < 3; ++i) show_color_value(value_ids[i], values[i]);
         apply_scene(false);
         if (save) rec::app::save_settings(settings_path_, settings_);
+    }
+
+    void show_color_value(int id, int value) {
+        const std::wstring text = value > 0 ? L"+" + std::to_wstring(value) : std::to_wstring(value);
+        SetWindowTextW(get(id), text.c_str());
+        if (access_ && SUCCEEDED(access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_VALUE, text.c_str())))
+            NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, get(id), OBJID_CLIENT, CHILDID_SELF);
+    }
+
+    void finish_slider_change(int id) {
+        if (id == kSystemVolume || id == kMicVolume)
+            change_volume(id == kSystemVolume ? rec::AudioInput::system : rec::AudioInput::microphone, true);
+        else if (id == kScreenBrightness || id == kScreenContrast || id == kScreenSaturation)
+            change_color(false, true);
+        else if (id == kCameraBrightness || id == kCameraContrast || id == kCameraSaturation)
+            change_color(true, true);
+    }
+
+    void reset_slider(int id) {
+        SendMessageW(get(id), TBM_SETPOS, TRUE, 0);
+        finish_slider_change(id);
+        if (state_ == State::idle) refresh();
     }
 
     void show_decibels(bool system, int volume) {
@@ -1576,14 +1665,14 @@ private:
             settings_.screen_color = {};
             show_color(false);
             rec::app::save_settings(settings_path_, settings_);
-            apply_scene();
+            apply_scene(false);
             refresh();
             return;
         case kCameraColorReset:
             settings_.camera_color = {};
             show_color(true);
             rec::app::save_settings(settings_path_, settings_);
-            apply_scene();
+            apply_scene(false);
             refresh();
             return;
         case kMenuShow: show_window(); return;
@@ -2525,6 +2614,7 @@ private:
     HICON idle_icon_ = nullptr, recording_icon_ = nullptr;
     NOTIFYICONDATAW tray_{};
     std::vector<std::pair<int, HWND>> controls_;
+    std::array<bool, 500> slider_key_pending_{};
     int content_width_ = 0, content_height_ = 0;
     std::wstring home_;
     bool test_pattern_ = false;

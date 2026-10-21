@@ -41,6 +41,7 @@ public static class AppWindow {
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
@@ -548,13 +549,38 @@ try {
     $idle = Join-Path $Artifacts 'app-preview-idle.png'
     Wait-PreviewColor $ui $idle @(0.76, 0.75, 0.18, 0.18) 'green'
     Wait-PreviewColor $ui $idle @(0.02, 0.03, 0.15, 0.15) 'red'
-    # Screen brightness changes the test-pattern preview live; Reset restores white.
+    # Color readouts track the slider, double-click resets the live preview, and Ctrl+0
+    # exercises the keyboard reset on this test-owned app window.
     $screenBrightness = (Find $ui 'Screen brightness' $Slider).Handle
     [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](-50)) | Out-Null
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
+    if ((Find $ui 'Screen brightness value' 41).Item.accValue(0) -ne '-50') { throw 'screen brightness readout did not show -50' }
     Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-gray.png') @(0.4, 0.4, 0.2, 0.2) 'gray' -seconds 2 -pollMilliseconds 50
-    Press $ui 'Reset screen color'
+    [AppWindow]::PostMessage($screenBrightness, 0x0203, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_LBUTTONDBLCLK, this app's slider
+    Wait-Until { (Find $ui 'Screen brightness value' 41).Item.accValue(0) -eq '0' } 'double-click did not reset screen brightness'
+    Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("screen_color=0,0,0`n") } 'double-click reset was not saved'
     Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-reset.png') @(0.4, 0.4, 0.2, 0.2) 'white' -seconds 2 -pollMilliseconds 50
+    [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](20)) | Out-Null
+    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
+    if ((Find $ui 'Screen brightness value' 41).Item.accValue(0) -ne '+20') { throw 'screen brightness readout did not show +20' }
+    [AppWindow]::SetForegroundWindow($ui.Window) | Out-Null
+    $sliderRect = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($screenBrightness, [ref]$sliderRect) | Out-Null
+    $sliderPoint = [IntPtr](([int]($sliderRect.Bottom / 2) -shl 16) -bor [int]($sliderRect.Right / 2))
+    [AppWindow]::SendMessage($screenBrightness, 0x0201, [IntPtr]1, $sliderPoint) | Out-Null # Focus the test app's trackbar.
+    [AppWindow]::SendMessage($screenBrightness, 0x0202, [IntPtr]::Zero, $sliderPoint) | Out-Null
+    [AppWindow]::SetFocus($screenBrightness) | Out-Null
+    [Windows.Forms.SendKeys]::SendWait('^0')
+    Wait-Until { (Find $ui 'Screen brightness value' 41).Item.accValue(0) -eq '0' } 'Ctrl+0 did not reset screen brightness'
+    Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("screen_color=0,0,0`n") } 'Ctrl+0 reset was not saved'
+    $volumeSlider = (Find $ui 'System audio volume' $Slider).Handle
+    [AppWindow]::SendMessage($volumeSlider, 0x0405, [IntPtr]1, [IntPtr](-6)) | Out-Null
+    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $volumeSlider) | Out-Null
+    Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("system_volume=-6`n") } 'volume was not saved after trackbar release'
+    [AppWindow]::PostMessage($volumeSlider, 0x0203, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_LBUTTONDBLCLK
+    Wait-Until { (Find $ui 'System audio volume' $Slider).Item.accValue(0) -eq '0 dB' } 'double-click did not reset system volume to 0 dB'
+    Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("system_volume=0`n") } 'volume double-click reset was not saved'
+    Write-Host "6a. slider resets: screen brightness -50 readout, double-click to 0 and white preview, Ctrl+0 to 0; system volume release saved -6 dB and double-click readout 0 dB"
     Set-Check $ui 'Show preview' $false
     Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-off.png') @(0.76, 0.75, 0.18, 0.18) 'green' -Not
     Set-Check $ui 'Show preview' $true
