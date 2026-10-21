@@ -469,8 +469,27 @@ private:
         auto* app = reinterpret_cast<App*>(data);
         const int id = static_cast<int>(subclass);
         if (!app) return DefSubclassProc(slider, message, w, l);
-        if (message == WM_LBUTTONDBLCLK) {
+        if (message == WM_LBUTTONDOWN) {
+            const DWORD now = static_cast<DWORD>(GetMessageTime());
+            const POINT point{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            const auto previous = app->slider_last_click_[id];
+            const int dx = std::abs(point.x - previous.point.x), dy = std::abs(point.y - previous.point.y);
+            if (previous.valid && now - previous.time <= GetDoubleClickTime() &&
+                dx <= GetSystemMetrics(SM_CXDOUBLECLK) && dy <= GetSystemMetrics(SM_CYDOUBLECLK)) {
+                app->slider_last_click_[id].valid = false;
+                app->slider_suppress_mouse_up_[id] = true;
+                app->reset_slider(id);
+                return 0;
+            }
+            app->slider_last_click_[id] = {now, point, true};
+        } else if (message == WM_LBUTTONDBLCLK) {
+            app->slider_last_click_[id].valid = false;
+            app->slider_suppress_mouse_up_[id] = true;
             app->reset_slider(id);
+            return 0;
+        }
+        if (message == WM_LBUTTONUP && app->slider_suppress_mouse_up_[id]) {
+            app->slider_suppress_mouse_up_[id] = false;
             return 0;
         }
         if (message == WM_KEYDOWN && (GetKeyState(VK_CONTROL) & 0x8000) &&
@@ -480,9 +499,16 @@ private:
         }
         const bool change_key = w == VK_LEFT || w == VK_RIGHT || w == VK_UP || w == VK_DOWN ||
                                 w == VK_PRIOR || w == VK_NEXT || w == VK_HOME || w == VK_END;
-        if (message == WM_KEYDOWN && change_key) app->slider_key_pending_[id] = true;
+        if (message == WM_KEYDOWN && change_key && !app->slider_key_pending_[id]) {
+            app->slider_key_pending_[id] = true;
+            app->slider_pending_key_[id] = static_cast<UINT>(w);
+        }
         const LRESULT result = DefSubclassProc(slider, message, w, l);
-        if (message == WM_KEYUP && app->slider_key_pending_[id]) {
+        if (message == WM_KEYUP && app->slider_key_pending_[id] && app->slider_pending_key_[id] == w) {
+            app->slider_key_pending_[id] = false;
+            app->finish_slider_change(id);
+        } else if ((message == WM_KILLFOCUS || message == WM_CAPTURECHANGED) &&
+                   app->slider_key_pending_[id]) {
             app->slider_key_pending_[id] = false;
             app->finish_slider_change(id);
         }
@@ -996,7 +1022,6 @@ private:
             SendMessageW(get(id), TBM_SETRANGEMIN, FALSE, -100);
             SendMessageW(get(id), TBM_SETRANGEMAX, FALSE, 100);
             SendMessageW(get(id), TBM_SETPAGESIZE, 0, 10);
-            SendMessageW(get(id), TBM_CLEARTICS, FALSE, 0);
             SendMessageW(get(id), TBM_SETTIC, 0, 0);
         }
         for (const auto& c : cameras_) SendMessageW(camera, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(wide(c.name).c_str()));
@@ -1084,11 +1109,11 @@ private:
             y += row + gap;
         };
         const auto color_slider = [&](int label_id, int slider_id, int value_id) {
-            const int value = px(50), mute = px(110);
+            const int value = px(50), mute = width > scenes_column ? px(110) : 0;
             place(label_id, x, y, label_width - gap, px(18));
             const int slider = width - value - mute - 2 * gap;
-            place(slider_id, x, y + px(14), slider, px(26));
-            place(value_id, x + slider + gap, y + px(17), value, px(20));
+            place(slider_id, x, y + px(18), slider, px(22));
+            place(value_id, x + slider + gap, y + px(19), value, px(20));
             y += px(40);
         };
         const auto strip = [&](const rec::app::Strip& model) {
@@ -1108,9 +1133,9 @@ private:
                                camera_strip ? kCameraSaturationValue : kScreenSaturationValue};
             const int top = y;
             const int inset = px(8);
-            place(header_id, x + inset, y + px(2), width - px(120) - inset, px(20));
-            place(reset_id, x + width - px(8) - px(70), y + px(1), px(70), px(22));
-            y += px(24);
+            place(header_id, x + inset, y + px(14), width - px(120) - inset, px(20));
+            place(reset_id, x + width - px(8) - px(70), y + px(12), px(70), px(22));
+            y += px(36);
             for (int i = 0; i < 3; ++i) color_slider(labels[i], sliders[i], values[i]);
             const int bottom = y + px(2);
             place(box_id, x, top, width, bottom - top);
@@ -1383,8 +1408,13 @@ private:
     void show_color_value(int id, int value) {
         const std::wstring text = value > 0 ? L"+" + std::to_wstring(value) : std::to_wstring(value);
         SetWindowTextW(get(id), text.c_str());
-        if (access_ && SUCCEEDED(access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_VALUE, text.c_str())))
-            NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, get(id), OBJID_CLIENT, CHILDID_SELF);
+        const int slider_id = id == kScreenBrightnessValue ? kScreenBrightness :
+                              id == kScreenContrastValue ? kScreenContrast :
+                              id == kScreenSaturationValue ? kScreenSaturation :
+                              id == kCameraBrightnessValue ? kCameraBrightness :
+                              id == kCameraContrastValue ? kCameraContrast : kCameraSaturation;
+        if (access_ && SUCCEEDED(access_->SetHwndPropStr(get(slider_id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_VALUE, text.c_str())))
+            NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, get(slider_id), OBJID_CLIENT, CHILDID_SELF);
     }
 
     void finish_slider_change(int id) {
@@ -1399,7 +1429,6 @@ private:
     void reset_slider(int id) {
         SendMessageW(get(id), TBM_SETPOS, TRUE, 0);
         finish_slider_change(id);
-        if (state_ == State::idle) refresh();
     }
 
     void show_decibels(bool system, int volume) {
@@ -2676,6 +2705,10 @@ private:
     NOTIFYICONDATAW tray_{};
     std::vector<std::pair<int, HWND>> controls_;
     std::array<bool, 500> slider_key_pending_{};
+    struct SliderClick { DWORD time = 0; POINT point{}; bool valid = false; };
+    std::array<UINT, 500> slider_pending_key_{};
+    std::array<SliderClick, 500> slider_last_click_{};
+    std::array<bool, 500> slider_suppress_mouse_up_{};
     int content_width_ = 0, content_height_ = 0;
     std::wstring home_;
     bool test_pattern_ = false;

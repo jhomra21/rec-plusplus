@@ -44,18 +44,24 @@ public static class AppWindow {
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int command);
+  [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
   [DllImport("user32.dll")] public static extern IntPtr GetFocus();
   [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+  [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h, IntPtr update, IntPtr erase, uint flags);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll", EntryPoint="GetClassLongPtrW")] public static extern UIntPtr GetClassLongPtr(IntPtr h, int index);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder name, int count);
   [DllImport("user32.dll")] public static extern int MapWindowPoints(IntPtr from, IntPtr to, ref RECT r, uint count);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
   public static Accessibility.IAccessible Of(IntPtr h) {
@@ -246,6 +252,105 @@ function Snapshot-Window($ui, [string]$path) {
     $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     return $bitmap
 }
+function Set-TestDpi($ui, [int]$dpi, $baseRect) {
+    $rect = New-Object AppWindow+RECT
+    $scale = $dpi / 96.0
+    $rect.Left = $baseRect.Left
+    $rect.Top = $baseRect.Top
+    $rect.Right = $rect.Left + [int](($baseRect.Right - $baseRect.Left) * $scale)
+    $rect.Bottom = $rect.Top + [int](($baseRect.Bottom - $baseRect.Top) * $scale)
+    $memory = [Runtime.InteropServices.Marshal]::AllocHGlobal([Runtime.InteropServices.Marshal]::SizeOf($rect))
+    try {
+        [Runtime.InteropServices.Marshal]::StructureToPtr($rect, $memory, $false)
+        $packed = [IntPtr]([long](($dpi -shl 16) -bor $dpi))
+        [AppWindow]::SendMessage($ui.Window, 0x02E0, $packed, $memory) | Out-Null  # WM_DPICHANGED, test-owned app only
+        [AppWindow]::RedrawWindow($ui.Window, [IntPtr]::Zero, [IntPtr]::Zero, 0x181) | Out-Null  # all children, now
+    } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($memory) }
+}
+function Snapshot-StripDpi($ui, [string]$directory, [string]$prefix) {
+    $originalDpi = [int][AppWindow]::GetDpiForWindow($ui.Window)
+    $baseRect = New-Object AppWindow+RECT
+    if (-not [AppWindow]::GetWindowRect($ui.Window, [ref]$baseRect)) { throw 'GetWindowRect failed before strip DPI screenshots' }
+    $camera = $prefix -eq 'app-strips-camera'
+    $sourceName = if ($camera) { 'Camera' } else { 'Screen' }
+    $stripSlider = (Find $ui "$sourceName brightness" $Slider).Handle
+    $sliderId = [AppWindow]::GetDlgCtrlID($stripSlider)
+    $firstStripId = $sliderId - 4
+    $frameId = $sliderId + $(if ($camera) { 8 } else { 18 })
+    $visible = @{}
+    try {
+        foreach ($id in 100..399) {
+            $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
+            if ($handle -eq [IntPtr]::Zero) { continue }
+            $visible[$id] = [AppWindow]::IsWindowVisible($handle)
+            $keep = ($id -ge $firstStripId -and $id -le ($sliderId + 6)) -or $id -eq $frameId
+            if (-not $keep) { [AppWindow]::ShowWindow($handle, 0) | Out-Null }
+        }
+        foreach ($dpi in @(96, 144, 192)) {
+            if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect }
+            Assert-StripGeometry $ui ($prefix -eq 'app-strips-camera')
+            $path = Join-Path $directory "$prefix-dpi-$([int]($dpi * 100 / 96)).png"
+            $bitmap = Snapshot-Window $ui $path
+            $frameHandle = [AppWindow]::GetDlgItem($ui.Window, $frameId)
+            $frame = New-Object AppWindow+RECT
+            [AppWindow]::GetClientRect($frameHandle, [ref]$frame) | Out-Null
+            [AppWindow]::MapWindowPoints($frameHandle, $ui.Window, [ref]$frame, 2) | Out-Null
+            $left = [Math]::Max(0, $frame.Left - 8)
+            $top = [Math]::Max(0, $frame.Top - 8)
+            $right = [Math]::Min($bitmap.Width, $frame.Right + 8)
+            $bottom = [Math]::Min($bitmap.Height, $frame.Bottom + 8)
+            $crop = $bitmap.Clone((New-Object System.Drawing.Rectangle $left, $top, ($right - $left), ($bottom - $top)), $bitmap.PixelFormat)
+            $bitmap.Dispose()
+            $crop.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+            $crop.Dispose()
+        }
+    } finally {
+        Set-TestDpi $ui $originalDpi $baseRect
+        foreach ($id in $visible.Keys) {
+            $handle = [AppWindow]::GetDlgItem($ui.Window, [int]$id)
+            if ($handle -ne [IntPtr]::Zero) {
+                [AppWindow]::ShowWindow($handle, $(if ($visible[$id]) { 5 } else { 0 })) | Out-Null
+            }
+        }
+        [AppWindow]::RedrawWindow($ui.Window, [IntPtr]::Zero, [IntPtr]::Zero, 0x181) | Out-Null
+    }
+}
+function Show-TrackbarClassStyle($ui) {
+    $trackbarHandle = (Find $ui 'Screen brightness' $Slider).Handle
+    $classStyle = [uint64][AppWindow]::GetClassLongPtr($trackbarHandle, -26).ToUInt64()
+    $className = New-Object Text.StringBuilder 128
+    [AppWindow]::GetClassName($trackbarHandle, $className, $className.Capacity) | Out-Null
+    if ($className.ToString() -ne 'msctls_trackbar32') { throw "expected msctls_trackbar32, got '$($className.ToString())'" }
+    Write-Host "msctls_trackbar32 CS_DBLCLKS=$([bool]($classStyle -band 0x8)) (GCL_STYLE=0x$('{0:X}' -f $classStyle))"
+}
+function Assert-StripGeometry($ui, [bool]$camera) {
+    $label = if ($camera) { 'Camera' } else { 'Screen' }
+    $stripSlider = (Find $ui "$label brightness" $Slider).Handle
+    $sliderRect = New-Object AppWindow+RECT
+    [AppWindow]::GetWindowRect($stripSlider, [ref]$sliderRect) | Out-Null
+    $referenceRect = if ($camera) { Rect-Of $ui 'Camera contrast' $Slider } else { Rect-Of $ui 'System audio volume' $Slider }
+    if ($sliderRect.Left -ne $referenceRect.Left -or
+        ($sliderRect.Right - $sliderRect.Left) -ne ($referenceRect.Right - $referenceRect.Left)) {
+        throw "$label color sliders do not share the same start and width"
+    }
+    $valueRect = New-Object AppWindow+RECT
+    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, ([AppWindow]::GetDlgCtrlID($stripSlider) + 3)), [ref]$valueRect) | Out-Null
+    $audioValueRect = New-Object AppWindow+RECT
+    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 106), [ref]$audioValueRect) | Out-Null
+    if ($camera) {
+        $otherValue = New-Object AppWindow+RECT
+        [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, ([AppWindow]::GetDlgCtrlID($stripSlider) + 4)), [ref]$otherValue) | Out-Null
+        if (($valueRect.Right - $valueRect.Left) -ne ($otherValue.Right - $otherValue.Left)) {
+            throw 'Camera value labels do not share a fixed-width value column'
+        }
+    } elseif ($valueRect.Left -ne $audioValueRect.Left -or
+        ($valueRect.Right - $valueRect.Left) -ne ($audioValueRect.Right - $audioValueRect.Left)) {
+        throw 'Screen value labels do not share the audio readout column'
+    }
+    $reset = Rect-Of $ui "Reset $($label.ToLower()) color" $PushButton
+    $header = Rect-Of $ui $label 41
+    if ([Math]::Abs($header.Top - $reset.Top) -gt 4) { throw "$label Reset is not on the header row" }
+}
 function Rect-Of($ui, [string]$name, [int]$role) {
     $r = New-Object AppWindow+RECT
     if (-not [AppWindow]::GetWindowRect((Find $ui $name $role).Handle, [ref]$r)) { throw "GetWindowRect failed for $name" }
@@ -301,6 +406,36 @@ function Wait-PreviewColor($ui, [string]$path, [double[]]$area, [string]$color, 
         if ($same -ne [bool]$Not) { return }
         if ((Get-Date) -gt $deadline) { throw "the preview at $($area -join ',') is $($seen['color']); expected $(if ($Not) { 'not ' })$color" }
         Start-Sleep -Milliseconds $pollMilliseconds
+    }
+}
+function Wait-PreviewColors($ui, [string]$path, [double[]]$greenArea, [double[]]$redArea, [int]$seconds = 15) {
+    $deadline = (Get-Date).AddSeconds($seconds)
+    for (;;) {
+        $picture = Snapshot-Preview $ui $path
+        $green = Picture-Color $picture $greenArea[0] $greenArea[1] $greenArea[2] $greenArea[3]
+        $red = Picture-Color $picture $redArea[0] $redArea[1] $redArea[2] $redArea[3]
+        $picture.Dispose()
+        $both = $true
+        try {
+            Expect-Color $green 'color' 'green'
+            Expect-Color $red 'color' 'red'
+        } catch { $both = $false }
+        if ($both) { return }
+        if ((Get-Date) -gt $deadline) {
+            throw "one preview snapshot did not contain green and red; green=$($green['color']), red=$($red['color'])"
+        }
+        Start-Sleep -Milliseconds 100
+    }
+}
+function Post-TrackbarDoubleClick([IntPtr]$slider) {
+    $rect = New-Object AppWindow+RECT
+    if (-not [AppWindow]::GetClientRect($slider, [ref]$rect)) { throw 'could not read trackbar bounds for double-click' }
+    $point = [IntPtr](([int]($rect.Bottom / 2) -shl 16) -bor [int]($rect.Right / 2))
+    foreach ($message in @(0x0201, 0x0202, 0x0201, 0x0202)) {
+        $button = if ($message -eq 0x0201) { [IntPtr]1 } else { [IntPtr]::Zero }
+        if (-not [AppWindow]::PostMessage($slider, $message, $button, $point)) {
+            throw "could not post trackbar mouse message 0x$('{0:X4}' -f $message)"
+        }
     }
 }
 # Drags in the preview from one point to another, given as fractions of the 16:9 frame,
@@ -369,8 +504,33 @@ try {
     $screenHeader = Rect-Of $ui 'Screen' 41
     $screenReset = Rect-Of $ui 'Reset screen color' $PushButton
     if ([Math]::Abs($screenHeader.Top - $screenReset.Top) -gt 4) { throw 'Screen Reset is not on the header row' }
-    $stripShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-strips.png')
-    $stripShot.Dispose()
+    Show-TrackbarClassStyle $ui
+    $screenSlider = (Find $ui 'Screen brightness' $Slider).Handle
+    $volumeSlider = (Find $ui 'System audio volume' $Slider).Handle
+    $screenSliderRect = Rect-Of $ui 'Screen brightness' $Slider
+    $volumeSliderRect = Rect-Of $ui 'System audio volume' $Slider
+    if ($screenSliderRect.Left -ne $volumeSliderRect.Left -or
+        ($screenSliderRect.Right - $screenSliderRect.Left) -ne ($volumeSliderRect.Right - $volumeSliderRect.Left)) {
+        throw 'Screen and audio sliders do not share the same start and width'
+    }
+    $screenValueRect = New-Object AppWindow+RECT
+    $volumeValueRect = New-Object AppWindow+RECT
+    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, ([AppWindow]::GetDlgCtrlID($screenSlider) + 3)), [ref]$screenValueRect) | Out-Null
+    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 106), [ref]$volumeValueRect) | Out-Null  # kSystemVolumeText
+    if ($screenValueRect.Left -ne $volumeValueRect.Left -or
+        ($screenValueRect.Right - $screenValueRect.Left) -ne ($volumeValueRect.Right - $volumeValueRect.Left)) {
+        throw 'Screen value labels do not share the audio readout column'
+    }
+    Snapshot-StripDpi $ui $Artifacts 'app-strips'
+    Set-Check $ui 'Camera' $true
+    Snapshot-StripDpi $ui $Artifacts 'app-strips-camera'
+    Set-Check $ui 'Camera' $false
+    # DPI messages are synthetic here; relaunch the test-owned window at the real desktop DPI
+    # before the keyboard, recording and permission checks.
+    [AppWindow]::PostMessage($ui.Window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_CLOSE, idle
+    if (-not $ui.Process.WaitForExit(10000)) { throw 'the app did not close after DPI snapshots' }
+    $ui = Start-App
+    Wait-Status $ui 'Ready to record' | Out-Null
 
     # 0. Microphone access off for desktop apps: the app names it, offers its settings page,
     # and does not start. The machine's own switch comes back right after.
@@ -415,11 +575,24 @@ try {
         Start-Sleep -Milliseconds 100
     }
     Write-Host '0. permissions: microphone access off was shown and kept the recording from starting'
+    # Permission status may be cached by the current process; restart the test-owned app after
+    # restoring the user's setting before exercising normal recording.
+    [AppWindow]::PostMessage($ui.Window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_CLOSE, idle
+    if (-not $ui.Process.WaitForExit(10000)) { throw 'the app did not close after permission checks' }
+    $ui = Start-App
+    Wait-Status $ui 'Ready to record' | Out-Null
+    try {
+        $permissionWarning = Find $ui $offText 41
+        if ([AppWindow]::IsWindowVisible($permissionWarning.Handle)) { throw 'permission warning remained after relaunch' }
+    } catch {
+        if ($_.Exception.Message -eq 'permission warning remained after relaunch') { throw }
+    }
     # 1. Record, pause, resume, stop: 2 + 2 s recorded around a 1.5 s pause.
     Set-Check $ui 'System audio' $true
     Set-Check $ui 'Microphone' $true
     $micFader = (Find $ui 'Microphone volume' $Slider).Handle
     [AppWindow]::SetForegroundWindow($ui.Window) | Out-Null
+    Wait-Until { [AppWindow]::GetForegroundWindow() -eq $ui.Window } 'refusing to send Tab because the test app window is not foreground' 5
     [uint32]$appProcessId = 0
     [uint32]$mainThread = [AppWindow]::GetWindowThreadProcessId($ui.Window, [ref]$appProcessId)
     [uint32]$testThread = [AppWindow]::GetCurrentThreadId()
@@ -634,25 +807,27 @@ try {
     $cameraHeader = Rect-Of $ui 'Camera' 41
     $cameraReset = Rect-Of $ui 'Reset camera color' $PushButton
     if ([Math]::Abs($cameraHeader.Top - $cameraReset.Top) -gt 4) { throw 'Camera Reset is not on the header row' }
+    Assert-StripGeometry $ui $true
     Set-Check $ui 'Image overlay' $true
     # Before Start the preview already shows the scene; with Show preview off it stops.
     $idle = Join-Path $Artifacts 'app-preview-idle.png'
-    Wait-PreviewColor $ui $idle @(0.76, 0.75, 0.18, 0.18) 'green'
-    Wait-PreviewColor $ui $idle @(0.02, 0.03, 0.15, 0.15) 'red'
+    Set-Check $ui 'Image overlay' $false
+    Set-Check $ui 'Image overlay' $true
+    Wait-PreviewColors $ui $idle @(0.76, 0.75, 0.18, 0.18) @(0.02, 0.03, 0.15, 0.15) 15
     # Color readouts track the slider, double-click resets the live preview, and Ctrl+0
     # exercises the keyboard reset on this test-owned app window.
     $screenBrightness = (Find $ui 'Screen brightness' $Slider).Handle
     [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](-50)) | Out-Null
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
-    if ((Find $ui 'Screen brightness value' 41).Item.accValue(0) -ne '-50') { throw 'screen brightness readout did not show -50' }
+    if ((Find $ui 'Screen brightness' $Slider).Item.accValue(0) -ne '-50') { throw 'screen brightness slider value did not show -50' }
     Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-gray.png') @(0.4, 0.4, 0.2, 0.2) 'gray' -pollMilliseconds 50
-    [AppWindow]::PostMessage($screenBrightness, 0x0203, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_LBUTTONDBLCLK, this app's slider
-    Wait-Until { (Find $ui 'Screen brightness value' 41).Item.accValue(0) -eq '0' } 'double-click did not reset screen brightness'
+    Post-TrackbarDoubleClick $screenBrightness
+    Wait-Until { (Find $ui 'Screen brightness' $Slider).Item.accValue(0) -eq '0' } 'double-click did not reset screen brightness'
     Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("screen_color=0,0,0`n") } 'double-click reset was not saved'
     Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-reset.png') @(0.4, 0.4, 0.2, 0.2) 'white' -pollMilliseconds 50
     [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](20)) | Out-Null
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
-    if ((Find $ui 'Screen brightness value' 41).Item.accValue(0) -ne '+20') { throw 'screen brightness readout did not show +20' }
+    if ((Find $ui 'Screen brightness' $Slider).Item.accValue(0) -ne '+20') { throw 'screen brightness slider value did not show +20' }
     [AppWindow]::SetForegroundWindow($ui.Window) | Out-Null
     $sliderRect = New-Object AppWindow+RECT
     [AppWindow]::GetClientRect($screenBrightness, [ref]$sliderRect) | Out-Null
@@ -660,14 +835,17 @@ try {
     [AppWindow]::SendMessage($screenBrightness, 0x0201, [IntPtr]1, $sliderPoint) | Out-Null # Focus the test app's trackbar.
     [AppWindow]::SendMessage($screenBrightness, 0x0202, [IntPtr]::Zero, $sliderPoint) | Out-Null
     [AppWindow]::SetFocus($screenBrightness) | Out-Null
+    if ([AppWindow]::GetForegroundWindow() -ne $ui.Window) {
+        throw 'refusing to send Ctrl+0 because the test app window is not the foreground window'
+    }
     [Windows.Forms.SendKeys]::SendWait('^0')
-    Wait-Until { (Find $ui 'Screen brightness value' 41).Item.accValue(0) -eq '0' } 'Ctrl+0 did not reset screen brightness'
+    Wait-Until { (Find $ui 'Screen brightness' $Slider).Item.accValue(0) -eq '0' } 'Ctrl+0 did not reset screen brightness'
     Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("screen_color=0,0,0`n") } 'Ctrl+0 reset was not saved'
     $volumeSlider = (Find $ui 'System audio volume' $Slider).Handle
     [AppWindow]::SendMessage($volumeSlider, 0x0405, [IntPtr]1, [IntPtr](-6)) | Out-Null
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $volumeSlider) | Out-Null
     Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("system_volume=-6`n") } 'volume was not saved after trackbar release'
-    [AppWindow]::PostMessage($volumeSlider, 0x0203, [IntPtr]::Zero, [IntPtr]::Zero) | Out-Null  # WM_LBUTTONDBLCLK
+    Post-TrackbarDoubleClick $volumeSlider
     Wait-Until { (Find $ui 'System audio volume' $Slider).Item.accValue(0) -eq '0 dB' } 'double-click did not reset system volume to 0 dB'
     Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("system_volume=0`n") } 'volume double-click reset was not saved'
     Write-Host "6a. slider resets: screen brightness -50 readout, double-click to 0 and white preview, Ctrl+0 to 0; system volume release saved -6 dB and double-click readout 0 dB"
