@@ -272,7 +272,6 @@ function Snapshot-StripDpi($ui, [string]$directory, [string]$prefix) {
     $baseRect = New-Object AppWindow+RECT
     if (-not [AppWindow]::GetWindowRect($ui.Window, [ref]$baseRect)) { throw 'GetWindowRect failed before strip DPI screenshots' }
     $camera = $prefix -eq 'app-strips-camera'
-    $sourceName = if ($camera) { 'Camera' } else { 'Screen' }
     # These ids are explicit in main.cpp's reserved strip blocks, independent of enum ordering.
     $stripIds = if ($camera) { @(320..331) } else { @(300..311) }
     $frameId = if ($camera) { 331 } else { 311 }
@@ -290,18 +289,32 @@ function Snapshot-StripDpi($ui, [string]$directory, [string]$prefix) {
             Assert-StripGeometry $ui ($prefix -eq 'app-strips-camera')
             $path = Join-Path $directory "$prefix-dpi-$([int]($dpi * 100 / 96)).png"
             $bitmap = Snapshot-Window $ui $path
-            $frameHandle = [AppWindow]::GetDlgItem($ui.Window, $frameId)
-            $frame = New-Object AppWindow+RECT
-            [AppWindow]::GetClientRect($frameHandle, [ref]$frame) | Out-Null
-            [AppWindow]::MapWindowPoints($frameHandle, $ui.Window, [ref]$frame, 2) | Out-Null
-            $left = [Math]::Max(0, $frame.Left - 8)
-            $top = [Math]::Max(0, $frame.Top - 8)
-            $right = [Math]::Min($bitmap.Width, $frame.Right + 8)
-            $bottom = [Math]::Min($bitmap.Height, $frame.Bottom + 8)
-            $crop = $bitmap.Clone((New-Object System.Drawing.Rectangle $left, $top, ($right - $left), ($bottom - $top)), $bitmap.PixelFormat)
-            $bitmap.Dispose()
-            $crop.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
-            $crop.Dispose()
+            try {
+                $frameHandle = [AppWindow]::GetDlgItem($ui.Window, $frameId)
+                if ($frameHandle -eq [IntPtr]::Zero) { throw "strip frame control $frameId was not found" }
+                $frame = New-Object AppWindow+RECT
+                if (-not [AppWindow]::GetClientRect($frameHandle, [ref]$frame)) { throw "GetClientRect failed for strip frame $frameId" }
+                [AppWindow]::MapWindowPoints($frameHandle, $ui.Window, [ref]$frame, 2) | Out-Null
+                $left = [Math]::Max(0, $frame.Left - 8)
+                $top = [Math]::Max(0, $frame.Top - 8)
+                $right = [Math]::Min($bitmap.Width, $frame.Right + 8)
+                $bottom = [Math]::Min($bitmap.Height, $frame.Bottom + 8)
+                $frameInside = $frame.Left -ge 0 -and $frame.Top -ge 0 -and
+                    $frame.Right -le $bitmap.Width -and $frame.Bottom -le $bitmap.Height
+                if (-not $frameInside -or $right -le $left -or $bottom -le $top) {
+                    Write-Host "skipping DPI $dpi strip crop: frame outside the captured window (bitmap $($bitmap.Width)x$($bitmap.Height), frame $($frame.Left),$($frame.Top),$($frame.Right),$($frame.Bottom))"
+                    continue
+                }
+                $cropRect = New-Object System.Drawing.Rectangle $left, $top, ($right - $left), ($bottom - $top)
+                $crop = $bitmap.Clone($cropRect, $bitmap.PixelFormat)
+                try {
+                    $crop.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+                } finally {
+                    $crop.Dispose()
+                }
+            } finally {
+                $bitmap.Dispose()
+            }
         }
     } finally {
         Set-TestDpi $ui $originalDpi $baseRect
