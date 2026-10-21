@@ -35,16 +35,24 @@ using System;
 using System.Text;
 using System.Runtime.InteropServices;
 public static class AppWindow {
+  [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO {
+    public int cbSize, flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public RECT rcCaret;
+  }
   [DllImport("oleacc.dll")] static extern int AccessibleObjectFromWindow(IntPtr h, uint id, ref Guid iid, [MarshalAs(UnmanagedType.IUnknown)] out object o);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string t);
   [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
   [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+  [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern IntPtr SetFocus(IntPtr h);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetFocus();
   [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint thread, ref GUITHREADINFO info);
   [DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
@@ -105,7 +113,7 @@ function Start-App {
 # The control whose accessible name and role match; control ids run from 100, and the
 # destination rows' from 400.
 function Find($ui, [string]$name, [int]$role) {
-    foreach ($id in @(100..199) + @(400..439)) {
+    foreach ($id in @(100..399) + @(400..439)) {
         $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
         if ($handle -eq [IntPtr]::Zero) { continue }
         $item = [AppWindow]::Of($handle)
@@ -225,6 +233,51 @@ function Snapshot-Preview($ui, [string]$path) {
     $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     return $bitmap
 }
+# Captures only the test app's own window with PrintWindow.
+function Snapshot-Window($ui, [string]$path) {
+    $client = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($ui.Window, [ref]$client) | Out-Null
+    $bitmap = New-Object System.Drawing.Bitmap $client.Right, $client.Bottom
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $dc = $graphics.GetHdc()
+    if (-not [AppWindow]::PrintWindow($ui.Window, $dc, 3)) { throw 'PrintWindow failed for the test app window' }
+    $graphics.ReleaseHdc($dc)
+    $graphics.Dispose()
+    $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    return $bitmap
+}
+function Rect-Of($ui, [string]$name, [int]$role) {
+    $r = New-Object AppWindow+RECT
+    if (-not [AppWindow]::GetWindowRect((Find $ui $name $role).Handle, [ref]$r)) { throw "GetWindowRect failed for $name" }
+    return $r
+}
+function Focused-Control($ui) {
+    [uint32]$ownerProcessId = 0
+    $thread = [AppWindow]::GetWindowThreadProcessId($ui.Window, [ref]$ownerProcessId)
+    $info = New-Object AppWindow+GUITHREADINFO
+    $info.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($info)
+    if (-not [AppWindow]::GetGUIThreadInfo($thread, [ref]$info)) { throw 'GetGUIThreadInfo failed' }
+    return $info.hwndFocus
+}
+function Control-Rect($ui, [int]$id) {
+    $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
+    $r = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($handle, [ref]$r) | Out-Null
+    [AppWindow]::MapWindowPoints($handle, $ui.Window, [ref]$r, 2) | Out-Null
+    return $r
+}
+function Closest-Status-Color($bitmap, $ui, [int]$r, [int]$g, [int]$b) {
+    $rect = Control-Rect $ui 100
+    $closest = 765
+    for ($y = [Math]::Max(0, $rect.Top); $y -lt [Math]::Min($bitmap.Height, $rect.Bottom); $y++) {
+        for ($x = [Math]::Max(0, $rect.Left); $x -lt [Math]::Min($bitmap.Width, $rect.Right); $x++) {
+            $p = $bitmap.GetPixel($x, $y)
+            $distance = [Math]::Abs($p.R - $r) + [Math]::Abs($p.G - $g) + [Math]::Abs($p.B - $b)
+            if ($distance -lt $closest) { $closest = $distance }
+        }
+    }
+    return $closest
+}
 # The mean color of part of a picture, given in fractions of its size, as Expect-Color reads it.
 function Picture-Color($bitmap, [double]$x, [double]$y, [double]$w, [double]$h) {
     $r = 0; $g = 0; $b = 0
@@ -311,6 +364,13 @@ $ui = $null
 try {
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
+    if ([AppWindow]::IsWindowVisible((Find $ui 'Camera brightness' $Slider).Handle)) { throw 'Camera strip is visible while Camera is off' }
+    Find $ui 'Screen' 41 | Out-Null
+    $screenHeader = Rect-Of $ui 'Screen' 41
+    $screenReset = Rect-Of $ui 'Reset screen color' $PushButton
+    if ([Math]::Abs($screenHeader.Top - $screenReset.Top) -gt 4) { throw 'Screen Reset is not on the header row' }
+    $stripShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-strips.png')
+    $stripShot.Dispose()
 
     # 0. Microphone access off for desktop apps: the app names it, offers its settings page,
     # and does not start. The machine's own switch comes back right after.
@@ -358,11 +418,36 @@ try {
     # 1. Record, pause, resume, stop: 2 + 2 s recorded around a 1.5 s pause.
     Set-Check $ui 'System audio' $true
     Set-Check $ui 'Microphone' $true
+    $micFader = (Find $ui 'Microphone volume' $Slider).Handle
+    [AppWindow]::SetForegroundWindow($ui.Window) | Out-Null
+    [uint32]$appProcessId = 0
+    [uint32]$mainThread = [AppWindow]::GetWindowThreadProcessId($ui.Window, [ref]$appProcessId)
+    [uint32]$testThread = [AppWindow]::GetCurrentThreadId()
+    if (-not [AppWindow]::AttachThreadInput($testThread, $mainThread, $true)) { throw 'could not attach the app input thread for the tab-order check' }
+    try {
+        [AppWindow]::SetFocus($micFader) | Out-Null
+        if (([AppWindow]::Of((Focused-Control $ui))).accName(0) -ne 'Microphone volume') { throw 'could not focus the microphone volume fader' }
+        [Windows.Forms.SendKeys]::SendWait('{TAB}')
+        $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
+        if ($tabName -eq 'Mute mic') {
+            [Windows.Forms.SendKeys]::SendWait('{TAB}')
+            $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
+        }
+        if ($tabName -ne 'Screen brightness') { throw "Tab after microphone volume did not reach Screen brightness before later controls; focused '$tabName'" }
+    } finally {
+        [AppWindow]::AttachThreadInput($testThread, $mainThread, $false) | Out-Null
+    }
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    $recordShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-recording.png')
+    if ((Closest-Status-Color $recordShot $ui 225 40 40) -gt 100) { throw 'recording status text did not use palette accent #E12828' }
+    $recordShot.Dispose()
     Start-Sleep -Seconds 2
     Press $ui 'Pause'
     Wait-Status $ui 'Paused' | Out-Null
+    $pauseShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-paused.png')
+    if ((Closest-Status-Color $pauseShot $ui 240 147 147) -gt 120) { throw 'paused status text did not use the dimmed palette accent' }
+    $pauseShot.Dispose()
     Start-Sleep -Milliseconds 1500
     Press $ui 'Resume'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
@@ -417,6 +502,7 @@ try {
         if ((Get-Date) -gt $deadline) { throw "no LIVE badge: $(Text-Of $ui 101)" }
         Start-Sleep -Milliseconds 100
     }
+    if ((Text-Of $ui 102) -notmatch 'LIVE') { throw 'live badge does not contain LIVE' }
     Start-Sleep -Seconds 3
     # The badge shows the measured send rate, here over a second of a 3000 kb/s stream.
     $badge = Text-Of $ui 102
@@ -544,6 +630,10 @@ try {
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1002, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Show Rec"
     if (((Find $ui 'Camera device' $ComboBox).Item.accState(0) -band 0x1) -ne 0) { throw 'the camera menu was disabled while Camera was off' }
     Set-Check $ui 'Camera' $true
+    if (-not [AppWindow]::IsWindowVisible((Find $ui 'Camera brightness' $Slider).Handle)) { throw 'Camera strip stayed hidden after Camera was enabled' }
+    $cameraHeader = Rect-Of $ui 'Camera' 41
+    $cameraReset = Rect-Of $ui 'Reset camera color' $PushButton
+    if ([Math]::Abs($cameraHeader.Top - $cameraReset.Top) -gt 4) { throw 'Camera Reset is not on the header row' }
     Set-Check $ui 'Image overlay' $true
     # Before Start the preview already shows the scene; with Show preview off it stops.
     $idle = Join-Path $Artifacts 'app-preview-idle.png'
