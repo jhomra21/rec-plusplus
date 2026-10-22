@@ -285,9 +285,17 @@ function Expect-Strip($ui, $bitmap, [int]$base, [int]$surface) {
         $handle = [AppWindow]::GetDlgItem($ui.Window, $_)
         if ($handle -ne [IntPtr]::Zero -and $_ -ne ($base + 11)) { Control-Rect $ui $_ }
     })
+    # On a small screen (CI runners) the third column can extend past the client area, which is
+    # all the snapshot holds; probe only the part of each rect inside the bitmap.
+    $left = [Math]::Max(0, $panel.Left); $right = [Math]::Min($bitmap.Width, $panel.Right)
+    $top = [Math]::Max(0, $panel.Top); $bottom = [Math]::Min($bitmap.Height, $panel.Bottom)
+    if ($right - $left -lt 16 -or $bottom - $top -lt 16) {
+        Write-Host "strip panel $base is outside the $($bitmap.Width)x$($bitmap.Height) client snapshot; color probe skipped"
+        return
+    }
     $sample = $null
-    for ($y = $panel.Top + 4; $y -lt $panel.Bottom - 4 -and -not $sample; $y++) {
-        for ($x = $panel.Left + 4; $x -lt $panel.Right - 4; $x++) {
+    for ($y = $top + 4; $y -lt $bottom - 4 -and -not $sample; $y++) {
+        for ($x = $left + 4; $x -lt $right - 4; $x++) {
             $covered = $false
             foreach ($rect in $allControls) {
                 if ($x -ge $rect.Left -and $x -lt $rect.Right -and $y -ge $rect.Top -and $y -lt $rect.Bottom) {
@@ -303,15 +311,20 @@ function Expect-Strip($ui, $bitmap, [int]$base, [int]$surface) {
     if ($brightness -le $surface -or $brightness -ge 70) {
         throw "strip panel $base RGB $r,$g,$b is not lighter than the surface and still dark"
     }
+    $probed = 0
     foreach ($id in @(($base + 4), ($base + 5), ($base + 6), ($base + 10))) {
         $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
         if ($handle -eq [IntPtr]::Zero -or -not [AppWindow]::IsWindowVisible($handle)) {
             throw "strip control $id is missing or not visible"
         }
         $rect = Control-Rect $ui $id
+        $controlLeft = [Math]::Max($left, $rect.Left); $controlRight = [Math]::Min($right, $rect.Right)
+        $controlTop = [Math]::Max($top, $rect.Top); $controlBottom = [Math]::Min($bottom, $rect.Bottom)
+        if (($controlRight - $controlLeft) * ($controlBottom - $controlTop) -lt 40) { continue }
+        $probed++
         $coverage = 0
-        for ($y = [Math]::Max($panel.Top, $rect.Top); $y -lt [Math]::Min($panel.Bottom, $rect.Bottom); $y++) {
-            for ($x = [Math]::Max($panel.Left, $rect.Left); $x -lt [Math]::Min($panel.Right, $rect.Right); $x++) {
+        for ($y = $controlTop; $y -lt $controlBottom; $y++) {
+            for ($x = $controlLeft; $x -lt $controlRight; $x++) {
                 $pixel = $bitmap.GetPixel($x, $y)
                 $difference = [Math]::Abs([int]$pixel.R - $r) +
                               [Math]::Abs([int]$pixel.G - $g) +
@@ -321,6 +334,7 @@ function Expect-Strip($ui, $bitmap, [int]$base, [int]$surface) {
         }
         if ($coverage -lt 20) { throw "strip control $id is covered by panel $base (only $coverage differing pixels)" }
     }
+    if ($probed -eq 0) { throw "no strip $base control is inside the client snapshot" }
     $label = Control-Rect $ui ($base + 1)
     $labelText = $false
     for ($y = [Math]::Max(0, $label.Top); $y -lt [Math]::Min($bitmap.Height, $label.Bottom) -and -not $labelText; $y++) {
