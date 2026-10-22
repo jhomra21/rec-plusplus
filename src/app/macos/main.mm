@@ -3483,16 +3483,20 @@ struct PreviewHit {
             if (focus == self->_systemVolume) { returned = YES; break; }
             [order addObject:focus];
         }
-        NSArray<NSView*>* expected = @[self->_micMute, self->_screenColor[0], self->_screenColor[1],
-            self->_screenColor[2], self->_screenColorReset, self->_cameraColor[0], self->_cameraColor[1],
-            self->_cameraColor[2], self->_cameraColorReset];
+        // Without Full Keyboard Access, AppKit leaves sliders and buttons out of the key loop.
+        NSMutableArray<NSView*>* expected = [NSMutableArray array];
+        for (NSView* view in @[(NSView*)self->_micMute, self->_screenColor[0], self->_screenColor[1],
+                               self->_screenColor[2], self->_screenColorReset, self->_cameraColor[0],
+                               self->_cameraColor[1], self->_cameraColor[2], self->_cameraColorReset])
+            if (view.canBecomeKeyView) [expected addObject:view];
         NSUInteger at = 0;
         for (NSView* view in order) if (at < expected.count && view == expected[at]) ++at;
-        cameraTabOrder = returned && at == expected.count;
+        cameraTabOrder = (returned || !self->_systemVolume.canBecomeKeyView) && at == expected.count;
+        if (!cameraTabOrder) cameraTabFailure = @"order or loop return";
         for (NSView* view in expected) {
             NSUInteger occurrences = 0;
             for (NSView* item in order) if (item == view) ++occurrences;
-            if (occurrences != 1) {
+            if (occurrences != 1 && cameraTabOrder) {
                 cameraTabOrder = NO;
                 cameraTabFailure = [NSString stringWithFormat:@"%@ occurs %lu times",
                     ((NSControl*)view).accessibilityLabel, static_cast<unsigned long>(occurrences)];
