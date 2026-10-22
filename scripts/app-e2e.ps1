@@ -498,6 +498,32 @@ function Assert-StripGeometry($ui, [bool]$camera) {
     $base = if ($camera) { 320 } else { 300 }
     $panelRect = New-Object AppWindow+RECT
     [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, $base + 11), [ref]$panelRect) | Out-Null
+    $stripControls = if ($camera) { @(321, 322, 323, 324, 325, 326, 327, 328, 329, 330) } else { @(301, 302, 303, 304, 305, 306, 307, 308, 309, 310) }
+    foreach ($id in $stripControls) {
+        $control = [AppWindow]::GetDlgItem($ui.Window, $id)
+        if ($control -eq [IntPtr]::Zero -or -not [AppWindow]::IsWindowVisible($control)) { continue }
+        $rect = New-Object AppWindow+RECT
+        [AppWindow]::GetWindowRect($control, [ref]$rect) | Out-Null
+        if ($rect.Left -lt $panelRect.Left -or $rect.Top -lt $panelRect.Top -or
+            $rect.Right -gt $panelRect.Right -or $rect.Bottom -gt $panelRect.Bottom) {
+            throw "$label strip control $id lies outside its panel"
+        }
+    }
+    $titleHandle = [AppWindow]::GetDlgItem($ui.Window, $base)
+    $title = (Find $ui $label 41).Item.accName(0)
+    $titleClient = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($titleHandle, [ref]$titleClient) | Out-Null
+    $titleExtent = [AppWindow]::TextWidth($titleHandle, $title)
+    if ($titleExtent -gt ($titleClient.Right - $titleClient.Left)) {
+        throw "$label strip title does not fit: text=$titleExtent, control=$($titleClient.Right - $titleClient.Left)"
+    }
+    $saturationLabel = [AppWindow]::GetDlgItem($ui.Window, $base + 3)
+    $saturationWidth = [AppWindow]::TextWidth($saturationLabel, 'Saturation')
+    $saturationClient = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($saturationLabel, [ref]$saturationClient) | Out-Null
+    if ($saturationWidth -gt ($saturationClient.Right - $saturationClient.Left)) {
+        throw "$label Saturation label does not fit beside its value: text=$saturationWidth, control=$($saturationClient.Right - $saturationClient.Left)"
+    }
     $sliderRects = @()
     foreach ($name in @('brightness', 'contrast', 'saturation')) {
         $handle = (Find $ui "$label $name" $Slider).Handle
@@ -562,6 +588,34 @@ function Assert-StripGeometry($ui, [bool]$camera) {
     for ($i = 1; $i -lt $panels.Count; $i++) {
         $gap = $panels[$i].Left - $panels[$i - 1].Right
         if ([Math]::Abs($gap - $firstGap) -gt 2) { throw "adjacent mixer panel gaps differ: $gap versus $firstGap" }
+    }
+    foreach ($entry in @(@{Panel=340; Title=103; Text='System audio'; Controls=@(103,104,105,106,107)},
+                        @{Panel=341; Title=108; Text='Microphone'; Controls=@(108,109,110,111,112)})) {
+        $panel = Rect-OfId $ui $entry.Panel
+        $titleHandle = [AppWindow]::GetDlgItem($ui.Window, $entry.Title)
+        $titleWidth = [AppWindow]::TextWidth($titleHandle, $entry.Text)
+        $titleClient = New-Object AppWindow+RECT
+        [AppWindow]::GetClientRect($titleHandle, [ref]$titleClient) | Out-Null
+        if ($titleWidth -gt ($titleClient.Right - $titleClient.Left)) {
+            throw "$($entry.Text) strip title does not fit at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI: text=$titleWidth, control=$($titleClient.Right - $titleClient.Left)"
+        }
+        foreach ($id in $entry.Controls) {
+            $control = [AppWindow]::GetDlgItem($ui.Window, $id)
+            if ($control -eq [IntPtr]::Zero -or -not [AppWindow]::IsWindowVisible($control)) { continue }
+            $rect = Rect-OfId $ui $id
+            if ($rect.Left -lt $panel.Left -or $rect.Top -lt $panel.Top -or
+                $rect.Right -gt $panel.Right -or $rect.Bottom -gt $panel.Bottom) {
+                throw "audio strip control $id lies outside panel $($entry.Panel)"
+            }
+        }
+        Write-Host "audio strip $($entry.Text): title width $titleWidth <= client width $($titleClient.Right - $titleClient.Left); controls contained at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI"
+    }
+    foreach ($entry in @(@{Fader=105; Readout=106; Panel=340}, @{Fader=110; Readout=111; Panel=341})) {
+        $readout = Rect-OfId $ui $entry.Readout
+        $panel = Rect-OfId $ui $entry.Panel
+        if ($readout.Left -lt $panel.Left -or $readout.Right -gt $panel.Right) {
+            throw "audio dB readout $($entry.Readout) extends outside panel $($entry.Panel)"
+        }
     }
 }
 function Snapshot-VisualMixerDpi($ui, [string]$directory) {
@@ -669,6 +723,14 @@ function Assert-AudioStripGeometry($ui) {
         $mute = Rect-OfId $ui $entry.Mute
         $panelId = if ($entry.Fader -eq 105) { 340 } else { 341 }
         $panel = Rect-OfId $ui $panelId
+        $titleId = if ($panelId -eq 340) { 103 } else { 108 }
+        $titleHandle = [AppWindow]::GetDlgItem($ui.Window, $titleId)
+        $titleWidth = [AppWindow]::TextWidth($titleHandle, $entry.Name)
+        $titleClient = New-Object AppWindow+RECT
+        [AppWindow]::GetClientRect($titleHandle, [ref]$titleClient) | Out-Null
+        if ($titleWidth -gt ($titleClient.Right - $titleClient.Left)) {
+            throw "$($entry.Name) title does not fit at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI: text=$titleWidth, control=$($titleClient.Right - $titleClient.Left)"
+        }
         $readoutId = if ($entry.Fader -eq 105) { 106 } else { 111 }
         $readout = Rect-OfId $ui $readoutId
         if (($fader.Bottom - $fader.Top) -le ($fader.Right - $fader.Left)) {
@@ -691,6 +753,14 @@ function Assert-AudioStripGeometry($ui) {
         if ($readout.Top -lt $fader.Bottom -or [Math]::Abs($faderCenter - $readoutCenter) -gt 2) {
             throw "$($entry.Name) dB readout is not centered under the fader"
         }
+        foreach ($id in @($titleId, $entry.Meter, $entry.Fader, $readoutId, $entry.Mute)) {
+            $rect = Rect-OfId $ui $id
+            if ($rect.Left -lt $panel.Left -or $rect.Top -lt $panel.Top -or
+                $rect.Right -gt $panel.Right -or $rect.Bottom -gt $panel.Bottom) {
+                throw "$($entry.Name) strip control $id lies outside its panel"
+            }
+        }
+        Write-Host "audio strip $($entry.Name): title width $titleWidth <= client width $($titleClient.Right - $titleClient.Left); controls contained at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI"
         $inset = [int][Math]::Round(8 * (($panel.Bottom - $panel.Top) / 212.0))
         if ([Math]::Abs(($panel.Bottom - $mute.Bottom - $inset)) -gt 2) {
             throw "$($entry.Name) panel bottom is not 8 DIP below Mute: panel=$($panel.Top)-$($panel.Bottom), mute=$($mute.Top)-$($mute.Bottom), inset=$inset"
@@ -1037,7 +1107,7 @@ try {
     } finally { $cameraStripBitmap.Dispose() }
     Snapshot-StripDpi $ui $Artifacts 'app-strips-camera'
     Snapshot-VisualMixerDpi $ui $Artifacts
-    $cameraOnShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-surface-m4-r2.png')
+    $cameraOnShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-surface-m4-r3.png')
     $cameraOnShot.Dispose()
     } finally {
         Set-Check $ui 'Camera' $false
