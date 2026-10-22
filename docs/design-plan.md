@@ -69,7 +69,7 @@ Techniques, in dependency order:
 7. **Combo drop-down lists and menus**: the popup list (`ComboLBox`) and context menus only go dark through undocumented uxtheme ordinals (135 `SetPreferredAppMode`, `FlushMenuThemes`). Keep this a separate, guarded, last commit (`GetProcAddress`; skip on failure). Acceptable interim: dark closed combo, light open list.
 
 Risks (L1):
-- Themed check box text may ignore `SetTextColor` from `WM_CTLCOLORSTATIC`; `DarkMode_Explorer` normally draws light text, verify on the CI runner (Windows version matters). Fallback: `SetWindowTheme(h, L"", L"")` plus owner-draw, which is more code; decide after the first screenshot.
+- `WM_CTLCOLOR*` does not theme standard controls. Until D2, themed check-box and button text can still render in the light-theme style; combo drop-down lists and menus also remain light. `DwmSetWindowAttribute` and the dark surface do not change that.
 - `DWMWA_USE_IMMERSIVE_DARK_MODE` needs build 1809+; ignore the HRESULT.
 - Custom-drawn trackbar must respect DPI (`px()`), tick marks off (`TBS_NOTICKS` is already set for volume), and `WM_DPICHANGED` (`:661-669`) recreates fonts but not brushes: palette brushes must be recreated or made DPI-free (solid brushes are).
 - High contrast toggled live: handle `WM_SETTINGCHANGE` → rebuild palette, `InvalidateRect(window_, nullptr, TRUE)`.
@@ -110,7 +110,7 @@ Each commit runs `scripts/app-e2e.ps1` (Windows) or `app-e2e.sh` (macOS) to comp
 
 | # | Commit | Size | Verification |
 |---|---|---|---|
-| D1 | Palette + high-contrast branch; window/static/edit/listbox/button `WM_CTLCOLOR*`; class brushes; `DWMWA_USE_IMMERSIVE_DARK_MODE` on both windows; `color_for()` on palette | ~120 lines | ps1 unchanged passes. Add `Expect-Dark`: `PrintWindow` of the client, mean color of the top-left 10×10 px (margin area) has R,G,B < 45; save `app-surface.png` artifact. Follow-up: replace strip group-box frames with a slightly lighter panel brush. |
+| D1 | **Implemented** in `wip/d1-windows`: always-dark Windows palette with a `SPI_GETHIGHCONTRAST`/system-color branch; palette-owned surface and strip-panel brushes; `color_for()` and preview brush use the palette; `DWMWA_USE_IMMERSIVE_DARK_MODE` on the main and phone-code windows; all four `WM_CTLCOLOR*` handlers on both windows; Screen and Camera group frames are now lighter, borderless panel fills. | ~120 lines | Added `Expect-Dark`: `PrintWindow` of the client, mean color of the top-left 10×10 px margin has R,G,B < 45, and an uncovered point in the Screen panel is lighter than the surface but below 70; saves `app-surface.png`. Release build, PowerShell parse, and isolated local PrintWindow capture pass (`28,28,32` surface; `40,40,45` strip panel). The full app E2E remains for CI. High-contrast mode saves the screenshot and skips only the color assertions. |
 | D2 | `SetWindowTheme` DarkMode_Explorer / DarkMode_CFD in `add()` | ~30 lines | ps1 unchanged (every `Find`/`Set-Check`/`Choose-Last` is the assertion that roles and names survived theming). Add a check-box text contrast assertion: pixels of the `Microphone` check box rect contain light text (max channel > 150). |
 | D3 | Trackbar `NM_CUSTOMDRAW`: channel, fill, center mark (moves here from step 1 if drawn there), thumb, focus ring | ~120 lines | ps1 step 7 and the screen-brightness path (`:552-581`) unchanged. Add: snapshot of `kSystemVolume` rect after `TBM_SETPOS -6` contains accent-red pixels (thumb) and dark channel pixels. |
 | D4 | `RecMeter` class replaces progress bars (ids `kSystemMeter/kMicMeter` unchanged); `Meter` ballistics move to `session.hpp` and `main.mm` uses it | ~100 lines | ps1 step 7: during the recording, `Wait-Until` a snapshot of the `kSystemMeter` rect shows non-surface pixels within 2 s (the beep peaks); then after `Set-Check 'Mute system'` the meter still moves (mute is post-meter, "level before volume" per `:813`). sh: unchanged. |
@@ -121,7 +121,7 @@ Each commit runs `scripts/app-e2e.ps1` (Windows) or `app-e2e.sh` (macOS) to comp
 | M4 | Screen and Camera visual strips on both apps: move color sliders + Reset under the strip; camera strip hidden/shown with `settings.camera` | ~150 lines (Win) + ~100 (Mac) | ps1: `:552-581` brightness path unchanged (names, ids, `WM_HSCROLL`); add: camera strip controls hidden before `Set-Check 'Camera'`, visible after (`IsWindowVisible` of `kCameraBrightness`). sh: `screen-color=ok` and the gray/reset PNG artifacts unchanged; add camera strip hidden/visible check. |
 | M5 | Reserve layer strip ids and `Find` range; no UI | ~10 lines | Scripts unchanged; documented in `docs/parity.md` as "layer strips: not built". |
 
-Order: D1 → D2 → D3 → D4 → M1 → M2 → M3 → M4 → D5 (D5 last because it is optional and undocumented). D4 and M1 can swap.
+Order: D1 → D2 → D3 → D4 → M1 → M2 → M3 → M4 → D5 (D5 last because it is optional and undocumented). D4 and M1 can swap. D1's Windows implementation and strip-panel follow-up are complete; full app E2E acceptance remains to be run in CI.
 
 ## 3. Recommended changes to steps 2-4 so they lead into L1/L2
 

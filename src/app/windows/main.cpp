@@ -8,6 +8,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <dwmapi.h>
 #include <commctrl.h>
 #include <windowsx.h>
 #include <shellapi.h>
@@ -54,9 +55,13 @@ constexpr int kPickRegion = 0x7001;
 
 struct Palette {
     COLORREF accent = RGB(225, 40, 40);
+    COLORREF dim_accent = RGB(126, 34, 36);
     COLORREF surface = RGB(28, 28, 32);
-    COLORREF text = GetSysColor(COLOR_WINDOWTEXT);
-    COLORREF dim_text = GetSysColor(COLOR_GRAYTEXT);
+    COLORREF panel = RGB(40, 40, 45);
+    COLORREF text = RGB(230, 230, 234);
+    COLORREF dim_text = RGB(150, 150, 158);
+    COLORREF meter_green = RGB(70, 190, 105);
+    COLORREF meter_amber = RGB(230, 170, 55);
     bool high_contrast = false;
 
     static Palette current() {
@@ -66,18 +71,22 @@ struct Palette {
             (contrast.dwFlags & HCF_HIGHCONTRASTON)) {
             p.high_contrast = true;
             p.accent = GetSysColor(COLOR_HIGHLIGHT);
+            p.dim_accent = GetSysColor(COLOR_GRAYTEXT);
             p.surface = GetSysColor(COLOR_WINDOW);
+            p.panel = GetSysColor(COLOR_BTNFACE);
             p.text = GetSysColor(COLOR_WINDOWTEXT);
             p.dim_text = GetSysColor(COLOR_GRAYTEXT);
+            p.meter_green = GetSysColor(COLOR_HIGHLIGHT);
+            p.meter_amber = GetSysColor(COLOR_HOTLIGHT);
         }
         return p;
     }
-    COLORREF paused_accent() const {
-        if (high_contrast) return dim_text;
-        const COLORREF background = surface;
-        return RGB((GetRValue(accent) + GetRValue(background)) / 2,
-                   (GetGValue(accent) + GetGValue(background)) / 2,
-                   (GetBValue(accent) + GetBValue(background)) / 2);
+    COLORREF paused_accent() const { return dim_accent; }
+    COLORREF color_for(bool live, bool recording, bool paused, bool dim, bool emphasis) const {
+        if (live || recording) return accent;
+        if (paused) return paused_accent();
+        if (dim && !emphasis) return dim_text;
+        return text;
     }
 };
 
@@ -398,6 +407,8 @@ class App {
 public:
     int run(HINSTANCE instance, int show) {
         instance_ = instance;
+        palette_ = Palette::current();
+        rebuild_brushes();
         home_ = environment(L"REC_APP_HOME");
         test_pattern_ = environment(L"REC_APP_TEST_PATTERN") == L"1";
         settings_path_ = narrow((home_.empty() ? known_folder(FOLDERID_RoamingAppData) + L"\\rec" : home_) + L"\\settings.conf");
@@ -424,7 +435,7 @@ public:
         wc.lpfnWndProc = &App::procedure;
         wc.hInstance = instance;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+        wc.hbrBackground = surface_brush_;
         wc.lpszClassName = L"RecWindow";
         RegisterClassExW(&wc);
         WNDCLASSEXW preview{sizeof preview};
@@ -437,6 +448,7 @@ public:
                                   WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 480, 760, nullptr, nullptr, instance, this);
         if (!window_) return 1;
+        set_dark_title_bar(window_);
         ShowWindow(window_, show);
         // A recording left running when Rec last quit (or started with `rec start`) shows here.
         std::string engine_error;
@@ -457,6 +469,38 @@ public:
     }
 
 private:
+    void rebuild_brushes() {
+        if (preview_brush_) DeleteObject(preview_brush_);
+        if (surface_brush_) DeleteObject(surface_brush_);
+        if (panel_brush_) DeleteObject(panel_brush_);
+        preview_brush_ = CreateSolidBrush(palette_.surface);
+        surface_brush_ = CreateSolidBrush(palette_.surface);
+        panel_brush_ = CreateSolidBrush(palette_.panel);
+    }
+    void set_dark_title_bar(HWND window) const {
+        if (!window || palette_.high_contrast) return;
+        const BOOL enabled = TRUE;
+        if (FAILED(DwmSetWindowAttribute(window, 20, &enabled, sizeof enabled)))
+            DwmSetWindowAttribute(window, 19, &enabled, sizeof enabled);
+    }
+    LRESULT control_color(WPARAM w, LPARAM l, bool app_control = true) const {
+        const HWND control = reinterpret_cast<HWND>(l);
+        const HDC dc = reinterpret_cast<HDC>(w);
+        const int id = GetDlgCtrlID(control);
+        const bool panel = id == kScreenStripBox || id == kCameraStripBox;
+        SetBkColor(dc, panel ? palette_.panel : palette_.surface);
+        if (app_control) {
+            const bool status = id == kStatus;
+            const bool dim = id == kDetail || id == kFolder || id == kImageFile;
+            const bool emphasis = id == kPermission || (id == kDetail && attention_);
+            SetTextColor(dc, palette_.color_for(id == kLive, status && state_ == State::recording,
+                                                status && state_ == State::paused, dim, emphasis));
+        } else {
+            SetTextColor(dc, palette_.text);
+        }
+        return reinterpret_cast<LRESULT>(panel ? panel_brush_ : surface_brush_);
+    }
+
     static LRESULT CALLBACK procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
         if (message == WM_NCCREATE) {
             auto* app = static_cast<App*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams);
@@ -465,6 +509,22 @@ private:
         }
         auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(window, GWLP_USERDATA));
         return app ? app->handle(message, w, l) : DefWindowProcW(window, message, w, l);
+    }
+
+    static LRESULT CALLBACK strip_panel_procedure(HWND window, UINT message, WPARAM w, LPARAM l,
+                                                   UINT_PTR, DWORD_PTR data) {
+        auto* app = reinterpret_cast<App*>(data);
+        if (app && (message == WM_PAINT || message == WM_PRINTCLIENT || message == WM_PRINT)) {
+            PAINTSTRUCT paint{};
+            HDC dc = message == WM_PAINT ? BeginPaint(window, &paint) : reinterpret_cast<HDC>(w);
+            RECT client{};
+            GetClientRect(window, &client);
+            FillRect(dc, &client, app->panel_brush_);
+            if (message == WM_PAINT) EndPaint(window, &paint);
+            return 0;
+        }
+        if (message == WM_ERASEBKGND) return 1;
+        return DefSubclassProc(window, message, w, l);
     }
 
     static LRESULT CALLBACK slider_procedure(HWND slider, UINT message, WPARAM w, LPARAM l,
@@ -803,12 +863,12 @@ private:
             return 0;
         }
         case WM_CTLCOLORSTATIC: {
-            auto dc = reinterpret_cast<HDC>(w);
-            const int id = GetDlgCtrlID(reinterpret_cast<HWND>(l));
-            SetBkColor(dc, GetSysColor(COLOR_WINDOW));
-            SetTextColor(dc, color_for(id));
-            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+            return control_color(w, l);
         }
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+        case WM_CTLCOLORBTN:
+            return control_color(w, l);
         case WM_COMMAND:
             command(LOWORD(w), HIWORD(w));
             return 0;
@@ -894,10 +954,14 @@ private:
                                 kScreenContrastValue, kScreenSaturationValue, kCameraBrightnessValue,
                                 kCameraContrastValue, kCameraSaturationValue})
                 RemoveWindowSubclass(get(readout), &App::readout_procedure, static_cast<UINT_PTR>(readout));
+            RemoveWindowSubclass(get(kScreenStripBox), &App::strip_panel_procedure, kScreenStripBox);
+            RemoveWindowSubclass(get(kCameraStripBox), &App::strip_panel_procedure, kCameraStripBox);
             UnregisterHotKey(window_, kHotkey);
             UnregisterHotKey(window_, kReplayHotkey);
             Shell_NotifyIconW(NIM_DELETE, &tray_);
-            DeleteObject(preview_brush_);
+            if (preview_brush_) DeleteObject(preview_brush_);
+            if (surface_brush_) DeleteObject(surface_brush_);
+            if (panel_brush_) DeleteObject(panel_brush_);
             PostQuitMessage(0);
             return 0;
         default:
@@ -977,7 +1041,6 @@ private:
 
     void create() {
         dpi_ = GetDpiForWindow(window_);
-        palette_ = Palette::current();
         taskbar_created_ = RegisterWindowMessageW(L"TaskbarCreated");
         auto strip_settings = settings_;
         strip_settings.camera = true;
@@ -1014,6 +1077,8 @@ private:
         label(kScreenContrastLabel, L"Contrast");
         label(kScreenSaturationLabel, L"Saturation");
         add(kScreenStripBox, WC_BUTTONW, L"", BS_GROUPBOX);
+        SetWindowSubclass(get(kScreenStripBox), &App::strip_panel_procedure, kScreenStripBox,
+                          reinterpret_cast<DWORD_PTR>(this));
         for (int id : {kScreenBrightness, kScreenContrast, kScreenSaturation})
             add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | WS_TABSTOP);
         for (int id : {kScreenBrightnessValue, kScreenContrastValue, kScreenSaturationValue})
@@ -1024,6 +1089,8 @@ private:
         label(kCameraContrastLabel, L"Contrast");
         label(kCameraSaturationLabel, L"Saturation");
         add(kCameraStripBox, WC_BUTTONW, L"", BS_GROUPBOX);
+        SetWindowSubclass(get(kCameraStripBox), &App::strip_panel_procedure, kCameraStripBox,
+                          reinterpret_cast<DWORD_PTR>(this));
         for (int id : {kCameraBrightness, kCameraContrast, kCameraSaturation})
             add(id, TRACKBAR_CLASSW, L"", TBS_HORZ | WS_TABSTOP);
         for (int id : {kCameraBrightnessValue, kCameraContrastValue, kCameraSaturationValue})
@@ -1037,7 +1104,6 @@ private:
         button(kOpenPrivacy, L"Open privacy settings");
         add(kPreview, L"RecPreview", L"Preview", 0);
         add(kPreview2, L"RecPreview", L"Vertical video preview", 0);
-        preview_brush_ = CreateSolidBrush(palette_.surface);
         check(kShowPreview, L"Show pre&view");
 
         label(kCaptureHeader, L"Capture");
@@ -1283,6 +1349,8 @@ private:
             }
             const int bottom = y + px(2);
             put(box_id, x, top, width, bottom - top);
+            SetWindowPos(get(box_id), HWND_BOTTOM, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
             y = bottom + gap;
         };
 
@@ -1478,24 +1546,6 @@ private:
                                  static_cast<DWORD>(GetWindowLongW(window_, GWL_EXSTYLE)), dpi_);
         SetWindowPos(window_, nullptr, 0, 0, frame.right - frame.left, frame.bottom - frame.top,
                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
-
-    COLORREF color_for(int id) const {
-        if (palette_.high_contrast) {
-            if (id == kLive) return palette_.accent;
-            if (id == kStatus && state_ == State::recording) return palette_.accent;
-            if (id == kStatus && state_ == State::paused) return palette_.dim_text;
-            if (id == kPermission || (id == kDetail && attention_)) return palette_.text;
-            return (id == kDetail || id == kFolder || id == kImageFile) ? palette_.dim_text : palette_.text;
-        }
-        if (id == kLive) return palette_.accent;
-        if (id == kStatus) {
-            if (state_ == State::recording) return palette_.accent;
-            if (state_ == State::paused) return palette_.paused_accent();
-        }
-        if ((id == kDetail && attention_) || id == kPermission) return palette_.text;
-        if (id == kDetail || id == kFolder || id == kImageFile) return palette_.dim_text;
-        return palette_.text;
     }
 
     void select(int id, int index) { SendMessageW(get(id), CB_SETCURSEL, static_cast<WPARAM>(index), 0); }
@@ -2775,7 +2825,7 @@ private:
             wc.lpfnWndProc = &App::phone_procedure;
             wc.hInstance = instance_;
             wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-            wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+            wc.hbrBackground = surface_brush_;
             wc.lpszClassName = L"RecPhoneCode";
             return RegisterClassExW(&wc);
         }();
@@ -2791,6 +2841,7 @@ private:
                                             CW_USEDEFAULT, CW_USEDEFAULT, frame.right - frame.left, frame.bottom - frame.top,
                                             window_, nullptr, instance_, this);
             if (!phone_window_) return;
+            set_dark_title_bar(phone_window_);
         }
         SetWindowTextW(GetDlgItem(phone_window_, kPhoneAddress), phone_url_.empty() ? L"No network" : wide(phone_url_).c_str());
         SetWindowTextW(GetDlgItem(phone_window_, kPhoneHelp),
@@ -2848,9 +2899,10 @@ private:
             return 0;
         }
         case WM_CTLCOLORSTATIC:
-            SetBkColor(reinterpret_cast<HDC>(w), GetSysColor(COLOR_WINDOW));
-            SetTextColor(reinterpret_cast<HDC>(w), GetSysColor(COLOR_WINDOWTEXT));
-            return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+        case WM_CTLCOLOREDIT:
+        case WM_CTLCOLORLISTBOX:
+        case WM_CTLCOLORBTN:
+            return app->control_color(w, l, false);
         case WM_PAINT: {
             PAINTSTRUCT paint;
             HDC dc = BeginPaint(window, &paint);
@@ -2981,6 +3033,8 @@ private:
     }
     std::wstring preview_hint_;  // Shown while the preview has no frame.
     HBRUSH preview_brush_ = nullptr;
+    HBRUSH surface_brush_ = nullptr;
+    HBRUSH panel_brush_ = nullptr;
     Palette palette_;
     bool quitting_ = false;
     bool attention_ = false;
