@@ -334,6 +334,25 @@ function Expect-Strip($ui, $bitmap, [int]$base) {
     }
     if (-not $labelText) { throw "strip label $($base + 1) has no light text pixels" }
 }
+function Expect-CustomTrackbar($ui, [int]$id, [string]$path) {
+    $bitmap = Snapshot-Window $ui $path
+    try {
+        $rect = Control-Rect $ui $id
+        $red = 0; $channel = 0
+        for ($y = [Math]::Max(0, $rect.Top); $y -lt [Math]::Min($bitmap.Height, $rect.Bottom); $y++) {
+            for ($x = [Math]::Max(0, $rect.Left); $x -lt [Math]::Min($bitmap.Width, $rect.Right); $x++) {
+                $pixel = $bitmap.GetPixel($x, $y)
+                if ($pixel.R -gt 150 -and $pixel.R -gt ($pixel.G * 1.7) -and $pixel.R -gt ($pixel.B * 1.7)) { $red++ }
+                if ($pixel.R -ge 55 -and $pixel.R -le 90 -and
+                    $pixel.G -ge 55 -and $pixel.G -le 90 -and
+                    $pixel.B -ge 60 -and $pixel.B -le 96) { $channel++ }
+            }
+        }
+        if ($red -lt 6) { throw "custom trackbar $id has only $red accent-red pixels in its snapshot" }
+        if ($channel -lt 6) { throw "custom trackbar $id has only $channel dark-channel pixels in its snapshot" }
+        Write-Host "D3. custom trackbar ${id}: $red accent-red pixels and $channel dark-channel pixels; saved $path"
+    } finally { $bitmap.Dispose() }
+}
 function Expect-Dark($ui) {
     $path = Join-Path $Artifacts 'app-surface.png'
     $bitmap = Snapshot-Window $ui $path
@@ -454,29 +473,39 @@ function Show-TrackbarClassStyle($ui) {
 }
 function Assert-StripGeometry($ui, [bool]$camera) {
     $label = if ($camera) { 'Camera' } else { 'Screen' }
-    $stripSlider = (Find $ui "$label brightness" $Slider).Handle
-    $sliderRect = New-Object AppWindow+RECT
-    [AppWindow]::GetWindowRect($stripSlider, [ref]$sliderRect) | Out-Null
-    $referenceRect = if ($camera) { Rect-Of $ui 'Camera contrast' $Slider } else { Rect-Of $ui 'System audio volume' $Slider }
-    if ($sliderRect.Left -ne $referenceRect.Left -or
-        ($sliderRect.Right - $sliderRect.Left) -ne ($referenceRect.Right - $referenceRect.Left)) {
-        throw "$label color sliders do not share the same start and width"
+    $base = if ($camera) { 320 } else { 300 }
+    $panelRect = New-Object AppWindow+RECT
+    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, $base + 11), [ref]$panelRect) | Out-Null
+    $inset = [int][Math]::Round(8 * [AppWindow]::GetDpiForWindow($ui.Window) / 96)
+    $sliderRects = @()
+    foreach ($name in @('brightness', 'contrast', 'saturation')) {
+        $handle = (Find $ui "$label $name" $Slider).Handle
+        $rect = New-Object AppWindow+RECT
+        [AppWindow]::GetWindowRect($handle, [ref]$rect) | Out-Null
+        $sliderRects += $rect
     }
-    $valueId = if ($camera) { 327 } else { 307 } # kCameraBrightnessValue / kScreenBrightnessValue
+    foreach ($rect in $sliderRects) {
+        if ($rect.Left -le ($panelRect.Left + 2) -or $rect.Right -ge ($panelRect.Right - 2) -or
+            $rect.Right -ne $sliderRects[0].Right) {
+            throw "$label color sliders do not share the padded start and width"
+        }
+    }
+    $valueId = $base + 7
     $valueRect = New-Object AppWindow+RECT
     [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, $valueId), [ref]$valueRect) | Out-Null
-    $audioValueRect = New-Object AppWindow+RECT
-    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 106), [ref]$audioValueRect) | Out-Null
+    if ($valueRect.Left -le $sliderRects[0].Right -or $valueRect.Right -ge ($panelRect.Right - 2)) {
+        throw "$label value readouts are not beside the slider at the padded panel edge"
+    }
     if ($camera) {
         $otherValue = New-Object AppWindow+RECT
-        [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 328), [ref]$otherValue) | Out-Null # kCameraContrastValue
-        if (($valueRect.Right - $valueRect.Left) -ne ($otherValue.Right - $otherValue.Left)) {
+        [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 328), [ref]$otherValue) | Out-Null
+        if (($valueRect.Right - $valueRect.Left) -ne ($otherValue.Right - $otherValue.Left) -or
+            $valueRect.Left -ne $otherValue.Left) {
             throw 'Camera value labels do not share a fixed-width value column'
         }
-    } elseif ($valueRect.Left -ne $audioValueRect.Left -or
-        ($valueRect.Right - $valueRect.Left) -ne ($audioValueRect.Right - $audioValueRect.Left)) {
-        throw 'Screen value labels do not share the audio readout column'
     }
+    $audioValueRect = New-Object AppWindow+RECT
+    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 106), [ref]$audioValueRect) | Out-Null
     $micValueRect = Rect-OfId $ui 111 # kMicVolumeText
     if ($audioValueRect.Left -ne $micValueRect.Left -or
         ($audioValueRect.Right - $audioValueRect.Left) -ne ($micValueRect.Right - $micValueRect.Left)) {
@@ -736,17 +765,19 @@ try {
     $volumeSlider = (Find $ui 'System audio volume' $Slider).Handle
     $screenSliderRect = Rect-Of $ui 'Screen brightness' $Slider
     $volumeSliderRect = Rect-Of $ui 'System audio volume' $Slider
-    if ($screenSliderRect.Left -ne $volumeSliderRect.Left -or
-        ($screenSliderRect.Right - $screenSliderRect.Left) -ne ($volumeSliderRect.Right - $volumeSliderRect.Left)) {
-        throw 'Screen and audio sliders do not share the same start and width'
+    $screenPanelRect = New-Object AppWindow+RECT
+    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 311), [ref]$screenPanelRect) | Out-Null
+    $stripInset = [int][Math]::Round(8 * [AppWindow]::GetDpiForWindow($ui.Window) / 96)
+    if ($screenSliderRect.Left -ne ($screenPanelRect.Left + $stripInset)) {
+        throw 'Screen color slider does not use the strip left inset'
     }
     $screenValueRect = New-Object AppWindow+RECT
     $volumeValueRect = New-Object AppWindow+RECT
     [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 307), [ref]$screenValueRect) | Out-Null
     [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 106), [ref]$volumeValueRect) | Out-Null  # kSystemVolumeText
-    if ($screenValueRect.Left -ne $volumeValueRect.Left -or
-        ($screenValueRect.Right - $screenValueRect.Left) -ne ($volumeValueRect.Right - $volumeValueRect.Left)) {
-        throw 'Screen value labels do not share the audio readout column'
+    if ($screenValueRect.Left -le $screenSliderRect.Right -or
+        [Math]::Abs($screenValueRect.Right - ($screenPanelRect.Right - 2 * $stripInset)) -gt 2) {
+        throw 'Screen value labels are not beside the slider at the inset panel edge'
     }
     Snapshot-StripDpi $ui $Artifacts 'app-strips'
     Set-Check $ui 'Camera' $true
@@ -1386,6 +1417,9 @@ try {
     Set-Check $ui 'Microphone' $true
     $slider = (Find $ui 'System audio volume' $Slider).Handle
     [AppWindow]::SendMessage($slider, 0x0405, [IntPtr]1, [IntPtr](-6)) | Out-Null  # TBM_SETPOS
+    if (-not (High-Contrast)) {
+        Expect-CustomTrackbar $ui 105 (Join-Path $Artifacts 'app-volume-slider-d3.png')
+    }
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $slider) | Out-Null  # WM_HSCROLL, TB_ENDTRACK
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
