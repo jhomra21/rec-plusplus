@@ -2931,6 +2931,21 @@ struct PreviewHit {
         });
         NSData* png = [flattened representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
         if (!png || ![png writeToFile:path atomically:YES]) fail([@"could not save window image: " stringByAppendingString:name]);
+        // The previews show captured content, not Rec's own surface, so they do not count toward its darkness.
+        __block NSRect preview1 = NSZeroRect, preview2 = NSZeroRect;
+        if (!snapshot) ui(^{
+            NSView* content = self->_window.contentView;
+            const CGFloat sx = rep.pixelsWide / content.bounds.size.width;
+            const CGFloat sy = rep.pixelsHigh / content.bounds.size.height;
+            const auto pixel_rect = [&](NSView* view) {
+                if (!view || view.window != self->_window || view.hiddenOrHasHiddenAncestor) return NSZeroRect;
+                NSRect r = [view convertRect:view.bounds toView:content];
+                if (!content.isFlipped) r.origin.y = content.bounds.size.height - NSMaxY(r);
+                return NSMakeRect(r.origin.x * sx, r.origin.y * sy, r.size.width * sx, r.size.height * sy);
+            };
+            preview1 = pixel_rect(self->_preview);
+            preview2 = pixel_rect(self->_preview2);
+        });
         long double luminance = 0;
         NSUInteger transparentPixels = 0;
         NSUInteger opaquePixels = 0;
@@ -2939,7 +2954,9 @@ struct PreviewHit {
         for (NSInteger y = 0; y < flattened.pixelsHigh; ++y) {
             for (NSInteger x = 0; x < flattened.pixelsWide; ++x) {
                 const unsigned char* pixel = pixels + y * flattened.bytesPerRow + x * bytesPerPixel;
+                const NSPoint center = NSMakePoint(x + 0.5, y + 0.5);
                 if (pixel[3] < 255) ++transparentPixels;
+                else if (NSPointInRect(center, preview1) || NSPointInRect(center, preview2)) continue;
                 else {
                     ++opaquePixels;
                     luminance += 0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2];
