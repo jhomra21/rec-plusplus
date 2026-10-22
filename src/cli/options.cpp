@@ -588,6 +588,30 @@ std::string summary(const Options& options, const Stats& stats, double wall_seco
     if (stats.audio_reconnects) out << "Audio devices reopened " << stats.audio_reconnects << '\n';
     if (std::any_of(options.overlays.begin(), options.overlays.end(), [](const Overlay& o) { return o.kind == Overlay::Kind::camera; }))
         out << "Camera frames " << stats.camera_frames << '\n';
+#ifdef _WIN32
+    for (std::size_t i = 0; i < options.overlays.size() && i < stats.window_layers.size(); ++i) {
+        if (options.overlays[i].kind != Overlay::Kind::window) continue;
+        const auto& layer = stats.window_layers[i];
+        out << "Window layer " << i + 1 << ": " << layer.frames << " frames, first at ";
+        if (layer.first_frame_ms < 0) out << "never";
+        else out << layer.first_frame_ms << " ms";
+        out << ", " << layer.resize_discards << " discarded, "
+            << layer.failures + layer.upload_failures + layer.recovery_failures
+            << " failures (callbacks " << layer.callbacks << ", callback/conversion "
+            << layer.failures << ", upload " << layer.upload_failures << ", recovery " << layer.recovery_failures;
+        if (layer.last_callback_code)
+            out << ", callback error 0x" << std::hex << std::uppercase
+                << static_cast<std::uint32_t>(layer.last_callback_code) << std::dec;
+        if (layer.last_recovery_code)
+            out << ", recovery error 0x" << std::hex << std::uppercase
+                << static_cast<std::uint32_t>(layer.last_recovery_code) << std::dec
+                << " at stage " << layer.last_recovery_stage;
+        if (layer.first_content_width && layer.first_pool_width)
+            out << ", first size " << layer.first_content_width << 'x' << layer.first_content_height
+                << " vs pool/item " << layer.first_pool_width << 'x' << layer.first_pool_height;
+        out << ")\n";
+    }
+#endif
     if (stats.paused_seconds > 0)
         out << "Paused " << std::fixed << std::setprecision(1) << stats.paused_seconds << " s (not in the movie)\n";
     std::vector<std::string> urls = options.stream_urls;

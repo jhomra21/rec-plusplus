@@ -232,6 +232,20 @@ struct Stats {
     std::uint32_t stream_count = 0;
     double replay_seconds = 0; // Media the replay buffer holds now.
     std::uint64_t camera_frames = 0; // Frames received from camera overlays.
+    struct WindowLayer {
+        std::uint64_t callbacks = 0;
+        std::uint64_t frames = 0;
+        std::uint64_t resize_discards = 0;
+        std::uint64_t failures = 0;
+        std::uint64_t upload_failures = 0;
+        std::uint64_t recovery_failures = 0;
+        std::int32_t last_callback_code = 0, last_recovery_code = 0;
+        std::uint32_t last_recovery_stage = 0;
+        std::int64_t first_frame_ms = -1;
+        std::uint32_t first_content_width = 0, first_content_height = 0;
+        std::uint32_t first_pool_width = 0, first_pool_height = 0;
+    };
+    std::array<WindowLayer, 15> window_layers{}; // Indexed by the overlay position.
     // The second canvas: frames composed and encoded, and frames skipped because its encoder
     // fell behind. Its servers follow the main canvas's in streams.
     std::uint64_t canvas2_frames = 0;
