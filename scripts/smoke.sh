@@ -32,6 +32,25 @@ within() {
   awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v != "" && v + 0 >= lo && v + 0 <= hi) }' \
     || { echo "$1 is outside [$2, $3]" >&2; exit 1; }
 }
+# MediaMTX finalizes received fragmented MP4 files after the stream ends. Retry both decode
+# failures and incomplete frame counts, but keep a bounded wait and print the last report.
+probe_received() {
+  local file="$1" report="$2" low="$3" high="$4" output="" frames="" status=0 attempt
+  for attempt in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    output="$("$rec" probe "$file" 2>&1)" && status=0 || status=$?
+    printf '%s\n' "$output" >"$report"
+    frames="$(printf '%s\n' "$output" | awk -F= '$1 == "frames" { print $2; exit }')"
+    if [ "$status" -eq 0 ] && awk -v v="$frames" -v lo="$low" -v hi="$high" \
+        'BEGIN { exit !(v != "" && v + 0 >= lo && v + 0 <= hi) }'; then
+      cat "$report"
+      return 0
+    fi
+    if [ "$attempt" -lt 20 ]; then sleep 0.5; fi
+  done
+  cat "$report" >&2
+  echo "MediaMTX received file did not finalize with $low-$high frames: $file" >&2
+  return 1
+}
 # color KEY FILE green|red|white|black|yellow: a sample_N=R,G,B probe field, with room for encoding error.
 color() {
   awk -F= -v key="$1" -v want="$3" '$1 == key {
@@ -524,7 +543,7 @@ else
     "$artifacts/stream-tiktok.record.log"
   file="$(find "$received/game/stream-REHEARSAL_ID" -type f -name '*.mp4' -print -quit)"
   [[ -n "$file" ]] || { echo 'MediaMTX recorded nothing for the TikTok-shaped stream' >&2; exit 1; }
-  "$rec" probe "$file" | tee "$artifacts/stream-tiktok-received.probe"
+  probe_received "$file" "$artifacts/stream-tiktok-received.probe" 129 180
   grep -qx 'codec=h264' "$artifacts/stream-tiktok-received.probe"
   grep -qx 'width=1080' "$artifacts/stream-tiktok-received.probe"
   grep -qx 'height=1920' "$artifacts/stream-tiktok-received.probe"
@@ -537,7 +556,7 @@ else
   within "$(value av_offset_max_ms "$artifacts/stream-tiktok-received.probe")" 0 "$tiktok_vertical_av_offset_max"
   file="$(find "$received/live/tiktok-landscape" -type f -name '*.mp4' -print -quit)"
   [[ -n "$file" ]] || { echo 'MediaMTX recorded nothing for the accompanying landscape stream' >&2; exit 1; }
-  "$rec" probe "$file" | tee "$artifacts/stream-tiktok-landscape-received.probe"
+  probe_received "$file" "$artifacts/stream-tiktok-landscape-received.probe" 174 180
   grep -qx 'codec=h264' "$artifacts/stream-tiktok-landscape-received.probe"
   grep -qx 'width=1920' "$artifacts/stream-tiktok-landscape-received.probe"
   grep -qx 'height=1080' "$artifacts/stream-tiktok-landscape-received.probe"
@@ -581,16 +600,18 @@ else
   for key in smokekey1 smokekey2; do
     file="$(find "$received/live/$key" -name '*.mp4' -print -quit)"
     [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
-    "$rec" probe "$file" | tee "$artifacts/stream-received-$key.probe"
+    least=119 most=120
+    if [[ "$key" == smokekey2 ]]; then least=89 most=90; fi
+    probe_received "$file" "$artifacts/stream-received-$key.probe" "$least" "$most"
   done
   # Same AVFoundation priming allowance as below.
   # The second canvas (smokekey11) may skip frames on a slow CI GPU, as checked above.
   for key in smokekey10 smokekey11; do
     file="$(find "$received/live/$key" -name '*.mp4' -print -quit)"
     [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
-    "$rec" probe "$file" | tee "$artifacts/stream-received-$key.probe"
     least=119
     if [[ "$key" == smokekey11 ]]; then least=114; [ "${GITHUB_ACTIONS:-}" = true ] && least=104; fi
+    probe_received "$file" "$artifacts/stream-received-$key.probe" "$least" 120
     av_offset_max=55
     if [[ "$key" == smokekey11 && "${GITHUB_ACTIONS:-}" = true ]]; then av_offset_max=89; fi
     within "$(value frames "$artifacts/stream-received-$key.probe")" "$least" 120
@@ -620,16 +641,15 @@ else
   grep -qx 'audio_codec=aac' "$artifacts/stream-received-smokekey2.probe"
   # Same AVFoundation priming allowance as above.
   file="$(find "$received/live/smokekey4" -name '*.mp4' -print -quit)"
-  "$rec" probe "$file" | tee "$artifacts/stream-received-smokekey4.probe"
+  probe_received "$file" "$artifacts/stream-received-smokekey4.probe" 119 120
   within "$(value frames "$artifacts/stream-received-smokekey4.probe")" 119 120
   within "$(value av_sync_events "$artifacts/stream-received-smokekey4.probe")" 4 4
   within "$(value av_offset_max_ms "$artifacts/stream-received-smokekey4.probe")" 0 55
   for key in smokewhip smokekey12; do
     file="$(find "$received/live/$key" -name '*.mp4' -print -quit)"
     [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
-    "$rec" probe "$file" | tee "$artifacts/stream-received-$key.probe"
+    probe_received "$file" "$artifacts/stream-received-$key.probe" 119 120
     grep -qx 'codec=h264' "$artifacts/stream-received-$key.probe"
-    within "$(value frames "$artifacts/stream-received-$key.probe")" 119 120
     within "$(value av_sync_events "$artifacts/stream-received-$key.probe")" 4 4
     # Same AVFoundation priming allowance as above (Opus: a 312-sample pre-skip, 6.5 ms).
     within "$(value av_offset_max_ms "$artifacts/stream-received-$key.probe")" 0 55
@@ -639,7 +659,7 @@ else
   for key in smokekey6 smokekey7; do
     file="$(find "$received/live/$key" -name '*.mp4' -print -quit)"
     [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
-    "$rec" probe "$file" | tee "$artifacts/stream-received-$key.probe"
+    probe_received "$file" "$artifacts/stream-received-$key.probe" 119 120
     within "$(value frames "$artifacts/stream-received-$key.probe")" 119 120
     within "$(value av_sync_events "$artifacts/stream-received-$key.probe")" 4 4
     within "$(value av_offset_max_ms "$artifacts/stream-received-$key.probe")" 0 55
@@ -648,7 +668,7 @@ else
   # written the 3 s before the kill, and that session cannot reach 100 frames anyway.
   file="$(find "$received/live/smokekey5" -name '*.mp4' | sort | tail -1)"
   [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for the restarted stream" >&2; exit 1; }
-  "$rec" probe "$file" | tee "$artifacts/stream-received-smokekey5.probe"
+  probe_received "$file" "$artifacts/stream-received-smokekey5.probe" 100 210
   within "$(value frames "$artifacts/stream-received-smokekey5.probe")" 100 210
   within "$(value av_sync_events "$artifacts/stream-received-smokekey5.probe")" 3 7
   # The resumed session adds the beep at the resume keyframe, which can decode faded in and
