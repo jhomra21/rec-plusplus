@@ -176,6 +176,7 @@ run_app() {
   fi
 }
 run_app "$report" "$artifacts/app.log"
+grep -qx 'appearance=app:NSAppearanceNameDarkAqua window:NSAppearanceNameDarkAqua' "$report"
 grep -qx 'accessibility=ok' "$report"
 grep '^margins=' "$report"
 grep -qx 'status-line=ok' "$report"
@@ -184,6 +185,7 @@ grep -qx 'camera-strip-hidden=ok' "$report"
 grep -Eqx 'tab-strip-order=ok focusable=[0-9]+' "$report"
 grep -qx 'status-recording-color=ok' "$report"
 grep -qx 'status-paused-color=ok' "$report"
+grep -q '^paused-accent-contrast=.*choice=keep-55-percent' "$report"
 grep -qx 'attention-text=ok' "$report"
 grep -qx 'camera-strip-visible=ok' "$report"
 check_window_png() {
@@ -211,6 +213,7 @@ grep -qx 'slider-double-click=ok' "$report"
 grep -qx 'slider-command-zero=ok' "$report"
 grep -qx 'slider-release-save=ok' "$report"
 grep -qx 'slider-mouse-release=not-synthesized' "$report"
+grep -q '^readout-drag=ok ' "$report"
 grep -qx 'menu-mute-save=ok' "$report"
 [[ -s "$artifacts/app-preview-screen-gray.png" && -s "$artifacts/app-preview-screen-reset.png" ]] \
   || { echo 'the screen color slider preview artifacts are missing' >&2; exit 1; }
@@ -397,4 +400,10 @@ within "$(value duration "$artifacts/app-keep.probe")" 5.5 9
 within "$(value av_sync_events "$artifacts/app-keep.probe")" 4 9
 within "$(value av_offset_max_ms "$artifacts/app-keep.probe")" 0 20
 echo "10. kept after quit: $(value frames "$artifacts/app-keep.probe") frames across the app quitting and reopening"
+if "$rec" status | tee "$artifacts/app-final-status.txt" | grep -q '^state=recording$'; then
+  "$rec" stop >/dev/null || true
+  echo 'the app E2E left a recording running; stopped it through the isolated engine socket' >&2
+  exit 1
+fi
+grep -qx 'state=idle' "$artifacts/app-final-status.txt"
 echo 'app e2e passed'
