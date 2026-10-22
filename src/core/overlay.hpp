@@ -14,6 +14,7 @@ namespace rec::core {
 
 // With the main capture, 16 layers. Each display or window layer is its own capture.
 inline constexpr std::size_t kMaxOverlays = 15;
+static_assert(kMaxOverlays == rec::kMaxOverlays);
 
 // Where a picture lands in the frame: destination edges in output pixels and the part of
 // the picture shown, in 0-1 texture coordinates.

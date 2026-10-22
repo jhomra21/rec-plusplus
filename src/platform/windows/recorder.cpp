@@ -64,6 +64,7 @@
 
 namespace rec {
 namespace {
+static_assert(rec::kMaxOverlays == core::kMaxOverlays);
 using Microsoft::WRL::ComPtr;
 using core::kMixRate;
 using win::Monitor;
@@ -1007,8 +1008,10 @@ public:
         if (allocator2_) { allocator2_->UninitializeSampleAllocator(); allocator2_.Reset(); }
         if (overlays_) {
             camera_frames_ = overlays_->camera_frames();
-            for (std::size_t i = 0; i < options_.overlays.size(); ++i)
+            for (std::size_t i = 0; i < std::min(options_.overlays.size(), window_layer_stats_.size()); ++i) {
+                if (options_.overlays[i].kind != Overlay::Kind::window) continue;
                 window_layer_stats_[i] = overlays_->window_layer_stats(i);
+            }
             overlays_->stop();
             overlays_.reset();
         }
@@ -1088,8 +1091,10 @@ public:
         stats.canvas2_dropped = canvas2_dropped_.load() + lost;
         stats.camera_frames = overlays_ ? overlays_->camera_frames() : camera_frames_;
         stats.camera_lost = overlays_ && overlays_->camera_lost();
-        for (std::size_t i = 0; i < window_layer_stats_.size(); ++i)
+        for (std::size_t i = 0; i < std::min(options_.overlays.size(), window_layer_stats_.size()); ++i) {
+            if (options_.overlays[i].kind != Overlay::Kind::window) continue;
             stats.window_layers[i] = overlays_ ? overlays_->window_layer_stats(i) : window_layer_stats_[i];
+        }
         const auto gone = [](const AudioSource& source) {
             return source.capture && (source.capture->lost() || source.silent.load());
         };
@@ -2035,7 +2040,7 @@ private:
     win::ClickSource click_source_;
     std::chrono::steady_clock::time_point shown_at_;  // The host instant of the slot being drawn.
     std::uint64_t camera_frames_ = 0;  // The count when the overlays were released.
-    std::array<Stats::WindowLayer, 15> window_layer_stats_{};
+    std::array<Stats::WindowLayer, kMaxOverlays> window_layer_stats_{};
     std::uint32_t audio_reconnects_ = 0;  // Of the captures already released.
     std::unique_ptr<win::FramePreview> previewer_;
     ComPtr<ID3D11Texture2D> composed_;  // The frame as drawn, in preview-only mode.

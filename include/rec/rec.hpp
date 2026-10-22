@@ -151,7 +151,7 @@ struct Options {
     Area screen_crop; // The part of the capture shown, in fractions of it.
     ColorAdjust screen_color;
     ColorAdjust camera_color;
-    std::vector<Overlay> overlays; // At most 15, drawn over the capture.
+    std::vector<Overlay> overlays; // At most kMaxOverlays, drawn over the capture.
     Canvas canvas2; // A second canvas, usually vertical; off while its width is 0.
     // Make preview() frames up to this many pixels wide, in the output's shape; 0 = no preview.
     std::uint32_t preview_width = 0;
@@ -186,6 +186,7 @@ struct Camera {
 };
 
 inline constexpr std::size_t kMaxStreams = 4;
+inline constexpr std::size_t kMaxOverlays = 15;
 
 // One server of a live stream.
 struct StreamStats {
@@ -235,17 +236,13 @@ struct Stats {
     struct WindowLayer {
         std::uint64_t callbacks = 0;
         std::uint64_t frames = 0;
-        std::uint64_t resize_discards = 0;
+        std::uint64_t resize_skips = 0;
         std::uint64_t failures = 0;
-        std::uint64_t upload_failures = 0;
-        std::uint64_t recovery_failures = 0;
-        std::int32_t last_callback_code = 0, last_recovery_code = 0;
-        std::uint32_t last_recovery_stage = 0;
+        std::uint32_t retries = 0;
+        std::int32_t last_error = 0;
         std::int64_t first_frame_ms = -1;
-        std::uint32_t first_content_width = 0, first_content_height = 0;
-        std::uint32_t first_pool_width = 0, first_pool_height = 0;
     };
-    std::array<WindowLayer, 15> window_layers{}; // Indexed by the overlay position.
+    std::array<WindowLayer, kMaxOverlays> window_layers{}; // Indexed by the overlay position.
     // The second canvas: frames composed and encoded, and frames skipped because its encoder
     // fell behind. Its servers follow the main canvas's in streams.
     std::uint64_t canvas2_frames = 0;
