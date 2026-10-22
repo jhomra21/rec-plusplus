@@ -239,7 +239,10 @@ std::vector<Strip> mixer_strips(const Settings& settings);
 struct Meter {
     float shown = 0;
     float feed(float peak);
-    void reset() { shown = 0; }
+    bool clipped() const;
+    void reset() { shown = 0; clip_until_ = {}; }
+private:
+    std::chrono::steady_clock::time_point clip_until_{};
 };
 // The sources settings use, bottom to top as drawn: the recorded screen, the layers, the
 // camera, the image.

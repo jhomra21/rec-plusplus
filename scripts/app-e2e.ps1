@@ -612,15 +612,32 @@ function Control-Rect($ui, [int]$id) {
 }
 function Meter-LitPixels($ui, $bitmap, [int]$id) {
     $rect = Control-Rect $ui $id
-    $channel = $bitmap.GetPixel($rect.Right - 1, [int](($rect.Top + $rect.Bottom) / 2))
+    $left = [Math]::Max(0, $rect.Left); $top = [Math]::Max(0, $rect.Top)
+    $right = [Math]::Min($bitmap.Width, $rect.Right); $bottom = [Math]::Min($bitmap.Height, $rect.Bottom)
+    if ($right -le $left -or $bottom -le $top) { throw "meter control $id has an empty rectangle after clamping to the $($bitmap.Width)x$($bitmap.Height) bitmap" }
+    $channel = $bitmap.GetPixel($right - 1, [int](($top + $bottom - 1) / 2))
     $lit = 0
-    for ($y = $rect.Top; $y -lt $rect.Bottom; $y++) {
-        for ($x = $rect.Left; $x -lt $rect.Right; $x++) {
+    for ($y = $top; $y -lt $bottom; $y++) {
+        for ($x = $left; $x -lt $right; $x++) {
             $pixel = $bitmap.GetPixel($x, $y)
             if ($pixel.ToArgb() -ne $channel.ToArgb()) { $lit++ }
         }
     }
     return $lit
+}
+function Meter-ColorPixels($ui, $bitmap, [int]$id, [int]$r, [int]$g, [int]$b) {
+    $rect = Control-Rect $ui $id
+    $left = [Math]::Max(0, $rect.Left); $top = [Math]::Max(0, $rect.Top)
+    $right = [Math]::Min($bitmap.Width, $rect.Right); $bottom = [Math]::Min($bitmap.Height, $rect.Bottom)
+    if ($right -le $left -or $bottom -le $top) { throw "meter control $id has an empty rectangle after clamping to the $($bitmap.Width)x$($bitmap.Height) bitmap" }
+    $count = 0
+    for ($y = $top; $y -lt $bottom; $y++) {
+        for ($x = $left; $x -lt $right; $x++) {
+            $pixel = $bitmap.GetPixel($x, $y)
+            if ([Math]::Abs($pixel.R - $r) + [Math]::Abs($pixel.G - $g) + [Math]::Abs($pixel.B - $b) -le 45) { $count++ }
+        }
+    }
+    return $count
 }
 function Closest-Status-Color($bitmap, $ui, [int]$r, [int]$g, [int]$b) {
     $rect = Control-Rect $ui 100
@@ -1476,29 +1493,41 @@ try {
     Write-Host '7. meter idle probe: system=0 mic=0 lit pixels'
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    $meterRecordingAt = Get-Date
     Wait-Until {
         $probeShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-probe.png')
         try { (Meter-LitPixels $ui $probeShot 104) -gt 0 } finally { $probeShot.Dispose() }
     } 'system meter did not show lit pixels within 2 s' 2
     $meter = Find $ui 'System audio level' 48  # ROLE_SYSTEM_PROGRESSBAR
     $meterValue = [string]$meter.Item.accValue(0)
-    if ($meterValue -notmatch '-?\d+\.\d dB') { throw "system meter has no accessible dB value: '$meterValue'" }
+    if ($meterValue -notmatch '^-?\d+ dB$|^silent$') { throw "system meter has no accessible integer dB value: '$meterValue'" }
     Write-Host "7. meter accessibility probe: role=ProgressBar name=System audio level value=$meterValue"
     $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter.png')
     $meterLitBeforeMute = Meter-LitPixels $ui $meterShot 104
+    if (-not (High-Contrast)) {
+        $meterGreen = Meter-ColorPixels $ui $meterShot 104 70 190 105
+        $meterRed = Meter-ColorPixels $ui $meterShot 104 225 40 40
+        if ($meterGreen -le 0 -or $meterRed -ne 0) { throw "meter colors at -6 dB were unexpected: green=$meterGreen red=$meterRed" }
+        Write-Host "7. meter color probe: green=$meterGreen red=$meterRed pixels"
+    }
     $meterShot.Dispose()
     Write-Host "7. meter recording probe: system=$meterLitBeforeMute lit pixels"
     Start-Sleep -Milliseconds 2500
     Set-Check $ui 'Mute system' $true
+    $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-muted-probe.png')
+    $meterLitAfterMuteStart = Meter-LitPixels $ui $meterShot 104
+    $meterShot.Dispose()
+    $meterLitAfterMute = $meterLitAfterMuteStart
     Wait-Until {
         $probeShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-muted-probe.png')
-        try { (Meter-LitPixels $ui $probeShot 104) -gt 0 } finally { $probeShot.Dispose() }
-    } 'system meter stopped moving after post-meter mute' 2
-    $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter.png')
-    $meterLitAfterMute = Meter-LitPixels $ui $meterShot 104
-    $meterShot.Dispose()
-    Write-Host "7. meter post-mute probe: system=$meterLitAfterMute lit pixels"
-    Start-Sleep -Milliseconds 2000
+        try {
+            $meterLitAfterMute = Meter-LitPixels $ui $probeShot 104
+            $meterLitAfterMute -gt $meterLitAfterMuteStart
+        } finally { $probeShot.Dispose() }
+    } 'system meter did not rise on a later beep after post-meter mute' 2
+    Write-Host "7. meter post-mute probe: before=$meterLitAfterMuteStart after=$meterLitAfterMute lit pixels"
+    $untilUnmute = 4500 - [int]((Get-Date) - $meterRecordingAt).TotalMilliseconds
+    if ($untilUnmute -gt 0) { Start-Sleep -Milliseconds $untilUnmute }
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1006, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Mute System Audio"
     Start-Sleep -Milliseconds 2000
     Press $ui 'Stop Recording'
