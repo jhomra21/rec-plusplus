@@ -1612,8 +1612,9 @@ try {
     Start-Sleep -Milliseconds 300
     if ([int][AppWindow]::SendMessage($sources, 0x018B, [IntPtr]::Zero, [IntPtr]::Zero) -ne 2) { throw 'the display layer was not removed' }  # LB_GETCOUNT
     Write-Host "6d. scenes: $($quarter['frames']) frames ($counted at Stop); a display layer placed by dragging in a new scene, switched away while recording"
-    # 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in,
-    # unmuted from the notification-area menu 4.5 s in. The mix loses the beeps at 3 and 4 s.
+    # 7. Volume and mute: system audio at -6 dB from the slider, muted with its box 2.5 s in (or
+    # the next half second after the meter probes), unmuted from the notification-area menu 2 s
+    # later. The mix loses the two beeps in between.
     Set-Check $ui 'Microphone' $true
     $slider = (Find $ui 'System audio volume' $Slider).Handle
     [AppWindow]::SendMessage($slider, 0x0405, [IntPtr]1, [IntPtr](-6)) | Out-Null  # TBM_SETPOS
@@ -1655,7 +1656,11 @@ try {
     }
     $meterShot.Dispose()
     Write-Host "M2. bottom-up meter: system=$meterLitBeforeMute lit pixels; top row=$($meterStats.topLit)/$($meterStats.topCount), bottom row=$($meterStats.bottomLit)/$($meterStats.bottomCount)"
-    Start-Sleep -Milliseconds 2500
+    # The probes above can outlast 2.5 s on a slow runner, so the mute lands on the next half
+    # second after them (2.5 s at the earliest) and the expectations move with it.
+    $elapsed = [int]((Get-Date) - $meterRecordingAt).TotalMilliseconds
+    $muteAt = [Math]::Max(2500, [int]([Math]::Ceiling(($elapsed + 200 - 500) / 1000.0) * 1000 + 500))
+    Start-Sleep -Milliseconds ($muteAt - [int]((Get-Date) - $meterRecordingAt).TotalMilliseconds)
     Set-Check $ui 'Mute system' $true
     $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-muted-probe.png')
     $meterLitAfterMuteStart = Meter-LitPixels $ui $meterShot 104
@@ -1674,7 +1679,7 @@ try {
         } finally { $probeShot.Dispose() }
     } 'system meter did not rise on a later beep after post-meter mute' 2
     Write-Host "7. meter post-mute probe: first=$meterLitAfterMuteStart low=$($script:meterLitMutedLow) risen=$($script:meterLitAfterMute) lit pixels"
-    $untilUnmute = 4500 - [int]((Get-Date) - $meterRecordingAt).TotalMilliseconds
+    $untilUnmute = $muteAt + 2000 - [int]((Get-Date) - $meterRecordingAt).TotalMilliseconds
     if ($untilUnmute -gt 0) { Start-Sleep -Milliseconds $untilUnmute }
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1006, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Mute System Audio"
     Start-Sleep -Milliseconds 2000
@@ -1684,10 +1689,11 @@ try {
     Copy-Item $movie (Join-Path $Artifacts 'app-mute.mp4')
     $muted = Get-Probe $Rec $movie (Join-Path $Artifacts 'app-mute.probe')
     $beeps = @($muted['beeps'].Split(',') | ForEach-Object { [double]::Parse($_, [Globalization.CultureInfo]::InvariantCulture) })
-    if (@($beeps | Where-Object { $_ -lt 2.5 }).Count -lt 2) { throw "beeps before the mute are missing: $($muted['beeps'])" }
-    if (@($beeps | Where-Object { $_ -gt 2.7 -and $_ -lt 4.5 }).Count -ne 0) { throw "beeps while muted: $($muted['beeps'])" }
-    if (@($beeps | Where-Object { $_ -gt 4.7 }).Count -lt 1) { throw "no beeps after unmuting: $($muted['beeps'])" }
-    Write-Host "7. volume and mute: beeps at $($muted['beeps'])"
+    $muteSeconds = $muteAt / 1000.0
+    if (@($beeps | Where-Object { $_ -lt $muteSeconds }).Count -lt 2) { throw "beeps before the mute are missing: $($muted['beeps'])" }
+    if (@($beeps | Where-Object { $_ -gt $muteSeconds + 0.2 -and $_ -lt $muteSeconds + 2 }).Count -ne 0) { throw "beeps while muted ($muteSeconds s to $($muteSeconds + 2) s): $($muted['beeps'])" }
+    if (@($beeps | Where-Object { $_ -gt $muteSeconds + 2.2 }).Count -lt 1) { throw "no beeps after unmuting: $($muted['beeps'])" }
+    Write-Host "7. volume and mute: muted at $muteSeconds s for 2 s; beeps at $($muted['beeps'])"
     # Click marks follow the box into the settings (the engine's marks are checked by the smoke run).
     Set-Check $ui 'Show clicks' $true
     # 8. Closing when idle quits and saves settings, without the key.
