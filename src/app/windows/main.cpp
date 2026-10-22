@@ -485,10 +485,10 @@ private:
         if (_wcsicmp(class_name, WC_COMBOBOXW) == 0)
             theme = L"DarkMode_CFD";
         else if (_wcsicmp(class_name, WC_BUTTONW) == 0 || _wcsicmp(class_name, WC_EDITW) == 0 ||
-                 _wcsicmp(class_name, WC_LISTBOXW) == 0 || _wcsicmp(class_name, L"ScrollBar") == 0 ||
+                 _wcsicmp(class_name, WC_LISTBOXW) == 0 ||
                  _wcsicmp(class_name, TRACKBAR_CLASSW) == 0)
             theme = L"DarkMode_Explorer";
-        if (theme) SetWindowTheme(hwnd, palette_.high_contrast ? L"" : theme, palette_.high_contrast ? L"" : nullptr);
+        if (theme) SetWindowTheme(hwnd, palette_.high_contrast ? nullptr : theme, nullptr);
     }
     void set_dark_title_bar(HWND window) const {
         if (!window || palette_.high_contrast) return;
@@ -877,6 +877,9 @@ private:
             return 0;
         }
         case WM_SETTINGCHANGE:
+            if (w != SPI_SETHIGHCONTRAST &&
+                !(l && _wcsicmp(reinterpret_cast<const wchar_t*>(l), L"ImmersiveColorSet") == 0))
+                return 0;
             palette_ = Palette::current();
             rebuild_brushes();
             for (const auto& [id, hwnd] : controls_) apply_control_theme(hwnd);
@@ -1387,7 +1390,13 @@ private:
             put(reset_id, x + width - px(8) - px(70), y + px(12), px(70), px(22));
             y += px(36);
             for (int i = 0; i < 3; ++i) {
-                color_slider(labels[i], sliders[i], values[i], px(110));
+                const int left = x;
+                const int row_width = width;
+                x += inset;
+                width -= 2 * inset;
+                color_slider(labels[i], sliders[i], values[i], 0);
+                x = left;
+                width = row_width;
                 ShowWindow(get(labels[i]), SW_SHOWNA);
                 ShowWindow(get(sliders[i]), SW_SHOWNA);
                 ShowWindow(get(values[i]), SW_SHOWNA);

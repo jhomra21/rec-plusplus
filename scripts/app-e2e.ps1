@@ -279,6 +279,61 @@ function High-Contrast {
     $hc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($hc)
     return [AppWindow]::SystemParametersInfo(0x0042, [uint32]$hc.cbSize, [ref]$hc, 0) -and (($hc.dwFlags -band 1) -ne 0)
 }
+function Expect-Strip($ui, $bitmap, [int]$base) {
+    $panel = Control-Rect $ui ($base + 11)
+    $allControls = @(100..399 | ForEach-Object {
+        $handle = [AppWindow]::GetDlgItem($ui.Window, $_)
+        if ($handle -ne [IntPtr]::Zero -and $_ -ne ($base + 11)) { Control-Rect $ui $_ }
+    })
+    $sample = $null
+    for ($y = $panel.Top + 4; $y -lt $panel.Bottom - 4 -and -not $sample; $y++) {
+        for ($x = $panel.Left + 4; $x -lt $panel.Right - 4; $x++) {
+            $covered = $false
+            foreach ($rect in $allControls) {
+                if ($x -ge $rect.Left -and $x -lt $rect.Right -and $y -ge $rect.Top -and $y -lt $rect.Bottom) {
+                    $covered = $true; break
+                }
+            }
+            if (-not $covered) { $sample = $bitmap.GetPixel($x, $y); break }
+        }
+    }
+    if (-not $sample) { throw "could not find an uncovered point inside strip panel $base" }
+    $r = [int]$sample.R; $g = [int]$sample.G; $b = [int]$sample.B
+    $brightness = [int](($r + $g + $b) / 3)
+    $surface = 28 # D1 surface palette is RGB 28,28,32.
+    if ($brightness -le $surface -or $brightness -ge 70) {
+        throw "strip panel $base RGB $r,$g,$b is not lighter than the surface and still dark"
+    }
+    foreach ($id in @(($base + 4), ($base + 5), ($base + 6), ($base + 10))) {
+        $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
+        if ($handle -eq [IntPtr]::Zero -or -not [AppWindow]::IsWindowVisible($handle)) {
+            throw "strip control $id is missing or not visible"
+        }
+        $rect = Control-Rect $ui $id
+        $coverage = 0
+        for ($y = [Math]::Max($panel.Top, $rect.Top); $y -lt [Math]::Min($panel.Bottom, $rect.Bottom); $y++) {
+            for ($x = [Math]::Max($panel.Left, $rect.Left); $x -lt [Math]::Min($panel.Right, $rect.Right); $x++) {
+                $pixel = $bitmap.GetPixel($x, $y)
+                $difference = [Math]::Abs([int]$pixel.R - $r) +
+                              [Math]::Abs([int]$pixel.G - $g) +
+                              [Math]::Abs([int]$pixel.B - $b)
+                if ($difference -gt 60) { $coverage++ }
+            }
+        }
+        if ($coverage -lt 20) { throw "strip control $id is covered by panel $base (only $coverage differing pixels)" }
+    }
+    $label = Control-Rect $ui ($base + 1)
+    $labelText = $false
+    for ($y = [Math]::Max(0, $label.Top); $y -lt [Math]::Min($bitmap.Height, $label.Bottom) -and -not $labelText; $y++) {
+        for ($x = [Math]::Max(0, $label.Left); $x -lt [Math]::Min($bitmap.Width, $label.Right); $x++) {
+            $pixel = $bitmap.GetPixel($x, $y)
+            if ([Math]::Max([int]$pixel.R, [Math]::Max([int]$pixel.G, [int]$pixel.B)) -gt 150) {
+                $labelText = $true; break
+            }
+        }
+    }
+    if (-not $labelText) { throw "strip label $($base + 1) has no light text pixels" }
+}
 function Expect-Dark($ui) {
     $path = Join-Path $Artifacts 'app-surface.png'
     $bitmap = Snapshot-Window $ui $path
@@ -298,47 +353,7 @@ function Expect-Dark($ui) {
         if ($r -ge 45 -or $g -ge 45 -or $b -ge 45) {
             throw "app surface margin is not dark: mean RGB $r,$g,$b"
         }
-        $panel = Control-Rect $ui 311 # Screen strip panel's stable id.
-        $allControls = @(100..399 | ForEach-Object {
-            $handle = [AppWindow]::GetDlgItem($ui.Window, $_)
-            if ($handle -ne [IntPtr]::Zero -and $_ -ne 311) { Control-Rect $ui $_ }
-        })
-        $sample = $null
-        for ($y = $panel.Top + 4; $y -lt $panel.Bottom - 4 -and -not $sample; $y++) {
-            for ($x = $panel.Left + 4; $x -lt $panel.Right - 4; $x++) {
-                $covered = $false
-                foreach ($rect in $allControls) {
-                    if ($x -ge $rect.Left -and $x -lt $rect.Right -and $y -ge $rect.Top -and $y -lt $rect.Bottom) {
-                        $covered = $true; break
-                    }
-                }
-                if (-not $covered) { $sample = $bitmap.GetPixel($x, $y); break }
-            }
-        }
-        if (-not $sample) { throw 'could not find an uncovered point inside the Screen strip panel' }
-        $brightness = [int](($sample.R + $sample.G + $sample.B) / 3)
-        $surface = [int](($r + $g + $b) / 3)
-        if ($brightness -le $surface -or $brightness -ge 70) {
-            throw "Screen strip panel RGB $($sample.R),$($sample.G),$($sample.B) is not lighter than the surface and still dark"
-        }
-        foreach ($id in @(304, 305, 306, 310)) { # Screen brightness/contrast/saturation and Reset.
-            $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
-            if ($handle -eq [IntPtr]::Zero -or -not [AppWindow]::IsWindowVisible($handle)) {
-                throw "Screen strip control $id is missing or not visible"
-            }
-            $rect = Control-Rect $ui $id
-            $coverage = 0
-            for ($y = [Math]::Max($panel.Top, $rect.Top); $y -lt [Math]::Min($panel.Bottom, $rect.Bottom); $y++) {
-                for ($x = [Math]::Max($panel.Left, $rect.Left); $x -lt [Math]::Min($panel.Right, $rect.Right); $x++) {
-                    $pixel = $bitmap.GetPixel($x, $y)
-                    $difference = [Math]::Abs([int]$pixel.R - [int]$sample.R) +
-                                  [Math]::Abs([int]$pixel.G - [int]$sample.G) +
-                                  [Math]::Abs([int]$pixel.B - [int]$sample.B)
-                    if ($difference -gt 60) { $coverage++ }
-                }
-            }
-            if ($coverage -lt 20) { throw "Screen strip control $id is covered by its panel (only $coverage differing pixels)" }
-        }
+        Expect-Strip $ui $bitmap 300
         $microphone = (Find $ui 'Microphone' $CheckButton).Handle
         $micRect = Control-Rect $ui ([AppWindow]::GetDlgCtrlID($microphone))
         $micText = $false
@@ -351,18 +366,7 @@ function Expect-Dark($ui) {
             }
         }
         if (-not $micText) { throw 'Microphone check-box text has no light pixels in its control rect' }
-        $brightnessLabel = Control-Rect $ui 301 # Screen Brightness label.
-        $labelText = $false
-        for ($y = [Math]::Max(0, $brightnessLabel.Top); $y -lt [Math]::Min($bitmap.Height, $brightnessLabel.Bottom) -and -not $labelText; $y++) {
-            for ($x = [Math]::Max(0, $brightnessLabel.Left); $x -lt [Math]::Min($bitmap.Width, $brightnessLabel.Right); $x++) {
-                $pixel = $bitmap.GetPixel($x, $y)
-                if ([Math]::Max([int]$pixel.R, [Math]::Max([int]$pixel.G, [int]$pixel.B)) -gt 150) {
-                    $labelText = $true; break
-                }
-            }
-        }
-        if (-not $labelText) { throw 'Screen Brightness label has no light text pixels' }
-        Write-Host "D1. dark surface: margin mean $r,$g,$b; Screen panel $($sample.R),$($sample.G),$($sample.B); saved $path"
+        Write-Host "D1. dark surface: margin mean $r,$g,$b; strip probes passed; saved $path"
     } finally { $bitmap.Dispose() }
 }
 function Set-TestDpi($ui, [int]$dpi, $baseRect, [int]$baseDpi) {
@@ -747,6 +751,10 @@ try {
     Snapshot-StripDpi $ui $Artifacts 'app-strips'
     Set-Check $ui 'Camera' $true
     Assert-StripVisibility $ui @(320..331) $true 'Camera'
+    $cameraStripBitmap = Snapshot-Window $ui (Join-Path $Artifacts 'app-strips-camera-contrast.png')
+    try {
+        if (-not (High-Contrast)) { Expect-Strip $ui $cameraStripBitmap 320 }
+    } finally { $cameraStripBitmap.Dispose() }
     Snapshot-StripDpi $ui $Artifacts 'app-strips-camera'
     Set-Check $ui 'Camera' $false
     Assert-StripVisibility $ui @(320..331) $false 'Camera'
