@@ -304,8 +304,8 @@ function Expect-Dark($ui) {
             if ($handle -ne [IntPtr]::Zero -and $_ -ne 311) { Control-Rect $ui $_ }
         })
         $sample = $null
-        for ($y = $panel.Top + 2; $y -lt $panel.Bottom - 2 -and -not $sample; $y++) {
-            for ($x = $panel.Left + 2; $x -lt $panel.Right - 2; $x++) {
+        for ($y = $panel.Top + 4; $y -lt $panel.Bottom - 4 -and -not $sample; $y++) {
+            for ($x = $panel.Left + 4; $x -lt $panel.Right - 4; $x++) {
                 $covered = $false
                 foreach ($rect in $allControls) {
                     if ($x -ge $rect.Left -and $x -lt $rect.Right -and $y -ge $rect.Top -and $y -lt $rect.Bottom) {
@@ -321,6 +321,47 @@ function Expect-Dark($ui) {
         if ($brightness -le $surface -or $brightness -ge 70) {
             throw "Screen strip panel RGB $($sample.R),$($sample.G),$($sample.B) is not lighter than the surface and still dark"
         }
+        foreach ($id in @(304, 305, 306, 310)) { # Screen brightness/contrast/saturation and Reset.
+            $handle = [AppWindow]::GetDlgItem($ui.Window, $id)
+            if ($handle -eq [IntPtr]::Zero -or -not [AppWindow]::IsWindowVisible($handle)) {
+                throw "Screen strip control $id is missing or not visible"
+            }
+            $rect = Control-Rect $ui $id
+            $coverage = 0
+            for ($y = [Math]::Max($panel.Top, $rect.Top); $y -lt [Math]::Min($panel.Bottom, $rect.Bottom); $y++) {
+                for ($x = [Math]::Max($panel.Left, $rect.Left); $x -lt [Math]::Min($panel.Right, $rect.Right); $x++) {
+                    $pixel = $bitmap.GetPixel($x, $y)
+                    $difference = [Math]::Abs([int]$pixel.R - [int]$sample.R) +
+                                  [Math]::Abs([int]$pixel.G - [int]$sample.G) +
+                                  [Math]::Abs([int]$pixel.B - [int]$sample.B)
+                    if ($difference -gt 60) { $coverage++ }
+                }
+            }
+            if ($coverage -lt 20) { throw "Screen strip control $id is covered by its panel (only $coverage differing pixels)" }
+        }
+        $microphone = (Find $ui 'Microphone' $CheckButton).Handle
+        $micRect = Control-Rect $ui ([AppWindow]::GetDlgCtrlID($microphone))
+        $micText = $false
+        for ($y = [Math]::Max(0, $micRect.Top); $y -lt [Math]::Min($bitmap.Height, $micRect.Bottom) -and -not $micText; $y++) {
+            for ($x = [Math]::Max(0, $micRect.Left); $x -lt [Math]::Min($bitmap.Width, $micRect.Right); $x++) {
+                $pixel = $bitmap.GetPixel($x, $y)
+                if ([Math]::Max([int]$pixel.R, [Math]::Max([int]$pixel.G, [int]$pixel.B)) -gt 150) {
+                    $micText = $true; break
+                }
+            }
+        }
+        if (-not $micText) { throw 'Microphone check-box text has no light pixels in its control rect' }
+        $brightnessLabel = Control-Rect $ui 301 # Screen Brightness label.
+        $labelText = $false
+        for ($y = [Math]::Max(0, $brightnessLabel.Top); $y -lt [Math]::Min($bitmap.Height, $brightnessLabel.Bottom) -and -not $labelText; $y++) {
+            for ($x = [Math]::Max(0, $brightnessLabel.Left); $x -lt [Math]::Min($bitmap.Width, $brightnessLabel.Right); $x++) {
+                $pixel = $bitmap.GetPixel($x, $y)
+                if ([Math]::Max([int]$pixel.R, [Math]::Max([int]$pixel.G, [int]$pixel.B)) -gt 150) {
+                    $labelText = $true; break
+                }
+            }
+        }
+        if (-not $labelText) { throw 'Screen Brightness label has no light text pixels' }
         Write-Host "D1. dark surface: margin mean $r,$g,$b; Screen panel $($sample.R),$($sample.G),$($sample.B); saved $path"
     } finally { $bitmap.Dispose() }
 }
@@ -807,7 +848,7 @@ try {
     Press $ui 'Pause'
     Wait-Status $ui 'Paused' | Out-Null
     $pauseShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-paused.png')
-    if ((Closest-Status-Color $pauseShot $ui 240 147 147) -gt 120) { throw 'paused status text did not use the dimmed palette accent' }
+    if ((Closest-Status-Color $pauseShot $ui 126 34 36) -gt 100) { throw 'paused status text did not use the dimmed palette accent' }
     $pauseShot.Dispose()
     Start-Sleep -Milliseconds 1500
     Press $ui 'Resume'
