@@ -959,14 +959,18 @@ try {
     $picture.Dispose()
     Wait-Recorded $ui 5
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]2001, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Screen only"
-    $screenBrightness = (Find $ui 'Screen brightness' $Slider).Handle
-    [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](-50)) | Out-Null
-    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]5, $screenBrightness) | Out-Null
-    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
-    Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("screen_color=-50,0,0") } 'screen color was not saved after slider end-track'
+    Wait-Until { (Find $ui 'Scene' $ComboBox).Item.accValue(0) -eq 'Screen only' } 'the posted Screen only scene was not applied by the app'
+    # The recording test pattern has dark bands and a white flash, unlike the white preview.
+    # Zero contrast maps both to mid-gray, so the strict samples test scene composition.
+    $screenContrast = (Find $ui 'Screen contrast' $Slider).Handle
+    [AppWindow]::SendMessage($screenContrast, 0x0405, [IntPtr]1, [IntPtr](-100)) | Out-Null
+    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]5, $screenContrast) | Out-Null
+    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenContrast) | Out-Null
+    Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("screen_color=0,-100,0") } 'screen color was not saved after slider end-track'
     $settingsAfterColor = [IO.File]::ReadAllText((Join-Path $appHome 'settings.conf'))
-    Expect-Text $settingsAfterColor 'screen_color=-50,0,0'
+    Expect-Text $settingsAfterColor 'screen_color=0,-100,0'
     Expect-Text $settingsAfterColor 'camera_color=0,0,0'
+    Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-recording.png') @(0.4, 0.4, 0.2, 0.2) 'gray'
     Wait-Recorded $ui 7
     $counted = Text-Of $ui 101
     Press $ui 'Stop Recording'
