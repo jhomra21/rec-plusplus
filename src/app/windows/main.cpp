@@ -10,6 +10,7 @@
 #include <windows.h>
 #include <dwmapi.h>
 #include <commctrl.h>
+#include <uxtheme.h>
 #include <windowsx.h>
 #include <shellapi.h>
 #include <shlobj.h>
@@ -470,12 +471,24 @@ public:
 
 private:
     void rebuild_brushes() {
-        if (preview_brush_) DeleteObject(preview_brush_);
         if (surface_brush_) DeleteObject(surface_brush_);
         if (panel_brush_) DeleteObject(panel_brush_);
-        preview_brush_ = CreateSolidBrush(palette_.surface);
         surface_brush_ = CreateSolidBrush(palette_.surface);
+        preview_brush_ = surface_brush_;
         panel_brush_ = CreateSolidBrush(palette_.panel);
+    }
+    void apply_control_theme(HWND hwnd) const {
+        if (!hwnd) return;
+        wchar_t class_name[64]{};
+        if (!GetClassNameW(hwnd, class_name, static_cast<int>(std::size(class_name)))) return;
+        const wchar_t* theme = nullptr;
+        if (_wcsicmp(class_name, WC_COMBOBOXW) == 0)
+            theme = L"DarkMode_CFD";
+        else if (_wcsicmp(class_name, WC_BUTTONW) == 0 || _wcsicmp(class_name, WC_EDITW) == 0 ||
+                 _wcsicmp(class_name, WC_LISTBOXW) == 0 || _wcsicmp(class_name, L"ScrollBar") == 0 ||
+                 _wcsicmp(class_name, TRACKBAR_CLASSW) == 0)
+            theme = L"DarkMode_Explorer";
+        if (theme) SetWindowTheme(hwnd, palette_.high_contrast ? L"" : theme, palette_.high_contrast ? L"" : nullptr);
     }
     void set_dark_title_bar(HWND window) const {
         if (!window || palette_.high_contrast) return;
@@ -487,7 +500,8 @@ private:
         const HWND control = reinterpret_cast<HWND>(l);
         const HDC dc = reinterpret_cast<HDC>(w);
         const int id = GetDlgCtrlID(control);
-        const bool panel = id == kScreenStripBox || id == kCameraStripBox;
+        const bool panel = (id >= kScreenColorLabel && id <= kScreenStripBox) ||
+                           (id >= kCameraColorLabel && id <= kCameraStripBox);
         SetBkColor(dc, panel ? palette_.panel : palette_.surface);
         if (app_control) {
             const bool status = id == kStatus;
@@ -862,6 +876,37 @@ private:
             fit();
             return 0;
         }
+        case WM_SETTINGCHANGE:
+            palette_ = Palette::current();
+            rebuild_brushes();
+            for (const auto& [id, hwnd] : controls_) apply_control_theme(hwnd);
+            if (phone_window_)
+                for (HWND child = GetWindow(phone_window_, GW_CHILD); child; child = GetWindow(child, GW_HWNDNEXT))
+                    apply_control_theme(child);
+            SetClassLongPtrW(window_, GCLP_HBRBACKGROUND, reinterpret_cast<LONG_PTR>(surface_brush_));
+            if (phone_window_)
+                SetClassLongPtrW(phone_window_, GCLP_HBRBACKGROUND, reinterpret_cast<LONG_PTR>(surface_brush_));
+            set_dark_title_bar(window_);
+            set_dark_title_bar(phone_window_);
+            InvalidateRect(window_, nullptr, TRUE);
+            if (phone_window_) InvalidateRect(phone_window_, nullptr, TRUE);
+            return 0;
+        case WM_ERASEBKGND:
+        case WM_PRINTCLIENT: {
+            HDC dc = reinterpret_cast<HDC>(w);
+            RECT client{};
+            GetClientRect(window_, &client);
+            FillRect(dc, &client, surface_brush_);
+            for (int box : {kScreenStripBox, kCameraStripBox}) {
+                HWND strip = get(box);
+                if (!IsWindowVisible(strip)) continue;
+                RECT r{};
+                GetWindowRect(strip, &r);
+                MapWindowPoints(nullptr, window_, reinterpret_cast<POINT*>(&r), 2);
+                FillRect(dc, &r, panel_brush_);
+            }
+            return 1;
+        }
         case WM_CTLCOLORSTATIC: {
             return control_color(w, l);
         }
@@ -959,7 +1004,6 @@ private:
             UnregisterHotKey(window_, kHotkey);
             UnregisterHotKey(window_, kReplayHotkey);
             Shell_NotifyIconW(NIM_DELETE, &tray_);
-            if (preview_brush_) DeleteObject(preview_brush_);
             if (surface_brush_) DeleteObject(surface_brush_);
             if (panel_brush_) DeleteObject(panel_brush_);
             PostQuitMessage(0);
@@ -1018,6 +1062,7 @@ private:
     HWND add(int id, const wchar_t* type, const wchar_t* text, DWORD style, DWORD extended = 0) {
         HWND hwnd = CreateWindowExW(extended, type, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, window_,
                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), instance_, nullptr);
+        apply_control_theme(hwnd);
         controls_.push_back({id, hwnd});
         return hwnd;
     }
@@ -1076,7 +1121,7 @@ private:
         label(kScreenBrightnessLabel, L"Brightness");
         label(kScreenContrastLabel, L"Contrast");
         label(kScreenSaturationLabel, L"Saturation");
-        add(kScreenStripBox, WC_BUTTONW, L"", BS_GROUPBOX);
+        add(kScreenStripBox, WC_BUTTONW, L"", BS_GROUPBOX | WS_CLIPSIBLINGS);
         SetWindowSubclass(get(kScreenStripBox), &App::strip_panel_procedure, kScreenStripBox,
                           reinterpret_cast<DWORD_PTR>(this));
         for (int id : {kScreenBrightness, kScreenContrast, kScreenSaturation})
@@ -1088,7 +1133,7 @@ private:
         label(kCameraBrightnessLabel, L"Brightness");
         label(kCameraContrastLabel, L"Contrast");
         label(kCameraSaturationLabel, L"Saturation");
-        add(kCameraStripBox, WC_BUTTONW, L"", BS_GROUPBOX);
+        add(kCameraStripBox, WC_BUTTONW, L"", BS_GROUPBOX | WS_CLIPSIBLINGS);
         SetWindowSubclass(get(kCameraStripBox), &App::strip_panel_procedure, kCameraStripBox,
                           reinterpret_cast<DWORD_PTR>(this));
         for (int id : {kCameraBrightness, kCameraContrast, kCameraSaturation})
@@ -2876,6 +2921,7 @@ private:
             const auto child = [&](int id, const wchar_t* type, const wchar_t* text, DWORD style, DWORD extended = 0) {
                 HWND hwnd = CreateWindowExW(extended, type, text, WS_CHILD | WS_VISIBLE | style, 0, 0, 0, 0, window,
                                             reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), app->instance_, nullptr);
+                app->apply_control_theme(hwnd);
                 SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(app->font_), FALSE);
                 return hwnd;
             };
