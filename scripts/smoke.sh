@@ -37,7 +37,7 @@ within() {
 probe_received() {
   local file="$1" report="$2" low="$3" high="$4" output="" frames="" status=0 attempt
   for attempt in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    output="$("$rec" probe "$file" 2>&1)" && status=0 || status=$?
+    output="$("$rec" probe "$file" 2>"$report.err")" && status=0 || status=$?
     printf '%s\n' "$output" >"$report"
     frames="$(printf '%s\n' "$output" | awk -F= '$1 == "frames" { print $2; exit }')"
     if [ "$status" -eq 0 ] && awk -v v="$frames" -v lo="$low" -v hi="$high" \
