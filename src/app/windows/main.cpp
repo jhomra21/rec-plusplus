@@ -1200,7 +1200,7 @@ private:
                 }
                 SelectObject(dc, font_);
                 SIZE ready_extent{};
-                if (GetTextExtentPoint32W(dc, L"Ready to record", 16, &ready_extent))
+                if (GetTextExtentPoint32W(dc, L"Ready to record", 15, &ready_extent))
                     status_width = std::max(status_width, static_cast<int>(ready_extent.cx));
                 SelectObject(dc, previous);
                 ReleaseDC(window_, dc);
@@ -2510,8 +2510,9 @@ private:
             live_slot_visible_ = s.live;
             layout();
         }
-        SendMessageW(get(kStatus), WM_SETFONT,
-                     reinterpret_cast<WPARAM>(active ? title_ : font_), TRUE);
+        const HFONT status_font = active ? title_ : font_;
+        if (reinterpret_cast<HFONT>(SendMessageW(get(kStatus), WM_GETFONT, 0, 0)) != status_font)
+            SendMessageW(get(kStatus), WM_SETFONT, reinterpret_cast<WPARAM>(status_font), TRUE);
         set_text(kStatus, status);
         set_text(kDetail, detail);
         std::wstring tooltip;

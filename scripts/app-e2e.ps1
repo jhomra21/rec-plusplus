@@ -226,7 +226,7 @@ function Wait-Recorded($ui, [int]$seconds, [int]$timeout = 60) {
     $deadline = $start.AddSeconds($timeout)
     $report = $start.AddSeconds(5)
     while ((Get-Date) -lt $deadline) {
-        if ((Text-Of $ui 101) -match '^!?\s*(\d+):(\d\d) recorded' -and [int]$Matches[1] * 60 + [int]$Matches[2] -ge $seconds) { return }
+        if ((Text-Of $ui 101) -match '(\d+):(\d\d) recorded' -and [int]$Matches[1] * 60 + [int]$Matches[2] -ge $seconds) { return }
         # A slow wait shows whether the engine still writes, drops, or stopped.
         if ((Get-Date) -gt $report) {
             Write-Host "  waiting for $seconds s, $([int]((Get-Date) - $start).TotalSeconds) s in: $(Text-Of $ui 100); $(Text-Of $ui 101)"
