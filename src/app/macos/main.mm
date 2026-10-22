@@ -1084,8 +1084,9 @@ struct PreviewHit {
     _statusLine.alignment = NSLayoutAttributeCenterY;
     _statusLine.distribution = NSStackViewDistributionFill;
     _statusLine.spacing = 6;
-    [_statusLine.widthAnchor constraintEqualToConstant:440].active = YES;
-    [_status.widthAnchor constraintLessThanOrEqualToConstant:230].active = YES;
+    [_status.widthAnchor constraintLessThanOrEqualToConstant:160].active = YES;
+    [_detail.widthAnchor constraintGreaterThanOrEqualToConstant:120].active = YES;
+    _detail.allowsExpansionToolTips = YES;
     [_live.widthAnchor constraintLessThanOrEqualToConstant:150].active = YES;
     [_status setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     [_live setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
@@ -2583,8 +2584,7 @@ struct PreviewHit {
     if (_attention && detail.length && ![detail hasPrefix:@"!"]) detail = [@"! " stringByAppendingString:detail];
     if (![_status.stringValue isEqualToString:status]) _status.stringValue = status;
     if (![_detail.stringValue isEqualToString:detail]) _detail.stringValue = detail;
-    _detail.accessibilityValue = detail;
-    _detail.toolTip = detail.length ? detail : nil;
+    if (![_detail.accessibilityValue isEqualToString:detail]) _detail.accessibilityValue = detail;
     _status.textColor = s.state == State::recording ? Palette::accent()
                       : s.state == State::paused    ? Palette::pausedAccent()
                                                     : Palette::text();
@@ -2795,40 +2795,14 @@ struct PreviewHit {
               static_cast<unsigned long>(flattened.pixelsWide), static_cast<unsigned long>(flattened.pixelsHigh)]);
     };
     const auto save_status_row_png = [&] {
-        __block NSBitmapImageRep* bitmap = nil;
+        __block NSBitmapImageRep* rep = nil;
         ui(^{
-            const CGFloat scale = 2;
-            bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr
-                pixelsWide:static_cast<NSInteger>(ceil(self->_statusLine.bounds.size.width * scale))
-                pixelsHigh:static_cast<NSInteger>(ceil(self->_statusLine.bounds.size.height * scale))
-                bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
-                colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
-            NSGraphicsContext* context = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
-            [NSGraphicsContext saveGraphicsState];
-            [NSGraphicsContext setCurrentContext:context];
-            CGContextScaleCTM(context.CGContext, scale, scale);
-            [[NSColor colorWithWhite:0.10 alpha:1] setFill];
-            NSRectFill(self->_statusLine.bounds);
-            NSMutableParagraphStyle* style = [[NSMutableParagraphStyle alloc] init];
-            style.lineBreakMode = NSLineBreakByTruncatingTail;
-            const auto draw = [&](NSTextField* field, NSColor* color) {
-                const NSRect frame = [field.superview convertRect:field.frame toView:self->_statusLine];
-                [field.stringValue drawInRect:frame withAttributes:@{
-                    NSFontAttributeName: field.font,
-                    NSForegroundColorAttributeName: color,
-                    NSParagraphStyleAttributeName: style,
-                }];
-            };
-            draw(self->_status, Palette::accent());
-            draw(self->_detail, NSColor.whiteColor);
-            draw(self->_live, Palette::accent());
-            [NSGraphicsContext restoreGraphicsState];
+            [self->_statusLine displayIfNeeded];
+            rep = [self->_statusLine bitmapImageRepForCachingDisplayInRect:self->_statusLine.bounds];
+            [self->_statusLine cacheDisplayInRect:self->_statusLine.bounds toBitmapImageRep:rep];
         });
-        NSString* path = [artifacts stringByAppendingPathComponent:@"app-status-row.png"];
-        NSData* png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
-        if (!png || ![png writeToFile:path atomically:YES]) fail(@"could not save the status row snapshot");
-        note([NSString stringWithFormat:@"snapshot.app-status-row.png=%lux%lu",
-              static_cast<unsigned long>(bitmap.pixelsWide), static_cast<unsigned long>(bitmap.pixelsHigh)]);
+        if (!rep) fail(@"could not render the status row");
+        save_window_png(@"app-status-row.png", rep);
     };
     struct PixelStats { NSInteger count = 0; CGFloat meanRed = 0; };
     const auto sample_window_pixels = [&](NSView* target, const auto& test) {
@@ -2975,7 +2949,6 @@ struct PreviewHit {
     wait_for(@"Ready to record", 20);
     __block BOOL statusLineLayoutOK = NO;
     ui(^{
-        self->_statusLine.hidden = NO;
         self->_status.stringValue = @"● Recording 00:00";
         self->_status.textColor = Palette::accent();
         self->_live.stringValue = @"● LIVE 2/2  8.0 Mb/s";
@@ -2984,17 +2957,7 @@ struct PreviewHit {
         self->_detail.textColor = Palette::text();
         self->_detail.stringValue = longDetail;
         self->_detail.accessibilityValue = longDetail;
-        self->_detail.toolTip = longDetail;
         [self->_window.contentView layoutSubtreeIfNeeded];
-        [self->_statusLine layoutSubtreeIfNeeded];
-        [self->_status setNeedsDisplay:YES];
-        [self->_detail setNeedsDisplay:YES];
-        [self->_live setNeedsDisplay:YES];
-        [self->_statusLine setNeedsDisplay:YES];
-        [self->_status displayIfNeeded];
-        [self->_detail displayIfNeeded];
-        [self->_live displayIfNeeded];
-        [self->_statusLine displayIfNeeded];
         [self->_window displayIfNeeded];
         const NSRect status = [self->_status.superview convertRect:self->_status.frame toView:self->_statusLine];
         const NSRect detail = [self->_detail.superview convertRect:self->_detail.frame toView:self->_statusLine];
@@ -3003,12 +2966,12 @@ struct PreviewHit {
         const CGFloat fullDetailWidth = [longDetail sizeWithAttributes:@{NSFontAttributeName: self->_detail.font}].width;
         statusLineLayoutOK = fabs(statusCenter - detailCenter) <= 3 && fabs(detailCenter - liveCenter) <= 3 &&
             NSMaxX(status) <= NSMinX(detail) + 1 && NSMaxX(detail) <= NSMinX(live) + 1 &&
-            NSMinX(status) >= -2 && NSMaxX(live) <= NSMaxX(self->_statusLine.bounds) + 2 && detail.size.width >= 30 &&
+            NSMinX(status) >= -2 && NSMaxX(live) <= NSMaxX(self->_statusLine.bounds) + 2 && detail.size.width >= 120 &&
             fullDetailWidth > detail.size.width &&
             detail.size.height <= self->_statusLine.bounds.size.height &&
             self->_detail.lineBreakMode == NSLineBreakByTruncatingTail &&
             self->_detail.maximumNumberOfLines == 1 &&
-            [self->_detail.toolTip isEqualToString:longDetail] &&
+            self->_detail.allowsExpansionToolTips &&
             [self->_detail.accessibilityValue isEqualToString:longDetail];
     });
     if (!statusLineLayoutOK) {
