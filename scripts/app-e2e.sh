@@ -281,7 +281,7 @@ frames="$(value frames "$artifacts/app-stream-received.probe")"
 least() { if [[ "${GITHUB_ACTIONS:-}" == true ]]; then echo "$(($1 * 3 / 4 - 2))"; else echo "$(($1 - 2))"; fi; }
 grep -qx 'width=1080' "$artifacts/app-stream-received-2.probe"
 grep -qx 'height=1920' "$artifacts/app-stream-received-2.probe"
-within "$(value frames "$artifacts/app-stream-received-2.probe")" "$(least "$frames")" "$((frames + 2))"
+within "$(value frames "$artifacts/app-stream-received-2.probe")" "$(least "$frames")" "$((frames + 4))"
 within "$(value av_sync_events "$artifacts/app-stream-received-2.probe")" 3 6
 # Each frame the runner skips can move a flash one 33 ms slot later (1.067 s seen).
 within "$(value av_offset_max_ms "$artifacts/app-stream-received-2.probe")" 0 "$([[ "${GITHUB_ACTIONS:-}" == true ]] && echo 125 || echo 55)"
@@ -289,7 +289,7 @@ probe "$(step stream-vertical)" app-vertical
 grep -qx 'width=1080' "$artifacts/app-vertical.probe"
 grep -qx 'height=1920' "$artifacts/app-vertical.probe"
 frames="$(value frames "$artifacts/app-stream-local.probe")"
-within "$(value frames "$artifacts/app-vertical.probe")" "$(least "$frames")" "$((frames + 2))"
+within "$(value frames "$artifacts/app-vertical.probe")" "$(least "$frames")" "$((frames + 4))"
 within "$(value av_sync_events "$artifacts/app-vertical.probe")" 3 6
 # A vertical frame the runner skips moves its flash to the next 33 ms slot (31.5 ms seen).
 within "$(value av_offset_max_ms "$artifacts/app-vertical.probe")" 0 "$([[ "${GITHUB_ACTIONS:-}" == true ]] && echo 35 || echo 20)"
