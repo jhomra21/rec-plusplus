@@ -917,6 +917,15 @@ private:
         case WM_CTLCOLORLISTBOX:
         case WM_CTLCOLORBTN:
             return control_color(w, l);
+        case WM_NOTIFY: {
+            auto* draw = reinterpret_cast<NMCUSTOMDRAW*>(l);
+            if (!draw || !draw->hdr.hwndFrom || !is_custom_trackbar(draw->hdr.hwndFrom) || palette_.high_contrast)
+                return CDRF_DODEFAULT;
+            if (draw->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
+            if (draw->dwDrawStage != CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
+            draw_trackbar_item(*draw);
+            return CDRF_SKIPDEFAULT;
+        }
         case WM_COMMAND:
             command(LOWORD(w), HIWORD(w));
             return 0;
@@ -1018,6 +1027,92 @@ private:
     }
 
     int px(int dips) const { return MulDiv(dips, static_cast<int>(dpi_), 96); }
+    bool is_custom_trackbar(HWND hwnd) const {
+        const int id = GetDlgCtrlID(hwnd);
+        return id == kSystemVolume || id == kMicVolume ||
+               id == kScreenBrightness || id == kScreenContrast || id == kScreenSaturation ||
+               id == kCameraBrightness || id == kCameraContrast || id == kCameraSaturation;
+    }
+    void draw_trackbar_item(const NMCUSTOMDRAW& draw) const {
+        const HWND slider = draw.hdr.hwndFrom;
+        const int id = GetDlgCtrlID(slider);
+        const bool vertical = (GetWindowLongPtrW(slider, GWL_STYLE) & TBS_VERT) != 0;
+        RECT channel{};
+        SendMessageW(slider, TBM_GETCHANNELRECT, 0, reinterpret_cast<LPARAM>(&channel));
+        if (vertical) {
+            std::swap(channel.left, channel.top);
+            std::swap(channel.right, channel.bottom);
+        }
+        const auto oriented_rect = [&](int start, int end) {
+            return vertical ? RECT{channel.left, start, channel.right, end}
+                            : RECT{start, channel.top, end, channel.bottom};
+        };
+        const int axis_start = vertical ? channel.top : channel.left;
+        const int axis_end = vertical ? channel.bottom : channel.right;
+        if (draw.dwItemSpec == TBCD_CHANNEL) {
+            HBRUSH track = CreateSolidBrush(RGB(72, 72, 76));
+            const RECT track_rect = oriented_rect(axis_start, axis_end);
+            FillRect(draw.hdc, &track_rect, track);
+            DeleteObject(track);
+            const int minimum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMIN, 0, 0));
+            const int maximum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMAX, 0, 0));
+            const int position = static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0));
+            const bool centered = id != kSystemVolume && id != kMicVolume;
+            const int origin_value = centered ? std::clamp(0, minimum, maximum) : minimum;
+            const auto at = [&](int value) {
+                const double fraction = maximum == minimum ? 0.0 : (value - minimum) / static_cast<double>(maximum - minimum);
+                const double oriented = vertical ? 1.0 - fraction : fraction;
+                return axis_start + static_cast<int>(std::lround(oriented * (axis_end - axis_start)));
+            };
+            const int origin = at(origin_value), current = at(position);
+            const RECT fill = oriented_rect(std::min(origin, current), std::max(origin, current));
+            HBRUSH accent = CreateSolidBrush(palette_.accent);
+            FillRect(draw.hdc, &fill, accent);
+            DeleteObject(accent);
+            if (centered) {
+                const RECT mark = vertical
+                    ? RECT{channel.left - px(3), origin - px(1), channel.right + px(3), origin + px(1)}
+                    : RECT{origin - px(1), channel.top - px(3), origin + px(1), channel.bottom + px(3)};
+                HBRUSH tick = CreateSolidBrush(palette_.text);
+                FillRect(draw.hdc, &mark, tick);
+                DeleteObject(tick);
+            }
+            return;
+        }
+        if (draw.dwItemSpec == TBCD_THUMB) {
+            RECT bounds = draw.rc;
+            InflateRect(&bounds, -px(1), -px(1));
+            HBRUSH thumb = CreateSolidBrush(palette_.accent);
+            FillRect(draw.hdc, &bounds, thumb);
+            DeleteObject(thumb);
+            if (GetFocus() == slider && !(SendMessageW(slider, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS)) {
+                HPEN pen = CreatePen(PS_SOLID, px(1), palette_.text);
+                HGDIOBJ old_pen = SelectObject(draw.hdc, pen);
+                HGDIOBJ old_brush = SelectObject(draw.hdc, GetStockObject(HOLLOW_BRUSH));
+                Rectangle(draw.hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+                SelectObject(draw.hdc, old_brush);
+                SelectObject(draw.hdc, old_pen);
+                DeleteObject(pen);
+            }
+            if (id != kSystemVolume && id != kMicVolume) {
+                const int minimum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMIN, 0, 0));
+                const int maximum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMAX, 0, 0));
+                const double fraction = maximum == minimum ? 0.0 : (0 - minimum) / static_cast<double>(maximum - minimum);
+                const int center = axis_start + static_cast<int>(std::lround((vertical ? 1.0 - fraction : fraction) *
+                                                                              (axis_end - axis_start)));
+                const bool overlaps = vertical ? center >= bounds.top && center < bounds.bottom
+                                               : center >= bounds.left && center < bounds.right;
+                if (overlaps) {
+                    const RECT mark = vertical
+                        ? RECT{bounds.left + px(2), center - px(1), bounds.right - px(2), center + px(1)}
+                        : RECT{center - px(1), bounds.top + px(2), center + px(1), bounds.bottom - px(2)};
+                    HBRUSH tick = CreateSolidBrush(palette_.text);
+                    FillRect(draw.hdc, &mark, tick);
+                    DeleteObject(tick);
+                }
+            }
+        }
+    }
 
     int readout_slider(int id) const {
         switch (id) {
