@@ -9,7 +9,7 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 source "$root/scripts/mediamtx.sh"
 source "$root/scripts/relay.sh"
 tmp="$(mktemp -d)"
-trap 'stop_mediamtx; stop_relay; rm -rf "$tmp"' EXIT
+trap 'cp "$tmp/mediamtx/mediamtx.log" "$artifacts/mediamtx.log" 2>/dev/null || true; stop_mediamtx; stop_relay; rm -rf "$tmp"' EXIT
 artifacts="${REC_E2E_ARTIFACT_DIR:-$tmp}"
 mkdir -p "$artifacts"
 

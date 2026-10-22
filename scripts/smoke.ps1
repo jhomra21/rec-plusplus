@@ -837,6 +837,13 @@ try {
     & (Join-Path $PSScriptRoot 'app-e2e.ps1') -Rec $rec -App $app -Artifacts $appArtifacts
     Write-Host 'smoke passed'
 } finally {
+    $mediaLogs = @(
+        @{ Path = (Join-Path $tmp 'mediamtx\mediamtx.log'); Name = 'mediamtx.log' },
+        @{ Path = (Join-Path $tmp 'mediamtx-2\mediamtx.log'); Name = 'mediamtx-restart.log' }
+    )
+    foreach ($entry in $mediaLogs) {
+        if (Test-Path $entry.Path) { Copy-Item -Force $entry.Path (Join-Path $artifacts $entry.Name) }
+    }
     Stop-Relay $phoneRelay
     if ($artifacts -ne $tmp) { Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue }
 }

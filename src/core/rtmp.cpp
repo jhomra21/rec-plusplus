@@ -900,12 +900,19 @@ Broadcast::Counters Broadcast::counters(std::size_t server) const {
     const auto& s = *servers_[server];
     c.frames = s.frames.load();
     if (s.whip) {
+        c.whip = true;
         c.live = s.whip->live();
         c.reconnecting = s.whip->reconnecting();
         c.reconnects = s.whip->reconnects();
         c.queued_ms = s.whip->queued_ms();
         c.dropped = s.whip->dropped_frames();
         c.bytes = s.whip->bytes();
+        c.pli = s.whip->pli_count();
+        c.fir = s.whip->fir_count();
+        c.nacked_packets = s.whip->nacked_packets();
+        c.forced_keyframes = s.whip->forced_keyframes();
+        c.send_failures = s.whip->send_failures();
+        c.server_lost = s.whip->server_lost();
         return c;
     }
     c.live = s.publisher.live();

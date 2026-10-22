@@ -567,18 +567,28 @@ bool WhipPublisher::video(std::uint32_t ms, bool key, bool header, const Bytes& 
     m.ms = static_cast<std::uint32_t>(static_cast<std::int64_t>(ms) + cts);
     m.data.assign(body.begin() + 5, body.end());
     queue_.push_back(std::move(m));
+    // MediaMTX sends PLI every 2 s whether or not it lost anything.
+    if (key) last_key_ns_.store(Clock::now().time_since_epoch().count());
     return true;
 }
 
 bool WhipPublisher::take_keyframe_request() {
-    if (!keyframe_wanted_.load()) return false;
-    // Rate-limit repeated feedback, not keyframes: a recently queued IDR may have been lost
-    // or incomplete, which is exactly why the server sent PLI/FIR.
     const auto now = Clock::now().time_since_epoch().count();
-    const auto since = now - last_key_request_ns_.load();
-    if (since < std::chrono::duration_cast<Clock::duration>(milliseconds(1000)).count()) return false;
+    const auto second = std::chrono::duration_cast<Clock::duration>(milliseconds(1000)).count();
+    // FIR and a failed send mean the receiver really needs a refresh; limit them to one per second.
+    if (refresh_wanted_.load() && now - last_forced_ns_.load() >= second) {
+        refresh_wanted_.store(false);
+        keyframe_wanted_.store(false);
+        last_forced_ns_.store(now);
+        forced_keyframes_.fetch_add(1);
+        return true;
+    }
     if (!keyframe_wanted_.exchange(false)) return false;
-    last_key_request_ns_.store(now);
+    // Some servers (MediaMTX) send PLI every 2 s whether or not they lost anything. A keyframe
+    // less than a second ago answers that; the regular one comes within 2 s.
+    if (now - last_key_ns_.load() < second) return false;
+    last_forced_ns_.store(now);
+    forced_keyframes_.fetch_add(1);
     return true;
 }
 
@@ -722,22 +732,30 @@ Bytes rtp_header(std::uint8_t pt, bool marker, std::uint16_t seq, std::uint32_t 
 } // namespace
 
 void WhipPublisher::send_video(Session& s, const Media& item) {
+    Bytes sps, pps;
+    {
+        std::lock_guard lock(mutex_);
+        sps = sps_;
+        pps = pps_;
+    }
     std::vector<std::pair<const std::uint8_t*, std::size_t>> nals;
-    if (item.key && !sps_.empty() && !pps_.empty()) {
-        nals.emplace_back(sps_.data(), sps_.size());
-        nals.emplace_back(pps_.data(), pps_.size());
+    if (item.key && !sps.empty() && !pps.empty()) {
+        nals.emplace_back(sps.data(), sps.size());
+        nals.emplace_back(pps.data(), pps.size());
     }
     for (std::size_t at = 0; at + 4 <= item.data.size();) {
         const std::size_t n = get32(item.data.data() + at);
         at += 4;
         if (!n || at + n > item.data.size()) break;
         const std::uint8_t type = item.data[at] & 0x1F;
-        if (type != 9 && !(item.key && !sps_.empty() && (type == 7 || type == 8))) nals.emplace_back(item.data.data() + at, n);
+        if (type != 9 && !(item.key && !sps.empty() && (type == 7 || type == 8))) nals.emplace_back(item.data.data() + at, n);
         at += n;
     }
     const std::uint32_t ts = s.first_video ? s.video_rtp(static_cast<double>(s.ref_sample) / 48.0) : s.video_rtp(item.ms);
     s.first_video = false;
     bool sent_all = true;
+    std::size_t packets = 0, paced_ms = 0;
+    auto pacing_deadline = Clock::now();
     auto emit = [&](Bytes packet) {
         const std::size_t payload = packet.size() - 12;
         if (!s.out->protect_rtp(packet)) {
@@ -746,6 +764,7 @@ void WhipPublisher::send_video(Session& s, const Media& item) {
         }
         if (!s.send(packet)) {
             sent_all = false;
+            send_failures_.fetch_add(1);
             return;
         }
         bytes_.fetch_add(packet.size());
@@ -753,6 +772,14 @@ void WhipPublisher::send_video(Session& s, const Media& item) {
         s.video_octets += static_cast<std::uint32_t>(payload);
         const std::uint16_t seq = get16(packet.data() + 2);
         s.history[seq % kHistory] = std::move(packet);
+        // Pace IDR bursts every 32 datagrams. A bounded steady-clock spin avoids Windows'
+        // coarse sleep timer and scheduler-yield overshoot; total pacing is capped at 20 ms,
+        // half the 40 ms send margin.
+        if (item.key && ++packets % 32 == 0 && paced_ms < 20) {
+            pacing_deadline += milliseconds(1);
+            ++paced_ms;
+            while (Clock::now() < pacing_deadline) {}
+        }
     };
     for (std::size_t i = 0; i < nals.size(); ++i) {
         const auto [data, size] = nals[i];
@@ -779,8 +806,7 @@ void WhipPublisher::send_video(Session& s, const Media& item) {
     if (!sent_all) {
         // A failed UDP send can leave an IDR incomplete even after the bounded ENOBUFS retry.
         // Ask the encoder for another keyframe instead of waiting for its regular 2 s interval.
-        last_key_request_ns_.store(0);
-        keyframe_wanted_.store(true);
+        refresh_wanted_.store(true);
     }
 }
 
@@ -825,14 +851,25 @@ void WhipPublisher::handle_datagram(Session& s, const std::uint8_t* data, std::s
                 for (int bit = -1; bit < 16; ++bit) {
                     if (bit >= 0 && !(mask & (1 << bit))) continue;
                     const auto seq = static_cast<std::uint16_t>(pid + (bit + 1));
+                    nacked_packets_.fetch_add(1);
                     const auto& kept = s.history[seq % kHistory];
                     if (kept.size() >= 12 && get16(kept.data() + 2) == seq) s.send(kept);
                 }
             }
-        } else if (type == 206 && (format == 1 || format == 4)) {
-            // PLI or FIR: the server cannot decode the picture (servers also send one when they
-            // start reading). Answered with a keyframe; until then frames would not decode.
+        } else if (type == 201 && length >= 8) {
+            for (std::size_t i = 0, f = at + 8; i < format && f + 24 <= at + length; ++i, f += 24) {
+                if (get32(packet.data() + f) != s.video_ssrc) continue;
+                std::int32_t lost = static_cast<std::int32_t>((packet[f + 5] << 16) |
+                                                               (packet[f + 6] << 8) | packet[f + 7]);
+                if (lost & 0x800000) lost -= 0x1000000;
+                server_lost_.store(lost);
+            }
+        } else if (type == 206 && format == 1 && length >= 12) {
+            pli_count_.fetch_add(1);
             keyframe_wanted_.store(true);
+        } else if (type == 206 && format == 4 && length >= 20) {
+            fir_count_.fetch_add(1);
+            refresh_wanted_.store(true);
         }
         at += length;
     }

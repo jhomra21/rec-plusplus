@@ -196,6 +196,9 @@ struct StreamStats {
     std::uint64_t dropped = 0; // Video frames this server skipped to keep up.
     std::uint64_t bytes = 0;
     std::uint32_t queued_ms = 0;
+    bool whip = false;
+    std::uint64_t pli = 0, fir = 0, nacked_packets = 0, forced_keyframes = 0, send_failures = 0;
+    std::int64_t server_lost = 0;
 };
 
 struct Stats {
