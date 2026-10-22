@@ -570,6 +570,20 @@ private:
         auto* app = reinterpret_cast<App*>(data);
         const int id = static_cast<int>(subclass);
         if (!app) return DefSubclassProc(slider, message, w, l);
+        if (id == kSystemVolume || id == kMicVolume) {
+            // A vertical trackbar's native position increases downward; expose the logical dB
+            // range unchanged while reversing only the control's stored position.
+            constexpr int minimum = rec::app::kVolumeMin;
+            constexpr int maximum = rec::app::kVolumeMax;
+            if (message == TBM_SETPOS) {
+                const int logical = static_cast<int>(l);
+                return DefSubclassProc(slider, message, w, minimum + maximum - logical);
+            }
+            if (message == TBM_GETPOS) {
+                const int physical = static_cast<int>(DefSubclassProc(slider, message, w, l));
+                return minimum + maximum - physical;
+            }
+        }
         if (message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK || message == WM_CAPTURECHANGED)
             app->slider_suppress_mouse_up_[id] = false;
         if (message == WM_LBUTTONDOWN) {
@@ -718,6 +732,20 @@ private:
         default:
             return DefWindowProcW(window, message, w, l);
         }
+    }
+    static LRESULT CALLBACK status_procedure(HWND hwnd, UINT message, WPARAM w, LPARAM l,
+                                             UINT_PTR, DWORD_PTR data) {
+        auto* app = reinterpret_cast<App*>(data);
+        if (!app) return DefSubclassProc(hwnd, message, w, l);
+        if (message == WM_ERASEBKGND) return 1;
+        if (message == WM_PAINT || message == WM_PRINTCLIENT || message == WM_PRINT) {
+            PAINTSTRUCT paint{};
+            HDC dc = message == WM_PAINT ? BeginPaint(hwnd, &paint) : reinterpret_cast<HDC>(w);
+            app->paint_status(hwnd, dc);
+            if (message == WM_PAINT) EndPaint(hwnd, &paint);
+            return 0;
+        }
+        return DefSubclassProc(hwnd, message, w, l);
     }
     static LRESULT CALLBACK meter_procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
         if (message == WM_ERASEBKGND) return 1;
@@ -940,6 +968,37 @@ private:
         }
         RestoreDC(dc, saved);
     }
+    void paint_status(HWND hwnd, HDC dc) const {
+        RECT bounds{};
+        GetClientRect(hwnd, &bounds);
+        FillRect(dc, &bounds, surface_brush_);
+        wchar_t text[128]{};
+        GetWindowTextW(hwnd, text, static_cast<int>(std::size(text)));
+        const bool paused = state_ == State::paused;
+        const COLORREF foreground = palette_.high_contrast ? GetSysColor(COLOR_WINDOWTEXT) : palette_.text;
+        SetBkMode(dc, TRANSPARENT);
+        SelectObject(dc, state_ == State::idle ? font_ : title_);
+        if (paused) {
+            SIZE dot_size{}, text_size{};
+            const wchar_t glyph = L'\u25CF';
+            const int length = static_cast<int>(wcslen(text));
+            GetTextExtentPoint32W(dc, &glyph, 1, &dot_size);
+            GetTextExtentPoint32W(dc, text, length, &text_size);
+            const int spacing = px(4);
+            const int full_width = dot_size.cx + spacing + text_size.cx;
+            const int x = std::max(0, (static_cast<int>(bounds.right) - full_width) / 2);
+            const int y = (static_cast<int>(bounds.bottom) - text_size.cy) / 2;
+            SetTextColor(dc, palette_.high_contrast ? GetSysColor(COLOR_HIGHLIGHT) : palette_.paused_accent());
+            TextOutW(dc, x, y, &glyph, 1);
+            SetTextColor(dc, foreground);
+            TextOutW(dc, x + dot_size.cx + spacing, y, text, length);
+        } else {
+            SetTextColor(dc, state_ == State::recording
+                ? palette_.high_contrast ? GetSysColor(COLOR_HIGHLIGHT) : palette_.accent
+                : foreground);
+            DrawTextW(dc, text, -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+    }
 
     LRESULT handle(UINT message, WPARAM w, LPARAM l) {
         switch (message) {
@@ -1078,6 +1137,7 @@ private:
                 DestroyWindow(detail_tooltip_window_);
                 detail_tooltip_window_ = nullptr;
             }
+            RemoveWindowSubclass(get(kStatus), &App::status_procedure, kStatus);
             if (access_) {
                 const MSAAPROPID props[]{PROPID_ACC_NAME, PROPID_ACC_VALUE};
                 const MSAAPROPID meter_props[]{PROPID_ACC_NAME, PROPID_ACC_VALUE, PROPID_ACC_ROLE};
@@ -1085,6 +1145,8 @@ private:
                     access_->ClearHwndProps(get(meter), OBJID_CLIENT, CHILDID_SELF, meter_props, 3);
                 for (int slider : {kSystemVolume, kMicVolume})
                     access_->ClearHwndProps(get(slider), OBJID_CLIENT, CHILDID_SELF, props, 2);
+                for (int mute : {kSystemMute, kMicMute})
+                    access_->ClearHwndProps(get(mute), OBJID_CLIENT, CHILDID_SELF, props, 2);
                 for (int slider : {kScreenBrightness, kScreenContrast, kScreenSaturation,
                                    kCameraBrightness, kCameraContrast, kCameraSaturation})
                     access_->ClearHwndProps(get(slider), OBJID_CLIENT, CHILDID_SELF, props, 2);
@@ -1132,7 +1194,7 @@ private:
         const int id = GetDlgCtrlID(slider);
         const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(slider, GWL_STYLE));
         const bool vertical = (style & TBS_VERT) != 0;
-        const bool down_is_left = (style & TBS_DOWNISLEFT) != 0;
+        const bool reversed = (style & (vertical ? TBS_REVERSED : TBS_DOWNISLEFT)) != 0;
         RECT channel{};
         SendMessageW(slider, TBM_GETCHANNELRECT, 0, reinterpret_cast<LPARAM>(&channel));
         if (vertical) {
@@ -1147,7 +1209,7 @@ private:
         const int maximum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMAX, 0, 0));
         const auto at = [&](int value) {
             const double fraction = maximum == minimum ? 0.0 : (value - minimum) / static_cast<double>(maximum - minimum);
-            const bool flip = vertical && down_is_left;
+            const bool flip = vertical ? reversed : (style & TBS_DOWNISLEFT) != 0;
             const double oriented = flip ? 1.0 - fraction : fraction;
             return (vertical ? channel.top : channel.left) +
                    static_cast<int>(std::lround(oriented * ((vertical ? channel.bottom : channel.right) -
@@ -1268,8 +1330,9 @@ private:
                            id == kSystemVolumeText || id == kMicVolumeText;
         const bool value = id == kScreenBrightnessValue || id == kScreenContrastValue || id == kScreenSaturationValue ||
                            id == kCameraBrightnessValue || id == kCameraContrastValue || id == kCameraSaturationValue;
-        const bool right = value || id == kSystemVolumeText || id == kMicVolumeText;
-        const DWORD centered = id == kStatus || id == kDetail || id == kLive ? SS_CENTERIMAGE : 0;
+        const bool right = value;
+        const DWORD centered = id == kStatus || id == kDetail || id == kLive ? SS_CENTERIMAGE :
+                               id == kSystemVolumeText || id == kMicVolumeText ? SS_CENTER : 0;
         return add(id, WC_STATICW, text, (right ? SS_RIGHT : SS_LEFT) | centered |
                    ((plain || value) ? SS_NOPREFIX : 0) | (id == kDetail ? SS_ENDELLIPSIS : 0) |
                    (readout_slider(id) ? SS_NOTIFY : 0));
@@ -1313,7 +1376,7 @@ private:
             label(label_id, wide(strip.name).c_str());
             add(meter_id, L"RecMeter", system ? L"System audio level" : L"Microphone level", 0);
             add(volume_id, TRACKBAR_CLASSW, system ? L"System audio volume" : L"Microphone volume",
-                TBS_VERT | TBS_DOWNISLEFT | TBS_NOTICKS | WS_TABSTOP);
+                TBS_VERT | TBS_REVERSED | TBS_NOTICKS | WS_TABSTOP);
             label(value_id, L"");
             check(mute_id, L"Mute");
         }
@@ -1498,6 +1561,11 @@ private:
             access_->SetHwndPropStr(get(kScreenColorReset), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Reset screen color");
             access_->SetHwndPropStr(get(kCameraColorReset), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Reset camera color");
         }
+        if (!access_) {
+            set_text(kSystemMute, L"Mute system");
+            set_text(kMicMute, L"Mute mic");
+        }
+        SetWindowSubclass(get(kStatus), &App::status_procedure, kStatus, reinterpret_cast<DWORD_PTR>(this));
         for (int slider : {kSystemVolume, kMicVolume, kScreenBrightness, kScreenContrast,
                            kScreenSaturation, kCameraBrightness, kCameraContrast, kCameraSaturation})
             SetWindowSubclass(get(slider), &App::slider_procedure, static_cast<UINT_PTR>(slider),
@@ -1525,8 +1593,7 @@ private:
     }
 
     // A full-width status area over two columns of settings: what and how to record on the
-    // left, where it goes on the right. Two columns keep the window shorter than a 1080p
-    // screen at 150% scaling.
+    // left, where it goes on the right. The mixer adds about 44 px at 96 DPI.
     void layout() {
         const int margin = px(20), column = px(420), scenes_column = px(290), label_width = px(130), row = px(26),
                   gap = px(8);
@@ -1553,22 +1620,21 @@ private:
             const int slider_id = system ? kSystemVolume : kMicVolume;
             const int value_id = system ? kSystemVolumeText : kMicVolumeText;
             const int mute_id = system ? kSystemMute : kMicMute;
-            const int left = x + index * (px(76) + gap);
-            const int strip_width = px(76);
+            const int left = x + index * px(88);
             const int title_height = px(20);
             const int meter_width = px(12);
             const int fader_width = px(26);
             const int control_height = px(130);
-            const int controls_width = meter_width + px(4) + fader_width;
-            const int controls_left = left + (strip_width - controls_width) / 2;
-            place(label_id, left, y, strip_width, title_height);
-            place(meter_id, controls_left, y + title_height + gap, meter_width, control_height);
-            place(slider_id, controls_left + meter_width + px(4), y + title_height + gap,
+            const int controls_left = left + px(4);
+            place(label_id, left + px(4), y, px(72), title_height);
+            place(slider_id, left + px(20), y + title_height + gap,
                   fader_width, control_height);
-            const int value_width = px(60);
-            const int value_left = controls_left + meter_width + px(4) + (fader_width - value_width) / 2;
-            place(value_id, value_left, y + title_height + gap + control_height + px(2), value_width, px(20));
-            place(mute_id, left, y + title_height + gap + control_height + px(24), strip_width, px(22));
+            RECT channel{};
+            SendMessageW(get(slider_id), TBM_GETCHANNELRECT, 0, reinterpret_cast<LPARAM>(&channel));
+            place(meter_id, controls_left, y + title_height + gap + channel.left,
+                  meter_width, channel.right - channel.left);
+            place(value_id, left, y + title_height + gap + control_height + px(2), px(66), px(20));
+            place(mute_id, left + px(4), y + title_height + gap + control_height + px(24), px(72), px(22));
         };
         // A checkbox with its device list or setting beside it.
         const auto beside = [&](int check_id, int control_id) {
