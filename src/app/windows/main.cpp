@@ -1012,7 +1012,8 @@ private:
         case WM_COMMAND:
             command(LOWORD(w), HIWORD(w));
             return 0;
-        case WM_HSCROLL: {
+        case WM_HSCROLL:
+        case WM_VSCROLL: {
             const int id = GetDlgCtrlID(reinterpret_cast<HWND>(l));
             if (id == kSystemVolume || id == kMicVolume)
                 change_volume(id == kSystemVolume ? rec::AudioInput::system : rec::AudioInput::microphone,
@@ -1298,19 +1299,31 @@ private:
         detail_tooltip_window_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
             WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
             window_, nullptr, instance_, nullptr);
-        // Each source: its level before volume, the volume, and mute.
-        label(kSystemLabel, L"System audio");
-        add(kSystemMeter, L"RecMeter", L"System audio level", 0);
-        add(kSystemVolume, TRACKBAR_CLASSW, L"System audio volume", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
-        label(kSystemVolumeText, L"");
-        check(kSystemMute, L"Mute system");
-        label(kMicLabel, L"Microphone");
-        add(kMicMeter, L"RecMeter", L"Microphone level", 0);
-        add(kMicVolume, TRACKBAR_CLASSW, L"Microphone volume", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
-        label(kMicVolumeText, L"");
-        check(kMicMute, L"Mute mic");
-        // These color controls are created directly after audio controls so keyboard focus
-        // advances in mixer-strip order.
+        // Keep the native control ids, but take the audio source names and order from the
+        // same model used by the Mac app.
+        const auto audio_strips = rec::app::mixer_strips(settings_);
+        for (const auto& strip : audio_strips) {
+            if (strip.kind != rec::app::Strip::Kind::audio || !strip.input) continue;
+            const bool system = *strip.input == rec::AudioInput::system;
+            const int label_id = system ? kSystemLabel : kMicLabel;
+            const int meter_id = system ? kSystemMeter : kMicMeter;
+            const int volume_id = system ? kSystemVolume : kMicVolume;
+            const int value_id = system ? kSystemVolumeText : kMicVolumeText;
+            const int mute_id = system ? kSystemMute : kMicMute;
+            label(label_id, wide(strip.name).c_str());
+            add(meter_id, L"RecMeter", system ? L"System audio level" : L"Microphone level", 0);
+            add(volume_id, TRACKBAR_CLASSW, system ? L"System audio volume" : L"Microphone volume",
+                TBS_VERT | TBS_DOWNISLEFT | TBS_NOTICKS | WS_TABSTOP);
+            label(value_id, L"");
+            check(mute_id, L"Mute");
+        }
+        // Keyboard navigation follows the audio strips left-to-right, then the recording
+        // actions; the Screen/Camera settings controls remain later in tab order.
+        button(kRecord, L"&Start Recording", BS_DEFPUSHBUTTON);
+        button(kPause, L"&Pause");
+        button(kSaveReplay, L"Save Rep&lay");
+        // Screen/Camera color controls remain in the settings columns; their tab stops follow
+        // the audio strips and recording actions until the visual-strip step.
         label(kScreenColorLabel, wide(strip_name(rec::app::SourceRef::Kind::screen)).c_str());
         label(kScreenBrightnessLabel, L"Brightness");
         label(kScreenContrastLabel, L"Contrast");
@@ -1335,9 +1348,6 @@ private:
         for (int id : {kCameraBrightnessValue, kCameraContrastValue, kCameraSaturationValue})
             label(id, L"0");
         button(kCameraColorReset, L"Reset");
-        button(kRecord, L"&Start Recording", BS_DEFPUSHBUTTON);
-        button(kPause, L"&Pause");
-        button(kSaveReplay, L"Save Rep&lay");
         // Shown only when a permission the settings need is off.
         label(kPermission, L"");
         button(kOpenPrivacy, L"Open privacy settings");
@@ -1475,6 +1485,8 @@ private:
             }
             access_->SetHwndPropStr(get(kSystemVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"System audio volume");
             access_->SetHwndPropStr(get(kMicVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Microphone volume");
+            access_->SetHwndPropStr(get(kSystemMute), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Mute system");
+            access_->SetHwndPropStr(get(kMicMute), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Mute mic");
             access_->SetHwndPropStr(get(kRoundness), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Camera roundness");
             access_->SetHwndPropStr(get(kCameraDevice), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Camera device");
             const std::pair<int, const wchar_t*> color_names[] = {
@@ -1531,17 +1543,32 @@ private:
             y += h + gap;
         };
         const auto header = [&](int id) { y += px(10); line(id, px(20)); };
-        // A source's name and level meter, then its volume slider, value and mute.
-        const auto level = [&](int label_id, int meter_id, int slider_id, int value_id, int mute_id) {
-            const int value = px(50), mute = px(110);
-            place(label_id, x, y, label_width - gap, px(20));
-            place(meter_id, x + label_width, y + px(4), width - label_width, px(12));
-            y += px(22);
-            const int slider = width - value - mute - 2 * gap;
-            place(slider_id, x, y, slider, px(26));
-            place(value_id, x + slider + gap, y + px(4), value, px(20));
-            place(mute_id, x + slider + value + 2 * gap, y + px(2), mute, px(22));
-            y += px(26) + gap;
+        // Fixed-width audio channel strips; meter and fader fill bottom-up. Keep the
+        // readout paired to the fader and the existing mute control below both.
+        const auto audio_strip = [&](const rec::app::Strip& model, int index) {
+            if (model.kind != rec::app::Strip::Kind::audio || !model.input) return;
+            const bool system = *model.input == rec::AudioInput::system;
+            const int label_id = system ? kSystemLabel : kMicLabel;
+            const int meter_id = system ? kSystemMeter : kMicMeter;
+            const int slider_id = system ? kSystemVolume : kMicVolume;
+            const int value_id = system ? kSystemVolumeText : kMicVolumeText;
+            const int mute_id = system ? kSystemMute : kMicMute;
+            const int left = x + index * (px(76) + gap);
+            const int strip_width = px(76);
+            const int title_height = px(20);
+            const int meter_width = px(12);
+            const int fader_width = px(26);
+            const int control_height = px(130);
+            const int controls_width = meter_width + px(4) + fader_width;
+            const int controls_left = left + (strip_width - controls_width) / 2;
+            place(label_id, left, y, strip_width, title_height);
+            place(meter_id, controls_left, y + title_height + gap, meter_width, control_height);
+            place(slider_id, controls_left + meter_width + px(4), y + title_height + gap,
+                  fader_width, control_height);
+            const int value_width = px(60);
+            const int value_left = controls_left + meter_width + px(4) + (fader_width - value_width) / 2;
+            place(value_id, value_left, y + title_height + gap + control_height + px(2), value_width, px(20));
+            place(mute_id, left, y + title_height + gap + control_height + px(24), strip_width, px(22));
         };
         // A checkbox with its device list or setting beside it.
         const auto beside = [&](int check_id, int control_id) {
@@ -1637,8 +1664,13 @@ private:
             place(kLive, x + row_width - live_width, y + (status_height - text_height) / 2, live_width, text_height);
             y += status_height + gap;
         }
-        level(kSystemLabel, kSystemMeter, kSystemVolume, kSystemVolumeText, kSystemMute);
-        level(kMicLabel, kMicMeter, kMicVolume, kMicVolumeText, kMicMute);
+        const auto strips = rec::app::mixer_strips(settings_);
+        int audio_index = 0;
+        for (const auto& model : strips) {
+            if (model.kind != rec::app::Strip::Kind::audio || !model.input) continue;
+            audio_strip(model, audio_index++);
+        }
+        y += px(220) + gap;
         const int button_width = px(110);
         place(kRecord, x, y, width - 2 * (button_width + gap), px(40));
         place(kPause, x + width - 2 * button_width - gap, y, button_width, px(40));
@@ -1671,7 +1703,6 @@ private:
         place(kCursor, x, y, label_width - gap, px(22));
         place(kClicks, x + label_width, y, width - label_width, px(22));
         y += px(22) + gap;
-        const auto strips = rec::app::mixer_strips(settings_);
         const rec::app::Strip* screen_strip = nullptr;
         const rec::app::Strip* camera_strip = nullptr;
         for (const auto& model : strips) {
