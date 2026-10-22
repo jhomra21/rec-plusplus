@@ -72,16 +72,62 @@ start_mediamtx "$(get_mediamtx "$root/build/tools")" "$received" "$artifacts/med
 # Unix socket paths are limited to 104 bytes.
 engine_dir="$(mktemp -d /tmp/rec-e2e.XXXXXX)"
 export REC_ENGINE_SOCKET="$engine_dir/engine.sock"
-finish() {
+watchdog_pid=""
+stop_engine() {
+  local engine_pid
+  engine_pid="$(lsof -t "$REC_ENGINE_SOCKET" 2>/dev/null | head -1)"
   "$rec" shutdown >/dev/null 2>&1 || true
-  sleep 0.5
+  if [[ -n "$engine_pid" ]]; then
+    for _ in $(seq 60); do
+      kill -0 "$engine_pid" 2>/dev/null || return 0
+      sleep 1
+    done
+    # This PID was obtained from this test's private socket, never by matching process names.
+    kill -TERM "$engine_pid" 2>/dev/null || true
+  fi
+}
+finish() {
+  if [[ -n "$watchdog_pid" ]]; then
+    kill "$watchdog_pid" 2>/dev/null || true
+    wait "$watchdog_pid" 2>/dev/null || true
+  fi
+  stop_engine
   cp "$engine_dir/engine.log" "$artifacts/app-engine.log" 2>/dev/null || true
-  rm -rf "$engine_dir"
+  if [[ ! -S "$REC_ENGINE_SOCKET" ]]; then rm -rf "$engine_dir"; fi
   stop_mediamtx
   stop_relay
   while /usr/bin/security delete-generic-password -s "$keychain_service" >/dev/null 2>&1; do :; done
 }
 trap finish EXIT
+# If the runner is interrupted, leave through EXIT so the background engine is stopped too.
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# The engine deliberately outlives Rec.app. Also stop it if this harness is killed before its
+# EXIT trap can run; the deadline keeps a wedged test from recording indefinitely.
+nohup bash -c '
+  rec="$1"
+  socket="$2"
+  owner="$3"
+  stop_engine() {
+    local engine_pid
+    engine_pid="$(lsof -t "$socket" 2>/dev/null | head -1)"
+    "$rec" shutdown >/dev/null 2>&1 || true
+    if [[ -n "$engine_pid" ]]; then
+      for _ in $(seq 60); do
+        kill -0 "$engine_pid" 2>/dev/null || return 0
+        sleep 1
+      done
+      kill -TERM "$engine_pid" 2>/dev/null || true
+    fi
+  }
+  for _ in $(seq 360); do
+    kill -0 "$owner" 2>/dev/null || break
+    sleep 5
+  done
+  stop_engine
+' app-e2e-watchdog "$rec" "$REC_ENGINE_SOCKET" "$$" </dev/null >/dev/null 2>&1 &
+watchdog_pid="$!"
 # The phone camera step needs a Chromium-family browser.
 if browser="$(python3 "$root/scripts/phone.py" --find 2>&1)"; then
   export REC_APP_SELF_TEST_PHONE="$root/scripts/phone.py"
