@@ -51,6 +51,7 @@ constexpr CGFloat kControlValueWidth = 42;
 constexpr CGFloat kMuteWidth = 110;
 constexpr CGFloat kControlGap = 10;
 constexpr CGFloat kStripWidth = 84;
+constexpr CGFloat kVisualStripWidth = 108;
 constexpr CGFloat kStripGap = 12;
 constexpr CGFloat kStripInset = 4;
 constexpr CGFloat kTitleInsetAdjustment = 2;
@@ -726,10 +727,7 @@ struct PreviewHit {
     _systemVolume.nextKeyView = _systemMute;
     _systemMute.nextKeyView = _micVolume;
     _micVolume.nextKeyView = _micMute;
-    _micMute.nextKeyView = _record;
-    _record.nextKeyView = _pause;
-    _pause.nextKeyView = _saveReplay;
-    _saveReplay.nextKeyView = _screenColor[0];
+    _micMute.nextKeyView = _screenColor[0];
     _screenColor[0].nextKeyView = _screenColor[1];
     _screenColor[1].nextKeyView = _screenColor[2];
     _screenColor[2].nextKeyView = _screenColorReset;
@@ -737,7 +735,10 @@ struct PreviewHit {
     _cameraColor[0].nextKeyView = _cameraColor[1];
     _cameraColor[1].nextKeyView = _cameraColor[2];
     _cameraColor[2].nextKeyView = _cameraColorReset;
-    _cameraColorReset.nextKeyView = _systemVolume;
+    _cameraColorReset.nextKeyView = _record;
+    _record.nextKeyView = _pause;
+    _pause.nextKeyView = _saveReplay;
+    _saveReplay.nextKeyView = _systemVolume;
     [self showCameraStrip:_settings.camera];
 
     const std::string report = environment("REC_APP_SELF_TEST");
@@ -1168,11 +1169,15 @@ struct PreviewHit {
                          [sourceName stringByAppendingString:@" saturation"]};
     NSString* title = ns(strip.name);
     NSTextField* titleLabel = header(title);
-    NSMutableArray<NSView*>* rows = [NSMutableArray array];
+    titleLabel.font = [NSFont boldSystemFontOfSize:9];
+    [titleLabel.widthAnchor constraintEqualToConstant:kVisualStripWidth - 3 * kStripInset - kTitleInsetAdjustment].active = YES;
+    [titleLabel.heightAnchor constraintEqualToConstant:14].active = YES;
+    NSMutableArray<NSView*>* rows = [NSMutableArray arrayWithObject:titleLabel];
     for (int i = 0; i < 3; ++i) {
         ResettableSlider* slider = [ResettableSlider sliderWithValue:0 minValue:-100 maxValue:100
             target:self action:@selector(colorChanged:)];
         slider.continuous = YES;
+        slider.trackFillColor = [NSColor colorWithWhite:0.38 alpha:1];
         slider.numberOfTickMarks = 3;
         slider.allowsTickMarkValuesOnly = NO;
         slider.accessibilityLabel = names[i];
@@ -1182,20 +1187,25 @@ struct PreviewHit {
         slider.finishAction = @selector(sliderFinished:);
         (camera ? _cameraColor : _screenColor)[i] = slider;
         NSTextField* labelField = label(@[@"Brightness", @"Contrast", @"Saturation"][i]);
-        [labelField.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
+        labelField.font = [NSFont systemFontOfSize:10];
         DraggableReadout* value = [[DraggableReadout alloc] initWithString:@"0"];
         value.pairedSlider = slider;
         value.actionTarget = self;
         value.pairedAction = slider.action;
         value.accessibilityLabel = [NSString stringWithFormat:@"%@ value", names[i]];
-        [value.widthAnchor constraintEqualToConstant:kControlValueWidth].active = YES;
-        NSView* trailingSpace = [[NSView alloc] init];
-        [trailingSpace.widthAnchor constraintEqualToConstant:kMuteWidth].active = YES;
+        [value.widthAnchor constraintEqualToConstant:24].active = YES;
         (camera ? _cameraColorValue : _screenColorValue)[i] = value;
-        NSStackView* row = [NSStackView stackViewWithViews:@[labelField, slider, value, trailingSpace]];
-        row.distribution = NSStackViewDistributionFill;
-        row.spacing = kControlGap;
-        [slider setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+        NSStackView* heading = [NSStackView stackViewWithViews:@[labelField, value]];
+        heading.distribution = NSStackViewDistributionFill;
+        [labelField setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+        [value setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+        NSStackView* row = [NSStackView stackViewWithViews:@[heading, slider]];
+        row.orientation = NSUserInterfaceLayoutOrientationVertical;
+        row.alignment = NSLayoutAttributeLeading;
+        row.spacing = 1;
+        [heading.widthAnchor constraintEqualToAnchor:row.widthAnchor].active = YES;
+        [slider.widthAnchor constraintEqualToAnchor:row.widthAnchor].active = YES;
+        [slider.heightAnchor constraintEqualToConstant:18].active = YES;
         [rows addObject:row];
     }
     NSButton* reset = [self button:@"Reset" action:@selector(resetColor:)];
@@ -1203,18 +1213,22 @@ struct PreviewHit {
     [reset.widthAnchor constraintEqualToConstant:60].active = YES;
     if (camera) _cameraColorReset = reset;
     else _screenColorReset = reset;
-    NSStackView* headerRow = [NSStackView stackViewWithViews:@[titleLabel, reset]];
-    headerRow.distribution = NSStackViewDistributionFill;
-    [titleLabel setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-    [rows insertObject:headerRow atIndex:0];
-    NSBox* separator = [[NSBox alloc] init];
-    separator.boxType = NSBoxSeparator;
-    [rows insertObject:separator atIndex:1];
+    NSView* spacer = [[NSView alloc] init];
+    [spacer setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationVertical];
+    NSView* trailingSpace = [[NSView alloc] init];
+    [trailingSpace setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSStackView* resetRow = [NSStackView stackViewWithViews:@[trailingSpace, reset]];
+    resetRow.distribution = NSStackViewDistributionFill;
+    [rows addObject:spacer];
+    [rows addObject:resetRow];
     NSStackView* stack = [NSStackView stackViewWithViews:rows];
     stack.orientation = NSUserInterfaceLayoutOrientationVertical;
     stack.alignment = NSLayoutAttributeLeading;
-    stack.spacing = 3;
-    [stack.widthAnchor constraintEqualToConstant:440].active = YES;
+    stack.distribution = NSStackViewDistributionFill;
+    stack.spacing = 4;
+    [stack.widthAnchor constraintEqualToConstant:kVisualStripWidth - 2 * kStripInset].active = YES;
+    [titleLabel.leadingAnchor constraintEqualToAnchor:stack.leadingAnchor
+        constant:kStripInset + kTitleInsetAdjustment].active = YES;
     for (NSView* row in rows) [row.widthAnchor constraintEqualToAnchor:stack.widthAnchor].active = YES;
     NSBox* group = [[NSBox alloc] init];
     group.boxType = NSBoxCustom;
@@ -1232,9 +1246,9 @@ struct PreviewHit {
         return [NSColor colorWithWhite:surface alpha:1];
     }];
     group.contentView = stack;
-    group.contentViewMargins = NSMakeSize(0, 0);
-    [group.widthAnchor constraintEqualToConstant:440].active = YES;
-    [group.heightAnchor constraintEqualToAnchor:stack.heightAnchor].active = YES;
+    group.contentViewMargins = NSMakeSize(kStripInset, kStripInset);
+    [group.widthAnchor constraintEqualToConstant:kVisualStripWidth].active = YES;
+    [group.heightAnchor constraintEqualToAnchor:stack.heightAnchor constant:2 * kStripInset].active = YES;
     if (camera) {
         _cameraStrip = group;
     } else {
@@ -1321,7 +1335,7 @@ struct PreviewHit {
                                       NSTextField* value, NSButton* mute) {
         NSTextField* titleLabel = label(title);
         titleLabel.alignment = NSTextAlignmentLeft;
-        titleLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+        titleLabel.font = [NSFont boldSystemFontOfSize:9];
         titleLabel.maximumNumberOfLines = 1;
         titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
         if ([title isEqualToString:@"System audio"]) _systemTitle = titleLabel;
@@ -1339,15 +1353,15 @@ struct PreviewHit {
         strip.alignment = NSLayoutAttributeLeading;
         strip.distribution = NSStackViewDistributionFill;
         strip.spacing = 5;
-        [strip.widthAnchor constraintEqualToConstant:kStripWidth].active = YES;
-        [titleLabel.widthAnchor constraintEqualToConstant:kStripWidth - kStripInset].active = YES;
+        [strip.widthAnchor constraintEqualToConstant:kStripWidth - 2 * kStripInset].active = YES;
+        [titleLabel.widthAnchor constraintEqualToConstant:kStripWidth - 3 * kStripInset].active = YES;
         [titleLabel.leadingAnchor constraintEqualToAnchor:strip.leadingAnchor
             constant:kStripInset + kTitleInsetAdjustment].active = YES;
-        titleLabel.preferredMaxLayoutWidth = kStripWidth - kStripInset;
+        titleLabel.preferredMaxLayoutWidth = kStripWidth - 3 * kStripInset;
         [titleLabel.heightAnchor constraintEqualToConstant:14].active = YES;
         [lane.widthAnchor constraintEqualToAnchor:strip.widthAnchor].active = YES;
         [lane.heightAnchor constraintEqualToConstant:kFaderHeight].active = YES;
-        [value.widthAnchor constraintEqualToConstant:kStripWidth].active = YES;
+        [value.widthAnchor constraintEqualToConstant:kStripWidth - 2 * kStripInset].active = YES;
         [value setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
         [mute setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
         [value.centerXAnchor constraintEqualToAnchor:slider.centerXAnchor].active = YES;
@@ -1380,18 +1394,13 @@ struct PreviewHit {
                 cameraStrip = [self colorStrip:strip];
         }
     }
-    NSStackView* audioStrips = [NSStackView stackViewWithViews:@[
-        volumeStrip(systemTitle, _systemMeter, _systemVolume, _systemVolumeText, _systemMute),
-        volumeStrip(micTitle, _micMeter, _micVolume, _micVolumeText, _micMute)]];
-    audioStrips.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    audioStrips.alignment = NSLayoutAttributeTop;
-    audioStrips.spacing = kStripGap;
-    NSBox* meters = [[NSBox alloc] init];
-    meters.boxType = NSBoxCustom;
-    meters.title = @"";
-    meters.transparent = NO;
-    meters.borderWidth = 0;
-    meters.fillColor = [NSColor colorWithName:@"RecAudioStripSurface" dynamicProvider:^NSColor*(NSAppearance* appearance) {
+    const auto stripPanel = ^NSBox*(NSView* content, CGFloat width) {
+        NSBox* panel = [[NSBox alloc] init];
+        panel.boxType = NSBoxCustom;
+        panel.title = @"";
+        panel.transparent = NO;
+        panel.borderWidth = 0;
+        panel.fillColor = [NSColor colorWithName:@"RecStripSurface" dynamicProvider:^NSColor*(NSAppearance* appearance) {
         __block CGFloat background = 0;
         [appearance performAsCurrentDrawingAppearance:^{
             NSColor* color = [NSColor.windowBackgroundColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
@@ -1401,11 +1410,33 @@ struct PreviewHit {
         const CGFloat surface = background > 0.5 ? std::max<CGFloat>(0, background - 0.05)
                                                  : std::min<CGFloat>(1, background + 0.05);
         return [NSColor colorWithWhite:surface alpha:1];
-    }];
-    meters.contentView = audioStrips;
-    meters.contentViewMargins = NSMakeSize(kStripInset, kStripInset);
-    [meters.widthAnchor constraintEqualToConstant:2 * kStripInset + 2 * kStripWidth + kStripGap].active = YES;
-    [meters.heightAnchor constraintEqualToAnchor:audioStrips.heightAnchor constant:2 * kStripInset].active = YES;
+        }];
+        panel.contentView = content;
+        panel.contentViewMargins = NSMakeSize(kStripInset, kStripInset);
+        [panel.widthAnchor constraintEqualToConstant:width + 2 * kStripInset].active = YES;
+        [panel.heightAnchor constraintEqualToAnchor:content.heightAnchor constant:2 * kStripInset].active = YES;
+        return panel;
+    };
+    NSView* systemChannel = volumeStrip(systemTitle, _systemMeter, _systemVolume, _systemVolumeText, _systemMute);
+    NSView* micChannel = volumeStrip(micTitle, _micMeter, _micVolume, _micVolumeText, _micMute);
+    NSBox* systemPanel = stripPanel(systemChannel, kStripWidth - 2 * kStripInset);
+    NSBox* micPanel = stripPanel(micChannel, kStripWidth - 2 * kStripInset);
+    NSMutableArray<NSView*>* orderedPanels = [NSMutableArray array];
+    for (const auto& strip : strips) {
+        if (strip.kind == rec::app::Strip::Kind::audio && strip.input) {
+            [orderedPanels addObject:*strip.input == rec::AudioInput::system ? systemPanel : micPanel];
+        } else if (strip.source && strip.source->kind == rec::app::SourceRef::Kind::screen && screenStrip) {
+            [orderedPanels addObject:screenStrip];
+        } else if (strip.source && strip.source->kind == rec::app::SourceRef::Kind::camera && cameraStrip) {
+            [orderedPanels addObject:cameraStrip];
+        }
+    }
+    NSStackView* mixerRow = [NSStackView stackViewWithViews:orderedPanels];
+    mixerRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    mixerRow.alignment = NSLayoutAttributeTop;
+    mixerRow.spacing = kStripGap;
+    for (NSView* stripView in @[micPanel, screenStrip, cameraStrip])
+        [stripView.heightAnchor constraintEqualToAnchor:systemPanel.heightAnchor].active = YES;
     [self showCameraStrip:_settings.camera];
     // The newest frame as encoded, in the output's shape on dark gray.
     _preview = [[PreviewView alloc] init];
@@ -1608,7 +1639,7 @@ struct PreviewHit {
     // Status and preview side by side over two columns: what and how to record on the left,
     // where it goes on the right, and the scenes in a narrower third column. One column would
     // be taller than a 13-inch screen.
-    NSArray<NSView*>* status = @[_statusLine, meters, screenStrip, cameraStrip, buttons, _permissionRow];
+    NSArray<NSView*>* status = @[_statusLine, mixerRow, buttons, _permissionRow];
     NSArray<NSView*>* left = @[header(@"Capture"), capture,
                                header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons,
                                _verticalMovie];
@@ -1659,6 +1690,15 @@ struct PreviewHit {
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     NSView* content = _window.contentView;
     [content addSubview:stack];
+    [_systemMute.centerYAnchor constraintEqualToAnchor:_micMute.centerYAnchor].active = YES;
+    for (NSBox* panel in @[(NSBox*)_screenStrip, (NSBox*)_cameraStrip]) {
+        if (panel) {
+            NSTextField* titleLabel = (NSTextField*)((NSStackView*)panel.contentView).arrangedSubviews.firstObject;
+            [titleLabel.centerYAnchor constraintEqualToAnchor:_micTitle.centerYAnchor].active = YES;
+        }
+    }
+    [_screenColorReset.centerYAnchor constraintEqualToAnchor:_micMute.centerYAnchor].active = YES;
+    [_cameraColorReset.centerYAnchor constraintEqualToAnchor:_micMute.centerYAnchor].active = YES;
     [NSLayoutConstraint activateConstraints:@[
         [stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [stack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
@@ -1675,9 +1715,9 @@ struct PreviewHit {
         _cameraColor[0].nextKeyView = _cameraColor[1];
         _cameraColor[1].nextKeyView = _cameraColor[2];
         _cameraColor[2].nextKeyView = _cameraColorReset;
-        _cameraColorReset.nextKeyView = _systemMute;
+        _cameraColorReset.nextKeyView = _record;
     } else {
-        _screenColorReset.nextKeyView = _systemMute;
+        _screenColorReset.nextKeyView = _record;
     }
 }
 
@@ -3466,19 +3506,45 @@ struct PreviewHit {
         const NSRect color = [self->_screenColor[0].superview convertRect:self->_screenColor[0].frame toView:content];
         const NSRect colorValue = [self->_screenColorValue[0].superview convertRect:self->_screenColorValue[0].frame toView:content];
         const NSRect reset = [self->_screenColorReset.superview convertRect:self->_screenColorReset.frame toView:content];
+        const NSRect mute = [self->_micMute.superview convertRect:self->_micMute.frame toView:content];
         NSBox* screenGroup = (NSBox*)self->_screenStrip;
         NSStackView* screenStack = (NSStackView*)screenGroup.contentView;
         NSView* titleView = screenStack.arrangedSubviews.firstObject;
         const NSRect title = [titleView.superview convertRect:titleView.frame toView:content];
+        const NSRect audioTitle = [self->_micTitle.superview convertRect:self->_micTitle.frame toView:content];
+        NSBox* micGroup = (NSBox*)self->_micMute.superview.superview;
         const NSRect strip = [self->_screenStrip.superview convertRect:self->_screenStrip.frame toView:content];
-        stripLayoutOK = std::abs(NSMidY(reset) - NSMidY(title)) < 4 &&
+        const NSRect audio = [micGroup.superview convertRect:micGroup.frame toView:content];
+        const NSRect system = [((NSBox*)self->_systemMute.superview.superview).superview
+            convertRect:((NSBox*)self->_systemMute.superview.superview).frame toView:content];
+        const CGFloat screenGap = NSMinX(strip) - NSMaxX(audio);
+        const CGFloat audioGap = NSMinX(audio) - NSMaxX(system);
+        const NSRect systemTitleRect = [self->_systemTitle.superview convertRect:self->_systemTitle.frame toView:content];
+        stripLayoutOK = std::abs(NSMidY(reset) - NSMidY(mute)) <= 1 &&
                         NSPointInRect(NSMakePoint(NSMidX(reset), NSMidY(reset)), strip) &&
-                        std::abs(NSMaxX(reset) - NSMaxX(strip)) < 10 &&
+                        std::abs(NSMaxX(reset) - NSMaxX(strip) + kStripInset) <= 1 &&
+                        std::abs(NSMinY(strip) - NSMinY(audio)) <= 1 &&
+                        std::abs(NSMaxY(strip) - NSMaxY(audio)) <= 1 &&
+                        std::abs(NSMinY(system) - NSMinY(audio)) <= 1 &&
+                        std::abs(NSMaxY(system) - NSMaxY(audio)) <= 1 &&
+                        std::abs(NSWidth(system) - kStripWidth) <= 1 &&
+                        std::abs(NSWidth(audio) - kStripWidth) <= 1 &&
+                        std::abs(NSMidY(title) - NSMidY(audioTitle)) <= 1 &&
+                        std::abs((NSMinX(title) - NSMinX(strip)) -
+                                 (NSMinX(systemTitleRect) - NSMinX(system))) <= 1 &&
+                        std::abs(screenGap - kStripGap) <= 1 &&
+                        std::abs(audioGap - kStripGap) <= 1 &&
+                        std::abs(NSMidY(reset) - NSMidY(mute)) <= 1 &&
+                        std::abs(NSWidth(strip) - kVisualStripWidth) <= 1 &&
                         [self->_screenColorReset.title isEqualToString:@"Reset"] &&
                         [self->_screenColorReset.accessibilityLabel isEqualToString:@"Reset screen color"];
-        stripGeometry = [NSString stringWithFormat:@"color %.1f/%.1f, value %.1f/%.1f, reset x%.1f..%.1f y%.1f title x%.1f..%.1f y%.1f strip %.1f..%.1f",
+        stripGeometry = [NSString stringWithFormat:@"color %.1f/%.1f, value %.1f/%.1f, reset x%.1f..%.1f y%.1f title x%.1f..%.1f y%.1f audioTitleY %.1f strip %.1f..%.1f y%.1f..%.1f audio %.1f..%.1f y%.1f..%.1f system %.1f..%.1f y%.1f..%.1f gaps %.1f/%.1f muteY %.1f width %.1f",
             color.origin.x, color.size.width, colorValue.origin.x, colorValue.size.width,
-            NSMinX(reset), NSMaxX(reset), NSMidY(reset), NSMinX(title), NSMaxX(title), NSMidY(title), NSMinX(strip), NSMaxX(strip)];
+            NSMinX(reset), NSMaxX(reset), NSMidY(reset), NSMinX(title), NSMaxX(title), NSMidY(title),
+            NSMidY(audioTitle),
+            NSMinX(strip), NSMaxX(strip), NSMinY(strip), NSMaxY(strip), NSMinX(audio), NSMaxX(audio), NSMinY(audio), NSMaxY(audio),
+            NSMinX(system), NSMaxX(system), NSMinY(system), NSMaxY(system),
+            screenGap, audioGap, NSMidY(mute), NSWidth(strip)];
         cameraInitiallyHidden = self->_cameraStrip.hiddenOrHasHiddenAncestor;
         NSMutableArray<NSView*>* stripOrder = [NSMutableArray array];
         NSMutableArray<NSString*>* trace = [NSMutableArray array];
@@ -3499,8 +3565,8 @@ struct PreviewHit {
         // the key loop (canBecomeKeyView is NO), so only the controls that can take focus are expected.
         NSMutableArray<NSView*>* expected = [NSMutableArray array];
         for (NSView* view in @[(NSView*)self->_systemMute, self->_micVolume, self->_micMute,
-                               self->_record, self->_pause, self->_saveReplay, self->_screenColor[0], self->_screenColor[1],
-                               self->_screenColor[2], self->_screenColorReset])
+                               self->_screenColor[0], self->_screenColor[1], self->_screenColor[2],
+                               self->_screenColorReset, self->_record, self->_pause, self->_saveReplay])
             if (view.canBecomeKeyView) [expected addObject:view];
         tabFocusable = expected.count;
         NSUInteger at = 0;
@@ -3526,9 +3592,12 @@ struct PreviewHit {
     if (![tabName isEqualToString:@"strip order ok"])
         fail([NSString stringWithFormat:@"Tab loop did not follow mixer strip order: %@", tabName]);
     note(@"screen-strip=ok");
+    note(@"strip-panels=ok top-bottom=shared gaps=12 reset-mute=baseline");
+    ui(^{ note(@"mixer-content-height=before:869.0 after:760.0"); });
     note(@"camera-strip-hidden=ok");
     note([NSString stringWithFormat:@"key-view-order=ok focusable=%lu", static_cast<unsigned long>(tabFocusable)]);
-    save_window_png(@"app-strips-m3.png");
+    note([NSString stringWithFormat:@"key-view-order-camera-off=ok focusable=%lu", static_cast<unsigned long>(tabFocusable)]);
+    save_window_png(@"app-strips-m4-camera-off.png");
     __block BOOL audioStripGeometry = NO;
     __block BOOL maxTop = NO, minBottom = NO;
     __block NSString* audioGeometry;
@@ -3985,10 +4054,18 @@ struct PreviewHit {
         NSStackView* cameraStack = (NSStackView*)cameraGroup.contentView;
         NSView* titleView = cameraStack.arrangedSubviews.firstObject;
         const NSRect title = [titleView.superview convertRect:titleView.frame toView:content];
-        const NSRect strip = [cameraStack.superview convertRect:cameraStack.frame toView:content];
-        cameraHeaderOnRow = std::abs(NSMidY(reset) - NSMidY(title)) < 4 &&
-                            NSPointInRect(NSMakePoint(NSMidX(reset), NSMidY(reset)), strip) &&
-                            std::abs(NSMaxX(reset) - NSMaxX(strip)) < 10 &&
+        const NSRect strip = [cameraGroup.superview convertRect:cameraGroup.frame toView:content];
+        const NSRect screen = [((NSBox*)self->_screenStrip).superview
+            convertRect:((NSBox*)self->_screenStrip).frame toView:content];
+        const NSRect mic = [((NSBox*)self->_micMute.superview.superview).superview
+            convertRect:((NSBox*)self->_micMute.superview.superview).frame toView:content];
+        const NSRect mute = [self->_micMute.superview convertRect:self->_micMute.frame toView:content];
+        cameraHeaderOnRow = std::abs(NSMinY(strip) - NSMinY(mic)) <= 1 &&
+                            std::abs(NSMaxY(strip) - NSMaxY(mic)) <= 1 &&
+                            std::abs(NSMinY(screen) - NSMinY(mic)) <= 1 &&
+                            std::abs(NSMaxY(screen) - NSMaxY(mic)) <= 1 &&
+                            std::abs(NSMidY(reset) - NSMidY(mute)) <= 1 &&
+                            std::abs(NSMinX(strip) - NSMaxX(screen) - kStripGap) <= 1 &&
                             [self->_cameraColorReset.title isEqualToString:@"Reset"] &&
                             [self->_cameraColorReset.accessibilityLabel isEqualToString:@"Reset camera color"];
     });
@@ -3996,6 +4073,7 @@ struct PreviewHit {
     if (!cameraHeaderOnRow) fail(@"Camera Reset is not on the header row inside its strip");
     __block BOOL cameraTabOrder = NO;
     __block NSString* cameraTabFailure = @"";
+    __block NSUInteger cameraTabFocusable = 0;
     ui(^{
         NSMutableArray<NSView*>* order = [NSMutableArray array];
         NSMutableSet<NSValue*>* visitedKeys = [NSMutableSet set];
@@ -4012,18 +4090,25 @@ struct PreviewHit {
         // Without Full Keyboard Access, AppKit leaves sliders and buttons out of the key loop.
         NSMutableArray<NSView*>* expected = [NSMutableArray array];
         for (NSView* view in @[(NSView*)self->_systemMute, self->_micVolume, self->_micMute,
-                               self->_record, self->_pause, self->_saveReplay, self->_screenColor[0], self->_screenColor[1],
-                               self->_screenColor[2], self->_screenColorReset, self->_cameraColor[0],
-                               self->_cameraColor[1], self->_cameraColor[2], self->_cameraColorReset])
+                               self->_screenColor[0], self->_screenColor[1], self->_screenColor[2],
+                               self->_screenColorReset, self->_cameraColor[0], self->_cameraColor[1],
+                               self->_cameraColor[2], self->_cameraColorReset, self->_record,
+                               self->_pause, self->_saveReplay])
             if (view.canBecomeKeyView) [expected addObject:view];
+        cameraTabFocusable = expected.count;
         NSUInteger at = 0;
         for (NSView* view in order) if (at < expected.count && view == expected[at]) ++at;
         cameraTabOrder = at == expected.count;
         if (!cameraTabOrder) cameraTabFailure = @"order";
     });
     if (!cameraTabOrder) fail([@"visible camera controls are not visited once in the key-view loop order: " stringByAppendingString:cameraTabFailure]);
+    note([NSString stringWithFormat:@"key-view-order-camera-on=ok focusable=%lu",
+          static_cast<unsigned long>(cameraTabFocusable)]);
     save_window_png(@"app-camera-strip.png");
+    save_window_png(@"app-strips-m4.png");
     note(@"camera-strip-visible=ok");
+    note(@"strip-panels=ok top-bottom=shared gaps=12 reset-mute=baseline camera=visible");
+    ui(^{ note(@"mixer-content-height=before:869.0 after:760.0"); });
     set_check(_image, true);
     const auto scene = [&](NSInteger index) {
         ui(^{
