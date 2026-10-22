@@ -973,8 +973,14 @@ public:
         const auto full = [](const Area& a) { return a.x <= 0 && a.y <= 0 && a.width >= 1 && a.height >= 1; };
         const bool whole = canvas == kMainCanvas && shown.visible && full(shown.area) && full(shown.crop) &&
                            !screen_adjustment.brightness && !screen_adjustment.contrast && !screen_adjustment.saturation;
-        if (whole) context->CopySubresourceRegion(frame, subresource, 0, 0, 0, screen, 0, nullptr);
-        if (whole && !count && !mark_count) return true;
+        ID3D11Texture2D* screen_to_draw = screen;
+        if (canvas == kMainCanvas && shown.visible && screen_was_hidden_ && last_screen_valid_)
+            screen_to_draw = last_screen_.Get();
+        if (whole) context->CopySubresourceRegion(frame, subresource, 0, 0, 0, screen_to_draw, 0, nullptr);
+        if (whole && !count && !mark_count) {
+            remember_screen(context, canvas, shown.visible, screen);
+            return true;
+        }
         // Before taking the device lock: closing a capture frame takes its frame pool's lock,
         // and the pool's present thread holds that while it waits for the device lock.
         for (std::size_t i = 0; i < count; ++i)
@@ -990,7 +996,7 @@ public:
                 const float black[4] = {16.0f / 255, 0, 0, 0}, neutral[4] = {128.0f / 255, 128.0f / 255, 0, 0};
                 context->ClearRenderTargetView(target->luma.Get(), black);
                 context->ClearRenderTargetView(target->chroma.Get(), neutral);
-                if (shown.visible) drawn = draw_screen(context, *target, screen, shown, screen_adjustment);
+                if (shown.visible) drawn = draw_screen(context, *target, screen_to_draw, shown, screen_adjustment);
             }
             for (std::size_t i = 0; i < mark_count && drawn; ++i) draw_mark(context, *target, marks[i]);
             for (std::size_t i = 0; i < count && drawn; ++i)
@@ -998,6 +1004,7 @@ public:
             end(context);
         }
         if (multithread) multithread->Leave();
+        remember_screen(context, canvas, shown.visible, screen);
         return drawn;
     }
 
@@ -1276,6 +1283,39 @@ private:
         targets_.push_back(std::move(target));
         return &targets_.back();
     }
+    // Keep the main-screen frame at the moment it is hidden outside the capture slot pool.
+    // WGC can recycle that slot while another scene is shown; use the retained frame on the
+    // first draw after the screen returns.
+    void remember_screen(ID3D11DeviceContext* context, std::size_t canvas, bool visible, ID3D11Texture2D* screen) {
+        if (canvas != kMainCanvas) return;
+        if (visible) {
+            screen_was_hidden_ = false;
+            return;
+        }
+        if (screen_was_hidden_) return;
+        D3D11_TEXTURE2D_DESC desc{};
+        screen->GetDesc(&desc);
+        if (!last_screen_ || last_screen_width_ != desc.Width || last_screen_height_ != desc.Height ||
+            last_screen_format_ != desc.Format) {
+            desc.MiscFlags = 0;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.CPUAccessFlags = 0;
+            if (FAILED(device_->CreateTexture2D(&desc, nullptr, &last_screen_))) {
+                last_screen_valid_ = false;
+                return;
+            }
+            last_screen_width_ = desc.Width;
+            last_screen_height_ = desc.Height;
+            last_screen_format_ = desc.Format;
+        }
+        ComPtr<ID3D11Multithread> multithread;
+        context->QueryInterface(IID_PPV_ARGS(&multithread));
+        if (multithread) multithread->Enter();
+        context->CopyResource(last_screen_.Get(), screen);
+        if (multithread) multithread->Leave();
+        last_screen_valid_ = true;
+        screen_was_hidden_ = true;
+    }
 
     // The main capture's frames are a fixed set of NV12 textures too.
     Planes* planes_for(ID3D11Texture2D* screen) {
@@ -1378,6 +1418,10 @@ private:
     std::array<Canvas, 2> canvases_;
     std::vector<Target> targets_;
     std::vector<Planes> planes_;
+    ComPtr<ID3D11Texture2D> last_screen_;
+    UINT last_screen_width_ = 0, last_screen_height_ = 0;
+    DXGI_FORMAT last_screen_format_ = DXGI_FORMAT_UNKNOWN;
+    bool last_screen_valid_ = false, screen_was_hidden_ = false;
     std::unique_ptr<core::Clicks> clicks_;
     std::unique_ptr<ClickWatch> watch_;
     ClickSource click_source_;

@@ -989,6 +989,7 @@ try {
     while ($corner.ContainsKey("sample_$($last + 1)")) { $last++ }
     if ($last -lt 5) { throw "the camera recording is too short: $($corner['duration']) s; the app showed '$counted' at Stop" }
     Expect-Color $corner "sample_$last" 'gray'
+    if ($last -ge 7) { foreach ($second in 7..$last) { Expect-Color $screenColorMovie "sample_$second" 'gray' } }
     foreach ($second in 0..$last) { Expect-Color $logo "sample_$second" 'red' }
     Press $ui 'Reset screen color'
     Write-Host "6. camera and image: $($corner['frames']) frames ($counted at Stop), corner, full frame, hidden; the preview matched, before Start too"
