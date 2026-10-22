@@ -300,10 +300,10 @@ struct WhipPublisher::Session {
     Url resource;
     bool has_resource = false;
     Clock::time_point last_rx{}, next_consent{}, next_report{};
-    // Pacing: media time t0_ms leaves at `at`. Some servers (MediaMTX) take the first packet
-    // of each track as simultaneous, so the first audio packet is the one nearest the first
-    // keyframe and that keyframe takes its RTP time.
-    bool anchored = false, first_video = true;
+    // Pacing: media time t0_ms leaves at `at`. Send one audio packet at or before the opening
+    // keyframe first so receivers that establish their mux timeline from first-packet arrival
+    // cannot place the keyframe after the recording start.
+    bool anchored = false, opening_audio_sent = false;
     bool video_keyframe_sent = false;
     std::uint32_t t0_ms = 0;
     std::int64_t ref_sample = 0;
@@ -683,37 +683,63 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
             return false;
         }
         const std::uint32_t tk = key->ms;
+        const std::int64_t key_sample = static_cast<std::int64_t>(tk) * 48;
         std::uint32_t newest_audio = 0, newest_video = tk;
-        const Media* best = nullptr;
+        const Media* best_before = nullptr;
+        const Media* best_after = nullptr;
         for (const auto& m : queue_) {
             if (m.video) { newest_video = std::max(newest_video, m.ms); continue; }
             newest_audio = std::max(newest_audio, m.ms);
-            const auto distance = m.ms > tk ? m.ms - tk : tk - m.ms;
-            // Do not let audio before the opening keyframe anchor the receiver's
-            // recording timeline. Keep it queued until the keyframe has gone out.
-            if (m.ms >= tk && distance < 20 &&
-                (!best || distance < best->ms - tk)) best = &m;
+            if (m.sample <= key_sample && key_sample - m.sample < 20 * 48 &&
+                (!best_before || m.sample > best_before->sample)) best_before = &m;
+            if (m.sample > key_sample && m.sample - key_sample < 20 * 48 &&
+                (!best_after || m.sample - key_sample < best_after->sample - key_sample)) best_after = &m;
         }
         // Wait for the audio around the keyframe (it may still be encoding), but not for
         // audio that never comes.
         if (newest_audio < tk + 20 && newest_video - tk < 500) return false;
-        const std::int64_t key_sample = static_cast<std::int64_t>(tk) * 48;
-        const std::int64_t ref = best ? best->sample : key_sample;
+        // MediaMTX's fMP4 writer buffers each track's first sample until its next packet sets
+        // the duration. If the first audio timestamp is later than the keyframe, its sample can
+        // establish a later segment start before the opening IDR is written. Prefer the latest
+        // Opus sample at or before the IDR; if none is queued, use the nearest later one.
+        const Media* first_audio = best_before ? best_before : best_after;
+        const std::int64_t ref = first_audio ? first_audio->sample : key_sample;
         queue_.erase(std::remove_if(queue_.begin(), queue_.end(),
-                                    [&](const Media& m) { return m.video ? m.ms < tk : m.sample < key_sample; }),
+                                    [&](const Media& m) { return m.video ? m.ms < tk : m.sample < ref; }),
                      queue_.end());
         s.ref_sample = ref;
         s.t0_ms = tk;
         s.at = now + kSendMargin;
         s.anchored = true;
-        s.first_video = true;
+        s.opening_audio_sent = false;
     }
     for (;;) {
         if (queue_.empty()) return false;
         std::size_t pick = queue_.size();
         if (!s.video_keyframe_sent) {
-            // Establish the receiver's timeline with the opening keyframe before
-            // sending any audio, even if encoder callback order queued audio first.
+            // Establish the receiver's timeline with one opening audio packet, then the IDR.
+            // An earlier audio packet is intentionally sent before the pacing origin.
+            if (!s.opening_audio_sent) {
+                const auto audio = std::find_if(queue_.begin(), queue_.end(), [&](const Media& m) {
+                    return !m.video && m.sample == s.ref_sample;
+                });
+                if (audio != queue_.end()) {
+                    // Preserve the captured lead and add a small delivery margin. RTP from
+                    // separate SSRCs is read on separate receiver goroutines, so merely
+                    // sending the audio datagram a few instructions before the IDR does not
+                    // guarantee the receiver processes it first.
+                    const auto lead_ms = audio->ms < s.t0_ms ? s.t0_ms - audio->ms : 0;
+                    const auto audio_due = s.at - milliseconds(lead_ms + 5);
+                    if (audio_due > now) {
+                        next = audio_due;
+                        return false;
+                    }
+                    item = std::move(*audio);
+                    queue_.erase(audio);
+                    s.opening_audio_sent = true;
+                    return true;
+                }
+            }
             const auto key = std::find_if(queue_.begin(), queue_.end(),
                                           [](const Media& m) { return m.video && m.key; });
             if (key != queue_.end()) pick = static_cast<std::size_t>(key - queue_.begin());
@@ -725,7 +751,10 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
         }
         if (pick == queue_.size()) return false;
         const auto& m = queue_[static_cast<std::ptrdiff_t>(pick)];
-        if (m.ms < s.t0_ms) { queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(pick)); continue; }
+        if (m.ms < s.t0_ms && (m.video || m.sample != s.ref_sample)) {
+            queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(pick));
+            continue;
+        }
         const auto due = s.at + milliseconds(m.ms - s.t0_ms);
         if (due > now) { next = due; return false; }
         item = std::move(queue_[static_cast<std::ptrdiff_t>(pick)]);
@@ -768,8 +797,7 @@ void WhipPublisher::send_video(Session& s, const Media& item) {
         if (type != 9 && !(item.key && !sps.empty() && (type == 7 || type == 8))) nals.emplace_back(item.data.data() + at, n);
         at += n;
     }
-    const std::uint32_t ts = s.first_video ? s.video_rtp(static_cast<double>(s.ref_sample) / 48.0) : s.video_rtp(item.ms);
-    s.first_video = false;
+    const std::uint32_t ts = s.video_rtp(item.ms);
     bool sent_all = true;
     std::size_t packets = 0, paced_ms = 0;
     auto pacing_deadline = Clock::now();
@@ -831,7 +859,6 @@ void WhipPublisher::send_video(Session& s, const Media& item) {
 }
 
 void WhipPublisher::send_audio(Session& s, const Media& item) {
-    if (!s.video_keyframe_sent) return;
     Bytes p = rtp_header(s.audio_pt, false, s.audio_seq++, s.audio_rtp(item.sample), s.audio_ssrc);
     p.insert(p.end(), item.data.begin(), item.data.end());
     const std::size_t payload = item.data.size();
