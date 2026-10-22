@@ -981,6 +981,11 @@ try {
     Wait-Until { (Find $ui 'Scene' $ComboBox).Item.accValue(0) -eq 'Screen only' } 'the posted Screen only scene was not applied by the app'
     # The recording test pattern has dark bands and a white flash, unlike the white preview.
     # Zero contrast maps both to mid-gray, so the strict samples test scene composition.
+    $screenBrightness = (Find $ui 'Screen brightness' $Slider).Handle
+    [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr]0) | Out-Null
+    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]5, $screenBrightness) | Out-Null
+    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
+    Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("screen_color=0,0,0") } 'screen brightness was not reset before the contrast sample'
     $screenContrast = (Find $ui 'Screen contrast' $Slider).Handle
     [AppWindow]::SendMessage($screenContrast, 0x0405, [IntPtr]1, [IntPtr](-100)) | Out-Null
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]5, $screenContrast) | Out-Null
