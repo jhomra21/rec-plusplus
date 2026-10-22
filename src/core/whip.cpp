@@ -314,8 +314,8 @@ struct WhipPublisher::Session {
     std::uint32_t audio_rtp(std::int64_t sample) const {
         return audio_base + static_cast<std::uint32_t>(sample - ref_sample);
     }
-    void send(const std::uint8_t* data, std::size_t size) { socket->send(remote, data, size); }
-    void send(const Bytes& data) { send(data.data(), data.size()); }
+    bool send(const std::uint8_t* data, std::size_t size) { return socket->send(remote, data, size); }
+    bool send(const Bytes& data) { return send(data.data(), data.size()); }
     void consent() {
         std::uint8_t txid[12];
         crypto::random(txid, 12);
@@ -567,16 +567,19 @@ bool WhipPublisher::video(std::uint32_t ms, bool key, bool header, const Bytes& 
     m.ms = static_cast<std::uint32_t>(static_cast<std::int64_t>(ms) + cts);
     m.data.assign(body.begin() + 5, body.end());
     queue_.push_back(std::move(m));
-    if (key) last_key_ns_.store(Clock::now().time_since_epoch().count());
     return true;
 }
 
 bool WhipPublisher::take_keyframe_request() {
+    if (!keyframe_wanted_.load()) return false;
+    // Rate-limit repeated feedback, not keyframes: a recently queued IDR may have been lost
+    // or incomplete, which is exactly why the server sent PLI/FIR.
+    const auto now = Clock::now().time_since_epoch().count();
+    const auto since = now - last_key_request_ns_.load();
+    if (since < std::chrono::duration_cast<Clock::duration>(milliseconds(1000)).count()) return false;
     if (!keyframe_wanted_.exchange(false)) return false;
-    // Some servers (MediaMTX) ask every couple of seconds whether or not they lost anything.
-    // A keyframe less than a second ago answers that; the regular one comes within 2 s.
-    const auto since = Clock::now().time_since_epoch().count() - last_key_ns_.load();
-    return since >= std::chrono::duration_cast<Clock::duration>(milliseconds(1000)).count();
+    last_key_request_ns_.store(now);
+    return true;
 }
 
 bool WhipPublisher::audio(std::int64_t sample, Bytes packet) {
@@ -734,10 +737,17 @@ void WhipPublisher::send_video(Session& s, const Media& item) {
     }
     const std::uint32_t ts = s.first_video ? s.video_rtp(static_cast<double>(s.ref_sample) / 48.0) : s.video_rtp(item.ms);
     s.first_video = false;
+    bool sent_all = true;
     auto emit = [&](Bytes packet) {
         const std::size_t payload = packet.size() - 12;
-        if (!s.out->protect_rtp(packet)) return;
-        s.send(packet);
+        if (!s.out->protect_rtp(packet)) {
+            sent_all = false;
+            return;
+        }
+        if (!s.send(packet)) {
+            sent_all = false;
+            return;
+        }
         bytes_.fetch_add(packet.size());
         ++s.video_packets;
         s.video_octets += static_cast<std::uint32_t>(payload);
@@ -765,6 +775,12 @@ void WhipPublisher::send_video(Session& s, const Media& item) {
             emit(std::move(p));
             at += n;
         }
+    }
+    if (!sent_all) {
+        // A failed UDP send can leave an IDR incomplete even after the bounded ENOBUFS retry.
+        // Ask the encoder for another keyframe instead of waiting for its regular 2 s interval.
+        last_key_request_ns_.store(0);
+        keyframe_wanted_.store(true);
     }
 }
 
