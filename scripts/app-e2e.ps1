@@ -279,7 +279,7 @@ function High-Contrast {
     $hc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($hc)
     return [AppWindow]::SystemParametersInfo(0x0042, [uint32]$hc.cbSize, [ref]$hc, 0) -and (($hc.dwFlags -band 1) -ne 0)
 }
-function Expect-Strip($ui, $bitmap, [int]$base) {
+function Expect-Strip($ui, $bitmap, [int]$base, [int]$surface) {
     $panel = Control-Rect $ui ($base + 11)
     $allControls = @(100..399 | ForEach-Object {
         $handle = [AppWindow]::GetDlgItem($ui.Window, $_)
@@ -300,7 +300,6 @@ function Expect-Strip($ui, $bitmap, [int]$base) {
     if (-not $sample) { throw "could not find an uncovered point inside strip panel $base" }
     $r = [int]$sample.R; $g = [int]$sample.G; $b = [int]$sample.B
     $brightness = [int](($r + $g + $b) / 3)
-    $surface = 28 # D1 surface palette is RGB 28,28,32.
     if ($brightness -le $surface -or $brightness -ge 70) {
         throw "strip panel $base RGB $r,$g,$b is not lighter than the surface and still dark"
     }
@@ -338,7 +337,7 @@ function Expect-CustomTrackbar($ui, [int]$id, [string]$path) {
     $bitmap = Snapshot-Window $ui $path
     try {
         $rect = Control-Rect $ui $id
-        $red = 0; $channel = 0
+        $red = 0; $channel = 0; $thumb = 0
         for ($y = [Math]::Max(0, $rect.Top); $y -lt [Math]::Min($bitmap.Height, $rect.Bottom); $y++) {
             for ($x = [Math]::Max(0, $rect.Left); $x -lt [Math]::Min($bitmap.Width, $rect.Right); $x++) {
                 $pixel = $bitmap.GetPixel($x, $y)
@@ -346,11 +345,14 @@ function Expect-CustomTrackbar($ui, [int]$id, [string]$path) {
                 if ($pixel.R -ge 55 -and $pixel.R -le 90 -and
                     $pixel.G -ge 55 -and $pixel.G -le 90 -and
                     $pixel.B -ge 60 -and $pixel.B -le 96) { $channel++ }
+                if ($pixel.R -ge 195 -and $pixel.G -ge 195 -and $pixel.B -ge 195 -and
+                    ($pixel.B - $pixel.R) -le 12) { $thumb++ }
             }
         }
-        if ($red -lt 6) { throw "custom trackbar $id has only $red accent-red pixels in its snapshot" }
-        if ($channel -lt 6) { throw "custom trackbar $id has only $channel dark-channel pixels in its snapshot" }
-        Write-Host "D3. custom trackbar ${id}: $red accent-red pixels and $channel dark-channel pixels; saved $path"
+        if ($red -ne 0) { throw "custom trackbar $id has $red red pixels; red is reserved for recording/live" }
+        if ($channel -lt 6) { throw "custom trackbar $id has only $channel channel pixels in its snapshot" }
+        if ($thumb -lt 6) { throw "custom trackbar $id has only $thumb light-thumb pixels in its snapshot" }
+        Write-Host "D3. custom trackbar ${id}: 0 red, $thumb thumb and $channel channel pixels"
     } finally { $bitmap.Dispose() }
 }
 function Expect-Dark($ui) {
@@ -372,7 +374,8 @@ function Expect-Dark($ui) {
         if ($r -ge 45 -or $g -ge 45 -or $b -ge 45) {
             throw "app surface margin is not dark: mean RGB $r,$g,$b"
         }
-        Expect-Strip $ui $bitmap 300
+        $script:appSurfaceMean = [int](($r + $g + $b) / 3)
+        Expect-Strip $ui $bitmap 300 $script:appSurfaceMean
         $microphone = (Find $ui 'Microphone' $CheckButton).Handle
         $micRect = Control-Rect $ui ([AppWindow]::GetDlgCtrlID($microphone))
         $micText = $false
@@ -476,7 +479,6 @@ function Assert-StripGeometry($ui, [bool]$camera) {
     $base = if ($camera) { 320 } else { 300 }
     $panelRect = New-Object AppWindow+RECT
     [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, $base + 11), [ref]$panelRect) | Out-Null
-    $inset = [int][Math]::Round(8 * [AppWindow]::GetDpiForWindow($ui.Window) / 96)
     $sliderRects = @()
     foreach ($name in @('brightness', 'contrast', 'saturation')) {
         $handle = (Find $ui "$label $name" $Slider).Handle
@@ -784,7 +786,7 @@ try {
     Assert-StripVisibility $ui @(320..331) $true 'Camera'
     $cameraStripBitmap = Snapshot-Window $ui (Join-Path $Artifacts 'app-strips-camera-contrast.png')
     try {
-        if (-not (High-Contrast)) { Expect-Strip $ui $cameraStripBitmap 320 }
+        if (-not (High-Contrast)) { Expect-Strip $ui $cameraStripBitmap 320 $script:appSurfaceMean }
     } finally { $cameraStripBitmap.Dispose() }
     Snapshot-StripDpi $ui $Artifacts 'app-strips-camera'
     Set-Check $ui 'Camera' $false
@@ -1089,6 +1091,24 @@ try {
     [AppWindow]::SendMessage($screenBrightness, 0x0405, [IntPtr]1, [IntPtr](-50)) | Out-Null
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $screenBrightness) | Out-Null
     if ((Find $ui 'Screen brightness' $Slider).Item.accValue(0) -ne '-50') { throw 'screen brightness slider value did not show -50' }
+    # This probe checks trackbar colors, not the (unsaved) value.
+    if (-not (High-Contrast)) {
+        Expect-CustomTrackbar $ui 304 (Join-Path $Artifacts 'app-screen-brightness-d3.png')
+        $screenBitmap = Snapshot-Window $ui (Join-Path $Artifacts 'app-screen-brightness-d3-fill.png')
+        try {
+            $screenRect = Control-Rect $ui 304
+            $fillPixels = 0
+            for ($y = [Math]::Max(0, $screenRect.Top); $y -lt [Math]::Min($screenBitmap.Height, $screenRect.Bottom); $y++) {
+                for ($x = [Math]::Max(0, $screenRect.Left); $x -lt [Math]::Min($screenBitmap.Width, $screenRect.Right); $x++) {
+                    $pixel = $screenBitmap.GetPixel($x, $y)
+                    if ($pixel.R -ge 100 -and $pixel.R -le 125 -and
+                        $pixel.G -ge 100 -and $pixel.G -le 125 -and
+                        $pixel.B -ge 100 -and $pixel.B -le 125) { $fillPixels++ }
+                }
+            }
+            if ($fillPixels -lt 6) { throw "screen brightness trackbar has only $fillPixels neutral fill pixels" }
+        } finally { $screenBitmap.Dispose() }
+    }
     Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-screen-gray.png') @(0.4, 0.4, 0.2, 0.2) 'gray' -pollMilliseconds 50
     Post-TrackbarDoubleClick $screenBrightness
     Wait-Until { (Find $ui 'Screen brightness' $Slider).Item.accValue(0) -eq '0' } 'double-click did not reset screen brightness'

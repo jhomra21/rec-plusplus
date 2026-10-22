@@ -61,6 +61,9 @@ struct Palette {
     COLORREF panel = RGB(40, 40, 45);
     COLORREF text = RGB(230, 230, 234);
     COLORREF dim_text = RGB(150, 150, 158);
+    COLORREF channel = RGB(72, 72, 76);
+    COLORREF fill = RGB(112, 112, 118);
+    COLORREF thumb = RGB(205, 205, 210);
     COLORREF meter_green = RGB(70, 190, 105);
     COLORREF meter_amber = RGB(230, 170, 55);
     bool high_contrast = false;
@@ -77,6 +80,9 @@ struct Palette {
             p.panel = GetSysColor(COLOR_BTNFACE);
             p.text = GetSysColor(COLOR_WINDOWTEXT);
             p.dim_text = GetSysColor(COLOR_GRAYTEXT);
+            p.channel = GetSysColor(COLOR_BTNSHADOW);
+            p.fill = GetSysColor(COLOR_HIGHLIGHT);
+            p.thumb = GetSysColor(COLOR_BTNTEXT);
             p.meter_green = GetSysColor(COLOR_HIGHLIGHT);
             p.meter_amber = GetSysColor(COLOR_HOTLIGHT);
         }
@@ -473,9 +479,15 @@ private:
     void rebuild_brushes() {
         if (surface_brush_) DeleteObject(surface_brush_);
         if (panel_brush_) DeleteObject(panel_brush_);
+        if (channel_brush_) DeleteObject(channel_brush_);
+        if (fill_brush_) DeleteObject(fill_brush_);
+        if (thumb_brush_) DeleteObject(thumb_brush_);
         surface_brush_ = CreateSolidBrush(palette_.surface);
         preview_brush_ = surface_brush_;
         panel_brush_ = CreateSolidBrush(palette_.panel);
+        channel_brush_ = CreateSolidBrush(palette_.channel);
+        fill_brush_ = CreateSolidBrush(palette_.fill);
+        thumb_brush_ = CreateSolidBrush(palette_.thumb);
     }
     void apply_control_theme(HWND hwnd) const {
         if (!hwnd) return;
@@ -918,9 +930,12 @@ private:
         case WM_CTLCOLORBTN:
             return control_color(w, l);
         case WM_NOTIFY: {
+            auto* header = reinterpret_cast<NMHDR*>(l);
+            if (!header || header->code != NM_CUSTOMDRAW)
+                return DefWindowProcW(window_, message, w, l);
             auto* draw = reinterpret_cast<NMCUSTOMDRAW*>(l);
-            if (!draw || !draw->hdr.hwndFrom || !is_custom_trackbar(draw->hdr.hwndFrom) || palette_.high_contrast)
-                return CDRF_DODEFAULT;
+            if (!draw->hdr.hwndFrom || !is_custom_trackbar(draw->hdr.hwndFrom) || palette_.high_contrast)
+                return DefWindowProcW(window_, message, w, l);
             if (draw->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
             if (draw->dwDrawStage != CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
             draw_trackbar_item(*draw);
@@ -1018,6 +1033,9 @@ private:
             Shell_NotifyIconW(NIM_DELETE, &tray_);
             if (surface_brush_) DeleteObject(surface_brush_);
             if (panel_brush_) DeleteObject(panel_brush_);
+            if (channel_brush_) DeleteObject(channel_brush_);
+            if (fill_brush_) DeleteObject(fill_brush_);
+            if (thumb_brush_) DeleteObject(thumb_brush_);
             PostQuitMessage(0);
             return 0;
         default:
@@ -1031,12 +1049,15 @@ private:
         const int id = GetDlgCtrlID(hwnd);
         return id == kSystemVolume || id == kMicVolume ||
                id == kScreenBrightness || id == kScreenContrast || id == kScreenSaturation ||
-               id == kCameraBrightness || id == kCameraContrast || id == kCameraSaturation;
+               id == kCameraBrightness || id == kCameraContrast || id == kCameraSaturation ||
+               id == kRoundness;
     }
     void draw_trackbar_item(const NMCUSTOMDRAW& draw) const {
         const HWND slider = draw.hdr.hwndFrom;
         const int id = GetDlgCtrlID(slider);
-        const bool vertical = (GetWindowLongPtrW(slider, GWL_STYLE) & TBS_VERT) != 0;
+        const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(slider, GWL_STYLE));
+        const bool vertical = (style & TBS_VERT) != 0;
+        const bool down_is_left = (style & TBS_DOWNISLEFT) != 0;
         RECT channel{};
         SendMessageW(slider, TBM_GETCHANNELRECT, 0, reinterpret_cast<LPARAM>(&channel));
         if (vertical) {
@@ -1047,33 +1068,34 @@ private:
             return vertical ? RECT{channel.left, start, channel.right, end}
                             : RECT{start, channel.top, end, channel.bottom};
         };
+        const int minimum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMIN, 0, 0));
+        const int maximum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMAX, 0, 0));
+        const auto at = [&](int value) {
+            const double fraction = maximum == minimum ? 0.0 : (value - minimum) / static_cast<double>(maximum - minimum);
+            const bool flip = vertical && down_is_left;
+            const double oriented = flip ? 1.0 - fraction : fraction;
+            return (vertical ? channel.top : channel.left) +
+                   static_cast<int>(std::lround(oriented * ((vertical ? channel.bottom : channel.right) -
+                                                              (vertical ? channel.top : channel.left))));
+        };
         const int axis_start = vertical ? channel.top : channel.left;
         const int axis_end = vertical ? channel.bottom : channel.right;
         if (draw.dwItemSpec == TBCD_CHANNEL) {
-            HBRUSH track = CreateSolidBrush(RGB(72, 72, 76));
             const RECT track_rect = oriented_rect(axis_start, axis_end);
-            FillRect(draw.hdc, &track_rect, track);
-            DeleteObject(track);
-            const int minimum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMIN, 0, 0));
-            const int maximum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMAX, 0, 0));
+            FillRect(draw.hdc, &track_rect, channel_brush_);
             const int position = static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0));
-            const bool centered = id != kSystemVolume && id != kMicVolume;
-            const int origin_value = centered ? std::clamp(0, minimum, maximum) : minimum;
-            const auto at = [&](int value) {
-                const double fraction = maximum == minimum ? 0.0 : (value - minimum) / static_cast<double>(maximum - minimum);
-                const double oriented = vertical ? 1.0 - fraction : fraction;
-                return axis_start + static_cast<int>(std::lround(oriented * (axis_end - axis_start)));
-            };
-            const int origin = at(origin_value), current = at(position);
-            const RECT fill = oriented_rect(std::min(origin, current), std::max(origin, current));
-            HBRUSH accent = CreateSolidBrush(palette_.accent);
-            FillRect(draw.hdc, &fill, accent);
-            DeleteObject(accent);
+            const bool centered = id != kSystemVolume && id != kMicVolume && id != kRoundness;
+            const int origin = at(centered ? std::clamp(0, minimum, maximum) : minimum);
+            const int current = at(position);
+            if (centered) {
+                const RECT fill_rect = oriented_rect(std::min(origin, current), std::max(origin, current));
+                FillRect(draw.hdc, &fill_rect, fill_brush_);
+            }
             if (centered) {
                 const RECT mark = vertical
                     ? RECT{channel.left - px(3), origin - px(1), channel.right + px(3), origin + px(1)}
                     : RECT{origin - px(1), channel.top - px(3), origin + px(1), channel.bottom + px(3)};
-                HBRUSH tick = CreateSolidBrush(palette_.text);
+                HBRUSH tick = CreateSolidBrush(palette_.dim_text);
                 FillRect(draw.hdc, &mark, tick);
                 DeleteObject(tick);
             }
@@ -1081,32 +1103,32 @@ private:
         }
         if (draw.dwItemSpec == TBCD_THUMB) {
             RECT bounds = draw.rc;
-            InflateRect(&bounds, -px(1), -px(1));
-            HBRUSH thumb = CreateSolidBrush(palette_.accent);
-            FillRect(draw.hdc, &bounds, thumb);
-            DeleteObject(thumb);
-            if (GetFocus() == slider && !(SendMessageW(slider, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS)) {
+            InflateRect(&bounds, -px(2), -px(2));
+            const bool focused = GetFocus() == slider &&
+                                 !(SendMessageW(slider, WM_QUERYUISTATE, 0, 0) & UISF_HIDEFOCUS);
+            HBRUSH cap = (draw.uItemState & CDIS_DISABLED)
+                ? CreateSolidBrush(palette_.dim_text)
+                : focused ? CreateSolidBrush(palette_.text) : thumb_brush_;
+            FillRect(draw.hdc, &bounds, cap);
+            if (cap != thumb_brush_) DeleteObject(cap);
+            if (focused) {
                 HPEN pen = CreatePen(PS_SOLID, px(1), palette_.text);
                 HGDIOBJ old_pen = SelectObject(draw.hdc, pen);
                 HGDIOBJ old_brush = SelectObject(draw.hdc, GetStockObject(HOLLOW_BRUSH));
-                Rectangle(draw.hdc, bounds.left, bounds.top, bounds.right, bounds.bottom);
+                Rectangle(draw.hdc, draw.rc.left, draw.rc.top, draw.rc.right, draw.rc.bottom);
                 SelectObject(draw.hdc, old_brush);
                 SelectObject(draw.hdc, old_pen);
                 DeleteObject(pen);
             }
-            if (id != kSystemVolume && id != kMicVolume) {
-                const int minimum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMIN, 0, 0));
-                const int maximum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMAX, 0, 0));
-                const double fraction = maximum == minimum ? 0.0 : (0 - minimum) / static_cast<double>(maximum - minimum);
-                const int center = axis_start + static_cast<int>(std::lround((vertical ? 1.0 - fraction : fraction) *
-                                                                              (axis_end - axis_start)));
-                const bool overlaps = vertical ? center >= bounds.top && center < bounds.bottom
-                                               : center >= bounds.left && center < bounds.right;
+            if (id != kSystemVolume && id != kMicVolume && id != kRoundness) {
+                const int center = at(std::clamp(0, minimum, maximum));
+                const bool overlaps = vertical ? center >= draw.rc.top && center < draw.rc.bottom
+                                               : center >= draw.rc.left && center < draw.rc.right;
                 if (overlaps) {
                     const RECT mark = vertical
                         ? RECT{bounds.left + px(2), center - px(1), bounds.right - px(2), center + px(1)}
                         : RECT{center - px(1), bounds.top + px(2), center + px(1), bounds.bottom - px(2)};
-                    HBRUSH tick = CreateSolidBrush(palette_.text);
+                    HBRUSH tick = CreateSolidBrush(palette_.surface);
                     FillRect(draw.hdc, &mark, tick);
                     DeleteObject(tick);
                 }
@@ -3185,6 +3207,9 @@ private:
     HBRUSH preview_brush_ = nullptr;
     HBRUSH surface_brush_ = nullptr;
     HBRUSH panel_brush_ = nullptr;
+    HBRUSH channel_brush_ = nullptr;
+    HBRUSH fill_brush_ = nullptr;
+    HBRUSH thumb_brush_ = nullptr;
     Palette palette_;
     bool quitting_ = false;
     bool attention_ = false;
