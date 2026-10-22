@@ -541,7 +541,7 @@ function Drag-Readout([IntPtr]$readout, [int]$dips, [switch]$NoRelease) {
     $x = [int]($rect.Right / 2); $y = [int]($rect.Bottom / 2)
     $at = { param([int]$pointY) [IntPtr](($pointY -shl 16) -bor $x) }
     [AppWindow]::SendMessage($readout, 0x0201, [IntPtr]1, (& $at $y)) | Out-Null
-    $pixels = [Math]::Max(1, [int][Math]::Round([AppWindow]::GetDpiForWindow($readout) * $dips / 96))
+    $pixels = [Math]::Max(1, [int][Math]::Round([AppWindow]::GetDpiForWindow($readout) * [Math]::Abs($dips) / 96))
     $direction = if ($dips -gt 0) { -1 } else { 1 }
     $count = [Math]::Abs($dips)
     for ($i = 1; $i -le $count; ++$i) {
