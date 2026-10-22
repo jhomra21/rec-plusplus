@@ -103,6 +103,23 @@ function Set-MouseButton([int]$x, [int]$y, [string]$button, [bool]$down) {
     [Native.Mouse]::mouse_event($flag, 0, 0, 0, [UIntPtr]::Zero)
 }
 
+# Waits for one of the E2E helper windows to publish its process window handle and title.
+function Wait-TestWindow([System.Diagnostics.Process]$process, [string]$title) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        $process.Refresh()
+        if ($process.HasExited) {
+            throw "the $title window process exited before opening (exit code $($process.ExitCode))"
+        }
+        if ($process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq $title) {
+            Start-Sleep -Milliseconds 300
+            return $process
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    throw "the $title window did not open within 30 seconds"
+}
 # A borderless, topmost window of one color at x,y in physical pixels of the main display,
 # in its own process. Stop it with Stop-Process.
 function Show-ColorWindow([string]$title, [int]$x, [int]$y, [int]$width, [int]$height, [string]$color, [string]$dir) {
@@ -121,13 +138,7 @@ Add-Type -Name Dpi -Namespace Native -MemberDefinition '[DllImport("user32.dll")
 [Windows.Forms.Application]::Run(`$form)
 "@
     $process = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script) -PassThru -WindowStyle Hidden
-    for ($i = 0; $i -lt 100; $i++) {
-        $process.Refresh()
-        if ($process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq $title) { Start-Sleep -Milliseconds 300; return $process }
-        Start-Sleep -Milliseconds 100
-    }
-    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-    throw "the $title window did not open"
+    return Wait-TestWindow $process $title
 }
 # A borderless window of vertical black and white stripes, each $stripe pixels wide.
 function Show-StripeWindow([string]$title, [int]$x, [int]$y, [int]$width, [int]$height, [int]$stripe, [string]$dir) {
@@ -150,13 +161,7 @@ for (`$i = 0; `$i -lt $stripe * 2; `$i++) { `$tile.SetPixel(`$i, 0, `$colors[[in
 [Windows.Forms.Application]::Run(`$form)
 "@
     $process = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $script) -PassThru -WindowStyle Hidden
-    for ($i = 0; $i -lt 100; $i++) {
-        $process.Refresh()
-        if ($process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -eq $title) { Start-Sleep -Milliseconds 300; return $process }
-        Start-Sleep -Milliseconds 100
-    }
-    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-    throw "the $title window did not open"
+    return Wait-TestWindow $process $title
 }
 function Expect-Text([string]$text, [string]$expected) {
     if (-not $text.Contains($expected)) { throw "expected '$expected' in: $text" }
