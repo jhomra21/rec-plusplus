@@ -21,10 +21,13 @@
 
 namespace rec::app {
 float Meter::feed(float peak) {
+    const auto now = std::chrono::steady_clock::now();
+    if (peak >= 1.0f) clip_until_ = now + std::chrono::seconds(1);
     const float level = peak > 0 ? std::clamp((20.0f * std::log10(peak) + 60.0f) / 60.0f, 0.0f, 1.0f) : 0.0f;
     shown = std::max(level, shown - 0.017f);
     return shown;
 }
+bool Meter::clipped() const { return std::chrono::steady_clock::now() < clip_until_; }
 namespace {
 int volume(const std::string& text) {
     try {

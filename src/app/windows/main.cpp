@@ -488,12 +488,18 @@ private:
         if (channel_brush_) DeleteObject(channel_brush_);
         if (fill_brush_) DeleteObject(fill_brush_);
         if (thumb_brush_) DeleteObject(thumb_brush_);
+        if (meter_green_brush_) DeleteObject(meter_green_brush_);
+        if (meter_amber_brush_) DeleteObject(meter_amber_brush_);
+        if (meter_clip_brush_) DeleteObject(meter_clip_brush_);
         surface_brush_ = CreateSolidBrush(palette_.surface);
         preview_brush_ = surface_brush_;
         panel_brush_ = CreateSolidBrush(palette_.panel);
         channel_brush_ = CreateSolidBrush(palette_.channel);
         fill_brush_ = CreateSolidBrush(palette_.fill);
         thumb_brush_ = CreateSolidBrush(palette_.thumb);
+        meter_green_brush_ = CreateSolidBrush(palette_.meter_green);
+        meter_amber_brush_ = CreateSolidBrush(palette_.meter_amber);
+        meter_clip_brush_ = CreateSolidBrush(palette_.accent);
     }
     void apply_control_theme(HWND hwnd) const {
         if (!hwnd) return;
@@ -714,51 +720,60 @@ private:
         }
     }
     static LRESULT CALLBACK meter_procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
-        if (message == WM_NCCREATE) SetWindowLongPtrW(window, GWLP_USERDATA, 0);
         if (message == WM_ERASEBKGND) return 1;
-        if (message == WM_PAINT) {
+        if (message == WM_PAINT || message == WM_PRINTCLIENT) {
             PAINTSTRUCT paint{};
-            HDC dc = BeginPaint(window, &paint);
-            RECT r{};
-            GetClientRect(window, &r);
-            const int position = static_cast<int>(GetWindowLongPtrW(window, GWLP_USERDATA));
-            const int extent = r.bottom - r.top > r.right - r.left ? r.bottom - r.top : r.right - r.left;
-            const int lit = MulDiv(extent, position, 1000);
-            auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(GetParent(window), GWLP_USERDATA));
-            const Palette palette = app ? app->palette_ : Palette::current();
-            HBRUSH channel = CreateSolidBrush(palette.channel);
-            FillRect(dc, &r, channel);
-            DeleteObject(channel);
-            if (lit > 0) {
-                RECT fill = r;
-                const bool vertical = r.bottom - r.top > r.right - r.left;
-                if (vertical) fill.top = fill.bottom - lit;
-                else fill.right = fill.left + lit;
-                const int low = MulDiv(extent, 800, 1000); // -12 dB on the shared 60 dB scale.
-                const int hot = MulDiv(extent, 950, 1000); // -3 dB; reserve red for the 0 dB clip segment.
-                const auto segment = [&](int from, int to, COLORREF color) {
-                    RECT part = fill;
-                    if (vertical) {
-                        part.bottom = r.bottom - from;
-                        part.top = r.bottom - std::min(to, lit);
-                    } else {
-                        part.left = r.left + from;
-                        part.right = r.left + std::min(to, lit);
-                    }
-                    if (part.right > part.left && part.bottom > part.top) {
-                        HBRUSH brush = CreateSolidBrush(color);
-                        FillRect(dc, &part, brush);
-                        DeleteObject(brush);
-                    }
-                };
-                segment(0, low, palette.meter_green);
-                segment(low, hot, palette.meter_amber);
-                segment(hot, extent, palette.accent);
-            }
-            EndPaint(window, &paint);
+            const bool painting = message == WM_PAINT;
+            HDC dc = painting ? BeginPaint(window, &paint) : reinterpret_cast<HDC>(w);
+            paint_meter(window, dc);
+            if (painting) EndPaint(window, &paint);
             return 0;
         }
         return DefWindowProcW(window, message, w, l);
+    }
+    static void paint_meter(HWND window, HDC dc) {
+        RECT r{};
+        GetClientRect(window, &r);
+        const auto data = static_cast<ULONG_PTR>(GetWindowLongPtrW(window, GWLP_USERDATA));
+        const int position = static_cast<int>(data & 0x7ff);
+        const bool clipped = (data & 0x800) != 0;
+        auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(GetParent(window), GWLP_USERDATA));
+        const Palette palette = app ? app->palette_ : Palette::current();
+        HBRUSH channel = app ? app->channel_brush_ : CreateSolidBrush(palette.channel);
+        FillRect(dc, &r, channel);
+        if (!app) DeleteObject(channel);
+        const int extent = r.bottom - r.top > r.right - r.left ? r.bottom - r.top : r.right - r.left;
+        const int lit = MulDiv(extent, position, 1000);
+        if (lit <= 0) return;
+        RECT fill = r;
+        const bool vertical = r.bottom - r.top > r.right - r.left;
+        if (vertical) fill.top = fill.bottom - lit;
+        else fill.right = fill.left + lit;
+        const int low = MulDiv(extent, 800, 1000); // -12 dB on the shared 60 dB scale.
+        const auto segment = [&](int from, int to, COLORREF color, bool full_extent = false) {
+            RECT part = full_extent ? r : fill;
+            const int segment_level = full_extent ? extent : lit;
+            if (vertical) {
+                part.bottom = r.bottom - from;
+                part.top = r.bottom - std::min(to, segment_level);
+            } else {
+                part.left = r.left + from;
+                part.right = r.left + std::min(to, segment_level);
+            }
+            if (part.right <= part.left || part.bottom <= part.top) return;
+            HBRUSH brush = app ? (color == palette.meter_green ? app->meter_green_brush_ :
+                                  color == palette.meter_amber ? app->meter_amber_brush_ : app->meter_clip_brush_)
+                               : CreateSolidBrush(color);
+            FillRect(dc, &part, brush);
+            if (!app) DeleteObject(brush);
+        };
+        if (palette.high_contrast) segment(0, extent, palette.accent);
+        else {
+            const int hot = MulDiv(extent, 950, 1000); // Reserve the top 5% for a true 0 dBFS clip.
+            segment(0, low, palette.meter_green);
+            segment(low, clipped ? hot : extent, palette.meter_amber);
+            if (clipped) segment(hot, extent, palette.accent, true);
+        }
     }
 
     // The vertical video's preview shows the second canvas; the other the recording's picture.
@@ -1064,6 +1079,9 @@ private:
             }
             if (access_) {
                 const MSAAPROPID props[]{PROPID_ACC_NAME, PROPID_ACC_VALUE};
+                const MSAAPROPID meter_props[]{PROPID_ACC_NAME, PROPID_ACC_VALUE, PROPID_ACC_ROLE};
+                for (int meter : {kSystemMeter, kMicMeter})
+                    access_->ClearHwndProps(get(meter), OBJID_CLIENT, CHILDID_SELF, meter_props, 3);
                 for (int slider : {kSystemVolume, kMicVolume})
                     access_->ClearHwndProps(get(slider), OBJID_CLIENT, CHILDID_SELF, props, 2);
                 for (int slider : {kScreenBrightness, kScreenContrast, kScreenSaturation,
@@ -1089,6 +1107,9 @@ private:
             if (channel_brush_) DeleteObject(channel_brush_);
             if (fill_brush_) DeleteObject(fill_brush_);
             if (thumb_brush_) DeleteObject(thumb_brush_);
+            if (meter_green_brush_) DeleteObject(meter_green_brush_);
+            if (meter_amber_brush_) DeleteObject(meter_amber_brush_);
+            if (meter_clip_brush_) DeleteObject(meter_clip_brush_);
             PostQuitMessage(0);
             return 0;
         default:
@@ -1444,6 +1465,14 @@ private:
         // Screen readers would name a slider after the row label and read its position as a
         // percentage; annotate the name and the value in dB instead.
         if (SUCCEEDED(CoCreateInstance(CLSID_AccPropServices, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&access_)))) {
+            for (const auto& [id, name] : {std::pair{kSystemMeter, L"System audio level"},
+                                            std::pair{kMicMeter, L"Microphone level"}}) {
+                access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, name);
+                VARIANT role{};
+                role.vt = VT_I4;
+                role.lVal = ROLE_SYSTEM_PROGRESSBAR;
+                access_->SetHwndProp(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_ROLE, role);
+            }
             access_->SetHwndPropStr(get(kSystemVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"System audio volume");
             access_->SetHwndPropStr(get(kMicVolume), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Microphone volume");
             access_->SetHwndPropStr(get(kRoundness), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, L"Camera roundness");
@@ -2806,22 +2835,27 @@ private:
 
     void meter(int id, float peak, rec::app::Meter& meter_state) {
         const float level = meter_state.feed(peak);
-        SetWindowLongPtrW(get(id), GWLP_USERDATA, static_cast<LONG_PTR>(std::clamp(level, 0.0f, 1.0f) * 1000));
-        if (access_) {
-            const float db = std::clamp(level * 60.0f - 60.0f, -60.0f, 0.0f);
-            wchar_t value[32];
-            std::swprintf(value, 32, L"%.1f dB", std::max(-60.0f, db));
-            const wchar_t* name = id == kSystemMeter ? L"System audio level" : L"Microphone level";
-            access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, name);
-            access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_VALUE, value);
-            VARIANT role{};
-            role.vt = VT_I4;
-            role.lVal = ROLE_SYSTEM_PROGRESSBAR;
-            access_->SetHwndProp(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_ROLE, role);
-            VariantClear(&role);
-            NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, get(id), OBJID_CLIENT, CHILDID_SELF);
+        const int position = static_cast<int>(std::clamp(level, 0.0f, 1.0f) * 1000);
+        const bool clipped = meter_state.clipped();
+        const auto data = static_cast<ULONG_PTR>(position) | (clipped ? 0x800 : 0);
+        const auto previous = static_cast<ULONG_PTR>(GetWindowLongPtrW(get(id), GWLP_USERDATA));
+        if (data != previous) {
+            SetWindowLongPtrW(get(id), GWLP_USERDATA, static_cast<LONG_PTR>(data));
+            InvalidateRect(get(id), nullptr, FALSE);
         }
-        InvalidateRect(get(id), nullptr, FALSE);
+        if (access_) {
+            const std::size_t index = id == kSystemMeter ? 0 : 1;
+            const int db = level <= 0 ? -60 : std::clamp(static_cast<int>(std::lround(level * 60.0f - 60.0f)), -60, 0);
+            const std::wstring value = level <= 0 ? L"silent" : std::to_wstring(db) + L" dB";
+            const auto now = GetTickCount64();
+            if (value != meter_access_value_[index] && (meter_access_tick_[index] == 0 || now - meter_access_tick_[index] >= 500)) {
+                meter_access_tick_[index] = now;
+                if (SUCCEEDED(access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_VALUE, value.c_str()))) {
+                    meter_access_value_[index] = value;
+                    NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, get(id), OBJID_CLIENT, CHILDID_SELF);
+                }
+            }
+        }
     }
 
     void set_text(int id, const std::wstring& text) {
@@ -3275,11 +3309,16 @@ private:
     HBRUSH channel_brush_ = nullptr;
     HBRUSH fill_brush_ = nullptr;
     HBRUSH thumb_brush_ = nullptr;
+    HBRUSH meter_green_brush_ = nullptr;
+    HBRUSH meter_amber_brush_ = nullptr;
+    HBRUSH meter_clip_brush_ = nullptr;
     Palette palette_;
     bool quitting_ = false;
     bool attention_ = false;
     State state_ = State::idle;
     rec::app::Meter system_meter_, mic_meter_;
+    std::array<std::wstring, 2> meter_access_value_{};
+    std::array<ULONGLONG, 2> meter_access_tick_{};
     std::string settings_path_;
     Settings settings_;
     std::vector<rec::Display> displays_;
