@@ -520,12 +520,14 @@ function Assert-StripGeometry($ui, [bool]$camera) {
             throw 'Camera value labels do not share a fixed-width value column'
         }
     }
-    $audioValueRect = New-Object AppWindow+RECT
-    [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 106), [ref]$audioValueRect) | Out-Null
-    $micValueRect = Rect-OfId $ui 111 # kMicVolumeText
-    if ($audioValueRect.Left -ne $micValueRect.Left -or
-        ($audioValueRect.Right - $audioValueRect.Left) -ne ($micValueRect.Right - $micValueRect.Left)) {
-        throw 'System and microphone dB readouts do not share a right-aligned column'
+    foreach ($entry in @(@{Fader=105; Readout=106}, @{Fader=110; Readout=111})) {
+        $fader = Rect-OfId $ui $entry.Fader
+        $readout = Rect-OfId $ui $entry.Readout
+        $faderCenter = ($fader.Left + $fader.Right) / 2
+        $readoutCenter = ($readout.Left + $readout.Right) / 2
+        if ($readout.Top -lt $fader.Bottom -or [Math]::Abs($faderCenter - $readoutCenter) -gt 2) {
+            throw "audio dB readout $($entry.Readout) is not under its fader $($entry.Fader)"
+        }
     }
     $reset = Rect-Of $ui "Reset $($label.ToLower()) color" $PushButton
     $header = Rect-Of $ui $label 41
@@ -576,10 +578,29 @@ function Assert-StatusDpi($ui) {
         foreach ($dpi in @(96, 144, 192)) {
             if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect $originalDpi }
             Assert-StatusRow $ui $dpi
+            Assert-AudioStripGeometry $ui
         }
     } finally {
         Set-TestDpi $ui $originalDpi $baseRect $originalDpi
     }
+}
+function Assert-AudioStripGeometry($ui) {
+    foreach ($entry in @(@{Name='System audio'; Fader=105; Meter=104; Mute=107},
+                         @{Name='Microphone'; Fader=110; Meter=109; Mute=112})) {
+        $fader = Rect-OfId $ui $entry.Fader
+        $meter = Rect-OfId $ui $entry.Meter
+        $mute = Rect-OfId $ui $entry.Mute
+        if (($fader.Bottom - $fader.Top) -le ($fader.Right - $fader.Left)) {
+            throw "$($entry.Name) fader is not vertical: $($fader.Right - $fader.Left)x$($fader.Bottom - $fader.Top)"
+        }
+        if (($meter.Bottom - $meter.Top) -le ($meter.Right - $meter.Left)) {
+            throw "$($entry.Name) meter is not vertical: $($meter.Right - $meter.Left)x$($meter.Bottom - $meter.Top)"
+        }
+        if ($mute.Top -le $fader.Top -or $mute.Top -lt $fader.Bottom) {
+            throw "$($entry.Name) Mute is not below its fader: fader=$($fader.Top)-$($fader.Bottom), mute=$($mute.Top)-$($mute.Bottom)"
+        }
+    }
+    Write-Host 'M2. strip geometry: faders/meters vertical; Mute below each fader'
 }
 function Assert-StripVisibility($ui, [int[]]$ids, [bool]$visible, [string]$name) {
     foreach ($id in $ids) {
@@ -611,19 +632,23 @@ function Control-Rect($ui, [int]$id) {
     return $r
 }
 function Meter-LitPixels($ui, $bitmap, [int]$id) {
+    return (Meter-LitStats $ui $bitmap $id).count
+}
+function Meter-LitStats($ui, $bitmap, [int]$id) {
     $rect = Control-Rect $ui $id
     $left = [Math]::Max(0, $rect.Left); $top = [Math]::Max(0, $rect.Top)
     $right = [Math]::Min($bitmap.Width, $rect.Right); $bottom = [Math]::Min($bitmap.Height, $rect.Bottom)
     if ($right -le $left -or $bottom -le $top) { throw "meter control $id has an empty rectangle after clamping to the $($bitmap.Width)x$($bitmap.Height) bitmap" }
-    $channel = $bitmap.GetPixel($right - 1, [int](($top + $bottom - 1) / 2))
-    $lit = 0
+    $vertical = ($bottom - $top) -gt ($right - $left)
+    $channel = if ($vertical) { $bitmap.GetPixel($right - 1, $top) } else { $bitmap.GetPixel($right - 1, [int](($top + $bottom - 1) / 2)) }
+    $lit = 0; $sumY = 0
     for ($y = $top; $y -lt $bottom; $y++) {
         for ($x = $left; $x -lt $right; $x++) {
             $pixel = $bitmap.GetPixel($x, $y)
-            if ($pixel.ToArgb() -ne $channel.ToArgb()) { $lit++ }
+            if ($pixel.ToArgb() -ne $channel.ToArgb()) { $lit++; $sumY += $y }
         }
     }
-    return $lit
+    return @{ count = $lit; meanY = if ($lit) { $sumY / [double]$lit } else { 0 }; top = $top; bottom = $bottom }
 }
 function Meter-ColorPixels($ui, $bitmap, [int]$id, [int]$r, [int]$g, [int]$b) {
     $rect = Control-Rect $ui $id
@@ -910,15 +935,22 @@ try {
     [uint32]$testThread = [AppWindow]::GetCurrentThreadId()
     if (-not [AppWindow]::AttachThreadInput($testThread, $mainThread, $true)) { throw 'could not attach the app input thread for the tab-order check' }
     try {
+        $systemFader = (Find $ui 'System audio volume' $Slider).Handle
+        [AppWindow]::SetFocus($systemFader) | Out-Null
+        [Windows.Forms.SendKeys]::SendWait('{TAB}')
+        $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
+        if ($tabName -ne 'Mute system') { throw "Tab after System audio volume reached '$tabName', not Mute system" }
+        [Windows.Forms.SendKeys]::SendWait('{TAB}')
+        $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
+        if ($tabName -ne 'Microphone volume') { throw "Tab after Mute system reached '$tabName', not Microphone volume" }
         [AppWindow]::SetFocus($micFader) | Out-Null
         if (([AppWindow]::Of((Focused-Control $ui))).accName(0) -ne 'Microphone volume') { throw 'could not focus the microphone volume fader' }
         [Windows.Forms.SendKeys]::SendWait('{TAB}')
         $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
-        if ($tabName -eq 'Mute mic') {
-            [Windows.Forms.SendKeys]::SendWait('{TAB}')
-            $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
-        }
-        if ($tabName -ne 'Screen brightness') { throw "Tab after microphone volume did not reach Screen brightness before later controls; focused '$tabName'" }
+        if ($tabName -ne 'Mute mic') { throw "Tab after Microphone volume reached '$tabName', not Mute mic" }
+        [Windows.Forms.SendKeys]::SendWait('{TAB}')
+        $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
+        if ($tabName -ne 'Start Recording') { throw "Tab after Mute mic reached '$tabName', not Start Recording" }
     } finally {
         [AppWindow]::AttachThreadInput($testThread, $mainThread, $false) | Out-Null
     }
@@ -1175,7 +1207,7 @@ try {
     Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("screen_color=0,0,0`n") } 'Ctrl+0 reset was not saved'
     $volumeSlider = (Find $ui 'System audio volume' $Slider).Handle
     [AppWindow]::SendMessage($volumeSlider, 0x0405, [IntPtr]1, [IntPtr](-6)) | Out-Null
-    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $volumeSlider) | Out-Null
+    [AppWindow]::SendMessage($ui.Window, 0x0115, [IntPtr]8, $volumeSlider) | Out-Null
     Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("system_volume=-6`n") } 'volume was not saved after trackbar release'
     $volumeReadout = [AppWindow]::GetDlgItem($ui.Window, 106)
     Click-Readout $volumeReadout
@@ -1483,7 +1515,7 @@ try {
     if (-not (High-Contrast)) {
         Expect-CustomTrackbar $ui 105 (Join-Path $Artifacts 'app-volume-slider-d3.png')
     }
-    [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $slider) | Out-Null  # WM_HSCROLL, TB_ENDTRACK
+    [AppWindow]::SendMessage($ui.Window, 0x0115, [IntPtr]8, $slider) | Out-Null  # WM_VSCROLL, TB_ENDTRACK
     $idleShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-idle.png')
     try {
         foreach ($meterId in 104, 109) {
@@ -1503,7 +1535,12 @@ try {
     if ($meterValue -notmatch '^-?\d+ dB$|^silent$') { throw "system meter has no accessible integer dB value: '$meterValue'" }
     Write-Host "7. meter accessibility probe: role=ProgressBar name=System audio level value=$meterValue"
     $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter.png')
-    $meterLitBeforeMute = Meter-LitPixels $ui $meterShot 104
+    $meterStats = Meter-LitStats $ui $meterShot 104
+    $meterLitBeforeMute = $meterStats.count
+    $meterHeight = $meterStats.bottom - $meterStats.top
+    if ($meterHeight -le 0 -or $meterStats.meanY -le ($meterStats.top + 0.5 * $meterHeight)) {
+        throw "vertical meter is not filling from the bottom at the -6 dB fader setting: meanY=$($meterStats.meanY), rect=$($meterStats.top)-$($meterStats.bottom)"
+    }
     if (-not (High-Contrast)) {
         $meterGreen = Meter-ColorPixels $ui $meterShot 104 70 190 105
         $meterRed = Meter-ColorPixels $ui $meterShot 104 225 40 40
@@ -1511,7 +1548,7 @@ try {
         Write-Host "7. meter color probe: green=$meterGreen red=$meterRed pixels"
     }
     $meterShot.Dispose()
-    Write-Host "7. meter recording probe: system=$meterLitBeforeMute lit pixels"
+    Write-Host "7. vertical meter probe: system=$meterLitBeforeMute lit pixels, meanY=$([Math]::Round($meterStats.meanY, 1)) (lower half; -6 dB fader)"
     Start-Sleep -Milliseconds 2500
     Set-Check $ui 'Mute system' $true
     $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-muted-probe.png')
