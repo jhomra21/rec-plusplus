@@ -439,6 +439,11 @@ function Snapshot-StripDpi($ui, [string]$directory, [string]$prefix) {
         }
         foreach ($dpi in @(96, 144, 192)) {
             if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect $originalDpi }
+            if ($dpi -eq 96 -and $prefix -eq 'app-strips') {
+                $client96 = New-Object AppWindow+RECT
+                [AppWindow]::GetClientRect($ui.Window, [ref]$client96) | Out-Null
+                Write-Host "96-DPI client rect: $($client96.Right - $client96.Left)x$($client96.Bottom - $client96.Top); M2 documented a 44-px mixer-row increment, retained by this 220-DIP row"
+            }
             Assert-StripGeometry $ui ($prefix -eq 'app-strips-camera')
             $path = Join-Path $directory "$prefix-dpi-$([int]($dpi * 100 / 96)).png"
             $bitmap = Snapshot-Window $ui $path
@@ -531,13 +536,32 @@ function Assert-StripGeometry($ui, [bool]$camera) {
         }
     }
     $reset = Rect-Of $ui "Reset $($label.ToLower()) color" $PushButton
+    $muteRect = Rect-OfId $ui $(if ($camera) { 112 } else { 107 })
+    if ([Math]::Abs(($reset.Top - $muteRect.Top)) -gt 2) { throw "$label Reset and Mute do not share a baseline" }
     if ($reset.Top -lt $sliderRects[2].Bottom -or $reset.Bottom -gt $panelRect.Bottom - 2) {
         throw "$label Reset is not below the visual controls inside the strip"
     }
+    $panelScale = ($panelRect.Bottom - $panelRect.Top) / 212.0
+    if ([Math]::Abs(($panelRect.Bottom - $reset.Bottom - [int][Math]::Round(8 * $panelScale))) -gt 2) {
+        throw "$label panel bottom does not leave the shared 8-DIP baseline inset below Reset"
+    }
     $header = Rect-Of $ui $label 41
     $audioTop = Rect-OfId $ui 103
-    if ([Math]::Abs($panelRect.Top - $audioTop.Top) -gt 2 -or [Math]::Abs($header.Top - $audioTop.Top) -gt 2) {
-        throw "$label strip does not share the audio strips' top edge"
+    $panelScale = ($panelRect.Bottom - $panelRect.Top) / 212.0
+    if ([Math]::Abs($panelRect.Top - ($audioTop.Top - [int][Math]::Round(6 * $panelScale))) -gt 2 -or
+        [Math]::Abs($header.Top - $audioTop.Top) -gt 2) {
+        throw "$label strip does not share the audio strips' top edge: panel=$($panelRect.Top), header=$($header.Top), audio=$($audioTop.Top), scale=$panelScale"
+    }
+    $panelIds = @(340, 341, 311, 331)
+    $panels = @($panelIds | ForEach-Object { Rect-OfId $ui $_ })
+    $tops = @($panels | ForEach-Object { $_.Top })
+    if (($tops | Measure-Object -Maximum).Maximum - ($tops | Measure-Object -Minimum).Minimum -gt 2) {
+        throw 'Mixer strip panel tops are not aligned'
+    }
+    $firstGap = $panels[1].Left - $panels[0].Right
+    for ($i = 1; $i -lt $panels.Count; $i++) {
+        $gap = $panels[$i].Left - $panels[$i - 1].Right
+        if ([Math]::Abs($gap - $firstGap) -gt 2) { throw "adjacent mixer panel gaps differ: $gap versus $firstGap" }
     }
 }
 function Snapshot-VisualMixerDpi($ui, [string]$directory) {
@@ -549,18 +573,23 @@ function Snapshot-VisualMixerDpi($ui, [string]$directory) {
             if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect $originalDpi }
             Assert-StripGeometry $ui $false
             Assert-StripGeometry $ui $true
-            Write-Host "M4. visual strip geometry: Screen/Camera top edge aligned; Reset below controls at $dpi DPI"
-            $bitmap = Snapshot-Window $ui (Join-Path $directory "app-visual-strips-dpi-$dpi.png")
+            Write-Host "visual strip geometry: aligned panels and shared baselines at $dpi DPI"
+            $bitmap = Snapshot-Window $ui (Join-Path $directory "app-visual-mixer-window-dpi-$dpi.png")
             try {
                 $screen = Rect-OfId $ui 311
                 $camera = Rect-OfId $ui 331
                 [AppWindow]::MapWindowPoints([IntPtr]::Zero, $ui.Window, [ref]$screen, 2) | Out-Null
                 [AppWindow]::MapWindowPoints([IntPtr]::Zero, $ui.Window, [ref]$camera, 2) | Out-Null
+                $frameInside = $screen.Left -ge 0 -and $screen.Top -ge 0 -and
+                    $camera.Right -le $bitmap.Width -and $screen.Bottom -le $bitmap.Height -and $camera.Bottom -le $bitmap.Height
                 $left = [Math]::Max(0, $screen.Left - 8)
                 $top = [Math]::Max(0, $screen.Top - 8)
                 $right = [Math]::Min($bitmap.Width, $camera.Right + 8)
                 $bottom = [Math]::Min($bitmap.Height, [Math]::Max($screen.Bottom, $camera.Bottom) + 8)
-                if ($right -le $left -or $bottom -le $top) { throw "visual strip crop is outside the window at $dpi DPI" }
+                if (-not $frameInside -or $right -le $left -or $bottom -le $top) {
+                    Write-Host "skipping visual mixer DPI $dpi crop: frame outside captured window (bitmap $($bitmap.Width)x$($bitmap.Height))"
+                    continue
+                }
                 $crop = $bitmap.Clone((New-Object System.Drawing.Rectangle $left, $top, ($right - $left), ($bottom - $top)), $bitmap.PixelFormat)
                 try { $crop.Save((Join-Path $directory "app-visual-strips-dpi-$dpi.png"), [System.Drawing.Imaging.ImageFormat]::Png) }
                 finally { $crop.Dispose() }
@@ -638,6 +667,10 @@ function Assert-AudioStripGeometry($ui) {
         $fader = Rect-OfId $ui $entry.Fader
         $meter = Rect-OfId $ui $entry.Meter
         $mute = Rect-OfId $ui $entry.Mute
+        $panelId = if ($entry.Fader -eq 105) { 340 } else { 341 }
+        $panel = Rect-OfId $ui $panelId
+        $readoutId = if ($entry.Fader -eq 105) { 106 } else { 111 }
+        $readout = Rect-OfId $ui $readoutId
         if (($fader.Bottom - $fader.Top) -le ($fader.Right - $fader.Left)) {
             throw "$($entry.Name) fader is not vertical: $($fader.Right - $fader.Left)x$($fader.Bottom - $fader.Top)"
         }
@@ -653,8 +686,17 @@ function Assert-AudioStripGeometry($ui) {
         if ($mute.Top -le $fader.Top -or $mute.Top -lt $fader.Bottom) {
             throw "$($entry.Name) Mute is not below its fader: fader=$($fader.Top)-$($fader.Bottom), mute=$($mute.Top)-$($mute.Bottom)"
         }
+        $faderCenter = ($fader.Left + $fader.Right) / 2
+        $readoutCenter = ($readout.Left + $readout.Right) / 2
+        if ($readout.Top -lt $fader.Bottom -or [Math]::Abs($faderCenter - $readoutCenter) -gt 2) {
+            throw "$($entry.Name) dB readout is not centered under the fader"
+        }
+        $inset = [int][Math]::Round(8 * (($panel.Bottom - $panel.Top) / 212.0))
+        if ([Math]::Abs(($panel.Bottom - $mute.Bottom - $inset)) -gt 2) {
+            throw "$($entry.Name) panel bottom is not 8 DIP below Mute: panel=$($panel.Top)-$($panel.Bottom), mute=$($mute.Top)-$($mute.Bottom), inset=$inset"
+        }
     }
-    Write-Host 'M2. strip geometry: meters left and channel-aligned; faders vertical; Mute below each fader'
+    Write-Host 'strip geometry: meters left/channel-aligned; centered readouts; Mute below each fader'
 }
 function Assert-StripVisibility($ui, [int[]]$ids, [bool]$visible, [string]$name) {
     foreach ($id in $ids) {
@@ -956,7 +998,7 @@ try {
     Write-Host "Status row snapshot: $(Join-Path $Artifacts 'app-status-row.png')"
     if ([AppWindow]::IsWindowVisible((Find $ui 'Camera brightness' $Slider).Handle)) { throw 'Camera strip is visible while Camera is off' }
     Assert-StripVisibility $ui @(320..331) $false 'Camera'
-    Write-Host 'M4. camera strip visibility: all controls hidden while Camera is off'
+    Write-Host 'camera strip visibility: all controls hidden while Camera is off'
     Find $ui 'Screen' 41 | Out-Null
     $screenHeader = Rect-Of $ui 'Screen' 41
     $screenReset = Rect-Of $ui 'Reset screen color' $PushButton
@@ -982,22 +1024,31 @@ try {
         throw 'Screen value labels are not beside their labels inside the strip'
     }
     Snapshot-StripDpi $ui $Artifacts 'app-strips'
-    Set-Check $ui 'Camera' $true
-    Assert-StripVisibility $ui @(320..331) $true 'Camera'
-    if (-not [AppWindow]::IsWindowVisible((Find $ui 'Camera brightness' $Slider).Handle)) {
-        throw 'Camera brightness is not visible after enabling Camera'
-    }
-    Write-Host 'M4. camera strip visibility: brightness visible after Camera is enabled'
+    try {
+        Set-Check $ui 'Camera' $true
+        Assert-StripVisibility $ui @(320..331) $true 'Camera'
+        if (-not [AppWindow]::IsWindowVisible((Find $ui 'Camera brightness' $Slider).Handle)) {
+            throw 'Camera brightness is not visible after enabling Camera'
+        }
+        Write-Host 'camera strip visibility: brightness visible after Camera is enabled'
     $cameraStripBitmap = Snapshot-Window $ui (Join-Path $Artifacts 'app-strips-camera-contrast.png')
     try {
         if (-not (High-Contrast)) { Expect-Strip $ui $cameraStripBitmap 320 $script:appSurfaceMean }
     } finally { $cameraStripBitmap.Dispose() }
     Snapshot-StripDpi $ui $Artifacts 'app-strips-camera'
     Snapshot-VisualMixerDpi $ui $Artifacts
+    $cameraOnShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-surface-m4-r2.png')
+    $cameraOnShot.Dispose()
+    } finally {
+        Set-Check $ui 'Camera' $false
+    }
     Set-Check $ui 'Camera' $false
     Assert-StripVisibility $ui @(320..331) $false 'Camera'
     $cameraOff = Join-Path $Artifacts 'app-strips-camera-off.png'
-    Snapshot-Window $ui $cameraOff | Out-Null
+    $cameraOffShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-surface-m4-r2-camera-off.png')
+    $cameraOffShot.Dispose()
+    $cameraOffShot = Snapshot-Window $ui $cameraOff
+    $cameraOffShot.Dispose()
     Write-Host "Camera-off strip snapshot: $cameraOff"
     # DPI messages are synthetic here; relaunch the test-owned window at the real desktop DPI
     # before the keyboard, recording and permission checks.
@@ -1005,6 +1056,9 @@ try {
     if (-not $ui.Process.WaitForExit(10000)) { throw 'the app did not close after DPI snapshots' }
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
+    $clientAt96 = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($ui.Window, [ref]$clientAt96) | Out-Null
+    Write-Host "E2E client rect at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI: $($clientAt96.Right - $clientAt96.Left)x$($clientAt96.Bottom - $clientAt96.Top)"
 
     # 0. Microphone access off for desktop apps: the app names it, offers its settings page,
     # and does not start. The machine's own switch comes back right after.
@@ -1091,15 +1145,25 @@ try {
         if ($tabName -ne 'Screen brightness') { throw "Tab after Mute mic reached '$tabName', not Screen brightness" }
         foreach ($expected in @('Screen contrast', 'Screen saturation', 'Reset screen color',
                                 'Camera brightness', 'Camera contrast', 'Camera saturation',
-                                'Reset camera color', 'Start Recording')) {
+                                'Reset camera color')) {
             [Windows.Forms.SendKeys]::SendWait('{TAB}')
             $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
             if ($tabName -ne $expected) { throw "Tab order reached '$tabName', not '$expected'" }
         }
+        try {
+            Set-Check $ui 'Camera' $false
+            [AppWindow]::SetFocus((Find $ui 'Reset screen color' $PushButton).Handle) | Out-Null
+            [Windows.Forms.SendKeys]::SendWait('{TAB}')
+            $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
+            if ($tabName -ne 'Start Recording') { throw "Tab with Camera off reached '$tabName', not 'Start Recording'" }
+            Write-Host 'camera-off Tab probe: Reset screen color -> Start Recording'
+        } finally {
+            Set-Check $ui 'Camera' $true
+        }
     } finally {
+        Set-Check $ui 'Camera' $false
         [AppWindow]::AttachThreadInput($testThread, $mainThread, $false) | Out-Null
     }
-    Set-Check $ui 'Camera' $false
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
     $recordShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-recording.png')

@@ -120,6 +120,7 @@ enum Control : int {
     kCameraColorLabel = 320, kCameraBrightnessLabel, kCameraContrastLabel, kCameraSaturationLabel,
     kCameraBrightness, kCameraContrast, kCameraSaturation, kCameraBrightnessValue, kCameraContrastValue,
     kCameraSaturationValue, kCameraColorReset, kCameraStripBox,
+    kSystemStripBox = 340, kMicStripBox,
     // Each destination's row: kDestination + 10 * index + one of DestinationField.
     kDestination = 400,
 };
@@ -525,7 +526,11 @@ private:
         const HDC dc = reinterpret_cast<HDC>(w);
         const int id = GetDlgCtrlID(control);
         const bool panel = (id >= kScreenColorLabel && id <= kScreenStripBox) ||
-                           (id >= kCameraColorLabel && id <= kCameraStripBox);
+                           (id >= kCameraColorLabel && id <= kCameraStripBox) ||
+                           id == kSystemLabel || id == kSystemMeter || id == kSystemVolume ||
+                           id == kSystemVolumeText || id == kSystemMute ||
+                           id == kMicLabel || id == kMicMeter || id == kMicVolume ||
+                           id == kMicVolumeText || id == kMicMute;
         SetBkColor(dc, panel ? palette_.panel : palette_.surface);
         if (app_control) {
             const bool status = id == kStatus;
@@ -1039,7 +1044,7 @@ private:
             RECT client{};
             GetClientRect(window_, &client);
             FillRect(dc, &client, surface_brush_);
-            for (int box : {kScreenStripBox, kCameraStripBox}) {
+            for (int box : {kSystemStripBox, kMicStripBox, kScreenStripBox, kCameraStripBox}) {
                 HWND strip = get(box);
                 if (!IsWindowVisible(strip)) continue;
                 RECT r{};
@@ -1160,8 +1165,8 @@ private:
                                 kScreenContrastValue, kScreenSaturationValue, kCameraBrightnessValue,
                                 kCameraContrastValue, kCameraSaturationValue})
                 RemoveWindowSubclass(get(readout), &App::readout_procedure, static_cast<UINT_PTR>(readout));
-            RemoveWindowSubclass(get(kScreenStripBox), &App::strip_panel_procedure, kScreenStripBox);
-            RemoveWindowSubclass(get(kCameraStripBox), &App::strip_panel_procedure, kCameraStripBox);
+            for (int box : {kSystemStripBox, kMicStripBox, kScreenStripBox, kCameraStripBox})
+                RemoveWindowSubclass(get(box), &App::strip_panel_procedure, box);
             UnregisterHotKey(window_, kHotkey);
             UnregisterHotKey(window_, kReplayHotkey);
             Shell_NotifyIconW(NIM_DELETE, &tray_);
@@ -1309,7 +1314,8 @@ private:
         for (auto& [id, hwnd] : controls_) {
             const bool header = id == kCaptureHeader || id == kQualityHeader || id == kStreamHeader || id == kReplayHeader ||
                                 id == kCameraHeader || id == kFolderHeader || id == kScenesHeader ||
-                                id == kScreenColorLabel || id == kCameraColorLabel;
+                                id == kScreenColorLabel || id == kCameraColorLabel ||
+                                id == kSystemLabel || id == kMicLabel;
             const HFONT font = id == kStatus ? title_ : header || id == kLive ? bold_ : font_;
             SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
@@ -1374,6 +1380,10 @@ private:
             const int value_id = system ? kSystemVolumeText : kMicVolumeText;
             const int mute_id = system ? kSystemMute : kMicMute;
             label(label_id, wide(strip.name).c_str());
+            const int box_id = system ? kSystemStripBox : kMicStripBox;
+            add(box_id, WC_BUTTONW, L"", BS_GROUPBOX | WS_CLIPSIBLINGS);
+            SetWindowSubclass(get(box_id), &App::strip_panel_procedure, box_id,
+                              reinterpret_cast<DWORD_PTR>(this));
             add(meter_id, L"RecMeter", system ? L"System audio level" : L"Microphone level", 0);
             add(volume_id, TRACKBAR_CLASSW, system ? L"System audio volume" : L"Microphone volume",
                 TBS_VERT | TBS_REVERSED | TBS_NOTICKS | WS_TABSTOP);
@@ -1609,7 +1619,18 @@ private:
         const auto header = [&](int id) { y += px(10); line(id, px(20)); };
         // Fixed-width audio channel strips; meter and fader fill bottom-up. Keep the
         // readout paired to the fader and the existing mute control below both.
-        const auto audio_strip = [&](const rec::app::Strip& model, int index) {
+        const int audio_strip_width = px(84), visual_strip_width = px(108), strip_gap = px(12);
+        const int strip_control_top = px(28), value_width = px(34), reset_width = px(58);
+        const int strip_title_height = px(20), strip_bottom = px(212);
+        const int strip_content_inset = px(8), audio_meter_inset = strip_content_inset;
+        const int audio_fader_inset = px(24), audio_meter_width = px(12), audio_fader_width = px(26);
+        const int audio_control_height = px(130), audio_readout_height = px(20);
+        const int audio_readout_top = px(160), strip_action_top = px(182), strip_action_height = px(22);
+        const int strip_header_inset = px(6), visual_row_height = px(16);
+        const int visual_slider_offset = px(17), visual_slider_height = px(24), visual_row_pitch = px(51);
+        const int audio_strip_pitch = audio_strip_width + strip_gap;
+        const int visual_strip_pitch = visual_strip_width + strip_gap;
+        const auto audio_strip = [&](const rec::app::Strip& model, int index, int top) {
             if (model.kind != rec::app::Strip::Kind::audio || !model.input) return;
             const bool system = *model.input == rec::AudioInput::system;
             const int label_id = system ? kSystemLabel : kMicLabel;
@@ -1617,21 +1638,25 @@ private:
             const int slider_id = system ? kSystemVolume : kMicVolume;
             const int value_id = system ? kSystemVolumeText : kMicVolumeText;
             const int mute_id = system ? kSystemMute : kMicMute;
-            const int left = x + index * px(88);
-            const int title_height = px(20);
-            const int meter_width = px(12);
-            const int fader_width = px(26);
-            const int control_height = px(130);
-            const int controls_left = left + px(4);
-            place(label_id, left + px(4), y, px(72), title_height);
-            place(slider_id, left + px(20), y + title_height + gap,
-                  fader_width, control_height);
+            const int left = x + index * audio_strip_pitch;
+            const int box_id = system ? kSystemStripBox : kMicStripBox;
+            const int controls_left = left + audio_meter_inset;
+            place(label_id, left + audio_meter_inset, top + strip_header_inset,
+                  audio_strip_width - 2 * audio_meter_inset, strip_title_height);
+            place(slider_id, left + audio_fader_inset, top + strip_control_top,
+                  audio_fader_width, audio_control_height);
             RECT channel{};
             SendMessageW(get(slider_id), TBM_GETCHANNELRECT, 0, reinterpret_cast<LPARAM>(&channel));
-            place(meter_id, controls_left, y + title_height + gap + channel.left,
-                  meter_width, channel.right - channel.left);
-            place(value_id, left, y + title_height + gap + control_height + px(2), px(66), px(20));
-            place(mute_id, left + px(4), y + title_height + gap + control_height + px(24), px(72), px(22));
+            place(meter_id, controls_left, top + strip_control_top + channel.left,
+                  audio_meter_width, channel.right - channel.left);
+            const int fader_axis = left + audio_fader_inset + audio_fader_width / 2;
+            const int readout_width = px(84);
+            place(value_id, fader_axis - readout_width / 2, top + audio_readout_top, readout_width, audio_readout_height);
+            place(mute_id, left + strip_content_inset, top + strip_action_top,
+                  audio_strip_width - 2 * strip_content_inset, strip_action_height);
+            place(box_id, left, top, audio_strip_width, strip_bottom);
+            SetWindowPos(get(box_id), HWND_BOTTOM, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
         };
         // A checkbox with its device list or setting beside it.
         const auto beside = [&](int check_id, int control_id) {
@@ -1654,30 +1679,24 @@ private:
             const int values[]{camera_strip ? kCameraBrightnessValue : kScreenBrightnessValue,
                                camera_strip ? kCameraContrastValue : kScreenContrastValue,
                                camera_strip ? kCameraSaturationValue : kScreenSaturationValue};
-            const int all_ids[]{header_id, reset_id, box_id, labels[0], labels[1], labels[2],
-                sliders[0], sliders[1], sliders[2], values[0], values[1], values[2]};
-            if (!visible) {
-                for (int id : all_ids) ShowWindow(get(id), SW_HIDE);
-                return;
-            }
-            const int inset = px(8);
             const auto put = [&](int id, int left, int top, int w, int h) {
                 place(id, left, top, w, h);
-                ShowWindow(get(id), SW_SHOWNA);
+                ShowWindow(get(id), visible ? SW_SHOWNA : SW_HIDE);
             };
-            put(header_id, left + inset, top, strip_width - 2 * inset, px(20));
-            int row_top = top + px(28);
+            put(header_id, left + strip_content_inset, top + strip_header_inset,
+                strip_width - 2 * strip_content_inset, strip_title_height);
+            int row_top = top + strip_control_top;
             for (int i = 0; i < 3; ++i) {
-                const int inner_left = left + inset;
-                const int inner_width = strip_width - 2 * inset;
-                const int value_width = px(34);
-                put(labels[i], inner_left, row_top, inner_width - value_width, px(16));
-                put(values[i], inner_left + inner_width - value_width, row_top, value_width, px(16));
-                put(sliders[i], inner_left, row_top + px(17), inner_width, px(24));
-                row_top += px(45);
+                const int inner_left = left + strip_content_inset;
+                const int inner_width = strip_width - 2 * strip_content_inset;
+                put(labels[i], inner_left, row_top, inner_width - value_width, visual_row_height);
+                put(values[i], inner_left + inner_width - value_width, row_top, value_width, visual_row_height);
+                put(sliders[i], inner_left, row_top + visual_slider_offset, inner_width, visual_slider_height);
+                row_top += visual_row_pitch;
             }
-            put(reset_id, left + strip_width - inset - px(58), row_top, px(58), px(22));
-            const int bottom = row_top + px(24);
+            put(reset_id, left + strip_width - strip_content_inset - reset_width, top + strip_action_top,
+                reset_width, strip_action_height);
+            const int bottom = top + strip_bottom;
             put(box_id, left, top, strip_width, bottom - top);
             SetWindowPos(get(box_id), HWND_BOTTOM, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
@@ -1714,25 +1733,21 @@ private:
             place(kLive, x + row_width - live_width, y + (status_height - text_height) / 2, live_width, text_height);
             y += status_height + gap;
         }
-        const auto strips = rec::app::mixer_strips(settings_);
+        auto strip_settings = settings_;
+        strip_settings.camera = true;
+        const auto strips = rec::app::mixer_strips(strip_settings);
+        const int mixer_top = y;
+        int strip_left = x;
         int audio_index = 0;
         for (const auto& model : strips) {
-            if (model.kind != rec::app::Strip::Kind::audio || !model.input) continue;
-            audio_strip(model, audio_index++);
-        }
-        const int mixer_top = y;
-        for (const auto& model : strips) {
-            if (model.kind != rec::app::Strip::Kind::visual || !model.color || !model.source) continue;
-            const bool camera = model.source->kind == rec::app::SourceRef::Kind::camera;
-            const int left = x + px(176) + (camera ? px(112) : 0);
-            strip(model, !camera || settings_.camera, left, mixer_top, px(108));
-        }
-        if (!settings_.camera) {
-            for (int id : {kCameraColorLabel, kCameraColorReset, kCameraStripBox,
-                           kCameraBrightnessLabel, kCameraContrastLabel, kCameraSaturationLabel,
-                           kCameraBrightness, kCameraContrast, kCameraSaturation,
-                           kCameraBrightnessValue, kCameraContrastValue, kCameraSaturationValue})
-                ShowWindow(get(id), SW_HIDE);
+            if (model.kind == rec::app::Strip::Kind::audio && model.input) {
+                audio_strip(model, audio_index++, mixer_top);
+                strip_left += audio_strip_pitch;
+            } else if (model.kind == rec::app::Strip::Kind::visual && model.color && model.source) {
+                const bool camera = model.source->kind == rec::app::SourceRef::Kind::camera;
+                strip(model, !camera || settings_.camera, strip_left, mixer_top, visual_strip_width);
+                strip_left += visual_strip_pitch;
+            }
         }
         y = mixer_top + px(220) + gap;
         const int button_width = px(110);
