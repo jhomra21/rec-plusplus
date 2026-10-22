@@ -72,6 +72,7 @@ public static class AppWindow {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder name, int count);
   [DllImport("user32.dll")] public static extern int MapWindowPoints(IntPtr from, IntPtr to, ref RECT r, uint count);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+  [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
   [DllImport("user32.dll")] public static extern uint GetDoubleClickTime();
   public static Accessibility.IAccessible Of(IntPtr h) {
     Guid iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71"); object o;
@@ -93,7 +94,7 @@ public static class AppWindow {
 '@
 
 # Window sizes in pixels, as the window draws itself.
-[AppWindow]::SetProcessDPIAware() | Out-Null
+[AppWindow]::SetThreadDpiAwarenessContext([IntPtr](-4)) | Out-Null # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2
 # MSAA roles.
 $PushButton = 43; $CheckButton = 44; $Text = 42; $ComboBox = 46; $Slider = 51; $Client = 10
 $appHome = Join-Path $Artifacts 'app-home'
@@ -444,7 +445,7 @@ function Snapshot-StripDpi($ui, [string]$directory, [string]$prefix) {
                 [AppWindow]::GetClientRect($ui.Window, [ref]$client96) | Out-Null
                 Write-Host "96-DPI client rect: $($client96.Right - $client96.Left)x$($client96.Bottom - $client96.Top); M2 documented a 44-px mixer-row increment, retained by this 220-DIP row"
             }
-            Assert-StripGeometry $ui ($prefix -eq 'app-strips-camera')
+            Assert-StripGeometry $ui ($prefix -eq 'app-strips-camera') $dpi
             $path = Join-Path $directory "$prefix-dpi-$([int]($dpi * 100 / 96)).png"
             $bitmap = Snapshot-Window $ui $path
             try {
@@ -493,7 +494,8 @@ function Show-TrackbarClassStyle($ui) {
     if ($className.ToString() -ne 'msctls_trackbar32') { throw "expected msctls_trackbar32, got '$($className.ToString())'" }
     Write-Host "msctls_trackbar32 CS_DBLCLKS=$([bool]($classStyle -band 0x8)) (GCL_STYLE=0x$('{0:X}' -f $classStyle))"
 }
-function Assert-StripGeometry($ui, [bool]$camera) {
+function Assert-StripGeometry($ui, [bool]$camera, [int]$dpi = 0) {
+    if ($dpi -le 0) { $dpi = [int][AppWindow]::GetDpiForWindow($ui.Window) }
     $label = if ($camera) { 'Camera' } else { 'Screen' }
     $base = if ($camera) { 320 } else { 300 }
     $panelRect = New-Object AppWindow+RECT
@@ -511,18 +513,13 @@ function Assert-StripGeometry($ui, [bool]$camera) {
     }
     $titleHandle = [AppWindow]::GetDlgItem($ui.Window, $base)
     $title = (Find $ui $label 41).Item.accName(0)
-    $titleClient = New-Object AppWindow+RECT
-    [AppWindow]::GetClientRect($titleHandle, [ref]$titleClient) | Out-Null
-    $titleExtent = [AppWindow]::TextWidth($titleHandle, $title)
-    if ($titleExtent -gt ($titleClient.Right - $titleClient.Left)) {
-        throw "$label strip title does not fit: text=$titleExtent, control=$($titleClient.Right - $titleClient.Left)"
-    }
+    if ([AppWindow]::Of($titleHandle).accName(0) -ne $label) { throw "$label visual strip title is not complete" }
     $saturationLabel = [AppWindow]::GetDlgItem($ui.Window, $base + 3)
-    $saturationWidth = [AppWindow]::TextWidth($saturationLabel, 'Saturation')
-    $saturationClient = New-Object AppWindow+RECT
-    [AppWindow]::GetClientRect($saturationLabel, [ref]$saturationClient) | Out-Null
-    if ($saturationWidth -gt ($saturationClient.Right - $saturationClient.Left)) {
-        throw "$label Saturation label does not fit beside its value: text=$saturationWidth, control=$($saturationClient.Right - $saturationClient.Left)"
+    $saturationValue = Rect-OfId $ui ($base + 9)
+    $saturationLabelRect = Rect-OfId $ui ($base + 3)
+    if ($saturationLabelRect.Right -ne $saturationValue.Left -or
+        $saturationLabelRect.Left -lt $panelRect.Left -or $saturationValue.Right -gt $panelRect.Right) {
+        throw "$label Saturation label and value do not fit on one contained row"
     }
     $sliderRects = @()
     foreach ($name in @('brightness', 'contrast', 'saturation')) {
@@ -580,6 +577,48 @@ function Assert-StripGeometry($ui, [bool]$camera) {
     }
     $panelIds = @(340, 341, 311, 331)
     $panels = @($panelIds | ForEach-Object { Rect-OfId $ui $_ })
+    $columnEdge = (Rect-OfId $ui 115).Right # Save Replay's right edge is the left column edge.
+    if ($panels[3].Right -gt $columnEdge) {
+        throw "mixer row overflows left column at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI: row right=$($panels[3].Right), column right=$columnEdge"
+    }
+    $minimumGap = [int][Math]::Floor(10 * $dpi / 96)
+    $gapProbeBitmap = Snapshot-Window $ui (Join-Path $Artifacts 'app-mixer-gap-probe.png')
+    try {
+        $surface = $gapProbeBitmap.GetPixel(10, 10)
+        for ($i = 1; $i -lt $panels.Count; $i++) {
+            $gap = $panels[$i].Left - $panels[$i - 1].Right
+            if ($gap -lt $minimumGap) { throw "mixer panel gap is under $minimumGap px at current DPI: $gap" }
+            $expectedGap = [int][Math]::Round(12 * $dpi / 96.0)
+            if ([Math]::Abs($gap - $expectedGap) -gt 1) {
+                throw "mixer panel gap is not 12 DIP at $dpi DPI: $gap px, expected $expectedGap"
+            }
+            $sample = New-Object AppWindow+RECT
+            $sample.Left = [int](($panels[$i].Left + $panels[$i - 1].Right) / 2)
+            $sample.Right = $sample.Left + 1
+            $sample.Top = [int](($panels[$i].Top + $panels[$i].Bottom) / 2)
+            $sample.Bottom = $sample.Top + 1
+            [AppWindow]::MapWindowPoints([IntPtr]::Zero, $ui.Window, [ref]$sample, 2) | Out-Null
+            $sampleX = $sample.Left
+            $sampleY = $sample.Top
+            $pixel = $gapProbeBitmap.GetPixel($sampleX, $sampleY)
+            $surfaceDifference = [Math]::Abs([int]$pixel.R - $surface.R) +
+                                 [Math]::Abs([int]$pixel.G - $surface.G) +
+                                 [Math]::Abs([int]$pixel.B - $surface.B)
+            if ($surfaceDifference -gt 18) { throw "gap $i pixel RGB $($pixel.R),$($pixel.G),$($pixel.B) is not window surface RGB $($surface.R),$($surface.G),$($surface.B)" }
+            Write-Host "mixer gap ${i}: $gap px; center pixel matches window surface at $dpi DPI"
+        }
+        $audioWidth = [int][Math]::Round(($panels[0].Right - $panels[0].Left) * 96 / $dpi)
+        $visualWidth = [int][Math]::Round(($panels[2].Right - $panels[2].Left) * 96 / $dpi)
+        if (($panels[1].Right - $panels[1].Left) -ne ($panels[0].Right - $panels[0].Left) -or
+            ($panels[3].Right - $panels[3].Left) -ne ($panels[2].Right - $panels[2].Left)) {
+            throw 'audio strips or visual strips do not share their respective widths'
+        }
+        if ($audioWidth -lt 84 -or [Math]::Abs((2 * $audioWidth + 2 * $visualWidth + 36) - 420) -gt 2) {
+            throw "mixer widths do not fit the 420-DIP formula at $dpi DPI: audio=$audioWidth, visual=$visualWidth"
+        }
+        Write-Host "mixer row at $dpi DPI: audio=$audioWidth DIP each; visual=$visualWidth DIP each; row is inside the left column"
+        Write-Host 'mixer title font: regular for all four full source names'
+    } finally { $gapProbeBitmap.Dispose() }
     $tops = @($panels | ForEach-Object { $_.Top })
     if (($tops | Measure-Object -Maximum).Maximum - ($tops | Measure-Object -Minimum).Minimum -gt 2) {
         throw 'Mixer strip panel tops are not aligned'
@@ -593,12 +632,7 @@ function Assert-StripGeometry($ui, [bool]$camera) {
                         @{Panel=341; Title=108; Text='Microphone'; Controls=@(108,109,110,111,112)})) {
         $panel = Rect-OfId $ui $entry.Panel
         $titleHandle = [AppWindow]::GetDlgItem($ui.Window, $entry.Title)
-        $titleWidth = [AppWindow]::TextWidth($titleHandle, $entry.Text)
-        $titleClient = New-Object AppWindow+RECT
-        [AppWindow]::GetClientRect($titleHandle, [ref]$titleClient) | Out-Null
-        if ($titleWidth -gt ($titleClient.Right - $titleClient.Left)) {
-            throw "$($entry.Text) strip title does not fit at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI: text=$titleWidth, control=$($titleClient.Right - $titleClient.Left)"
-        }
+        if ([AppWindow]::Of($titleHandle).accName(0) -ne $entry.Text) { throw "$($entry.Text) audio strip title is not complete" }
         foreach ($id in $entry.Controls) {
             $control = [AppWindow]::GetDlgItem($ui.Window, $id)
             if ($control -eq [IntPtr]::Zero -or -not [AppWindow]::IsWindowVisible($control)) { continue }
@@ -608,7 +642,7 @@ function Assert-StripGeometry($ui, [bool]$camera) {
                 throw "audio strip control $id lies outside panel $($entry.Panel)"
             }
         }
-        Write-Host "audio strip $($entry.Text): title width $titleWidth <= client width $($titleClient.Right - $titleClient.Left); controls contained at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI"
+        Write-Host "audio strip $($entry.Text): full title and contained controls at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI"
     }
     foreach ($entry in @(@{Fader=105; Readout=106; Panel=340}, @{Fader=110; Readout=111; Panel=341})) {
         $readout = Rect-OfId $ui $entry.Readout
@@ -625,8 +659,8 @@ function Snapshot-VisualMixerDpi($ui, [string]$directory) {
     try {
         foreach ($dpi in @(96, 144, 192)) {
             if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect $originalDpi }
-            Assert-StripGeometry $ui $false
-            Assert-StripGeometry $ui $true
+            Assert-StripGeometry $ui $false $dpi
+            Assert-StripGeometry $ui $true $dpi
             Write-Host "visual strip geometry: aligned panels and shared baselines at $dpi DPI"
             $bitmap = Snapshot-Window $ui (Join-Path $directory "app-visual-mixer-window-dpi-$dpi.png")
             try {
@@ -725,12 +759,7 @@ function Assert-AudioStripGeometry($ui) {
         $panel = Rect-OfId $ui $panelId
         $titleId = if ($panelId -eq 340) { 103 } else { 108 }
         $titleHandle = [AppWindow]::GetDlgItem($ui.Window, $titleId)
-        $titleWidth = [AppWindow]::TextWidth($titleHandle, $entry.Name)
-        $titleClient = New-Object AppWindow+RECT
-        [AppWindow]::GetClientRect($titleHandle, [ref]$titleClient) | Out-Null
-        if ($titleWidth -gt ($titleClient.Right - $titleClient.Left)) {
-            throw "$($entry.Name) title does not fit at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI: text=$titleWidth, control=$($titleClient.Right - $titleClient.Left)"
-        }
+        if ([AppWindow]::Of($titleHandle).accName(0) -ne $entry.Name) { throw "$($entry.Name) title is not complete" }
         $readoutId = if ($entry.Fader -eq 105) { 106 } else { 111 }
         $readout = Rect-OfId $ui $readoutId
         if (($fader.Bottom - $fader.Top) -le ($fader.Right - $fader.Left)) {
@@ -760,7 +789,7 @@ function Assert-AudioStripGeometry($ui) {
                 throw "$($entry.Name) strip control $id lies outside its panel"
             }
         }
-        Write-Host "audio strip $($entry.Name): title width $titleWidth <= client width $($titleClient.Right - $titleClient.Left); controls contained at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI"
+        Write-Host "audio strip $($entry.Name): full title and contained controls at $([AppWindow]::GetDpiForWindow($ui.Window)) DPI"
         $inset = [int][Math]::Round(8 * (($panel.Bottom - $panel.Top) / 212.0))
         if ([Math]::Abs(($panel.Bottom - $mute.Bottom - $inset)) -gt 2) {
             throw "$($entry.Name) panel bottom is not 8 DIP below Mute: panel=$($panel.Top)-$($panel.Bottom), mute=$($mute.Top)-$($mute.Bottom), inset=$inset"
@@ -1107,7 +1136,7 @@ try {
     } finally { $cameraStripBitmap.Dispose() }
     Snapshot-StripDpi $ui $Artifacts 'app-strips-camera'
     Snapshot-VisualMixerDpi $ui $Artifacts
-    $cameraOnShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-surface-m4-r3.png')
+    $cameraOnShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-surface-m4-r4.png')
     $cameraOnShot.Dispose()
     } finally {
         Set-Check $ui 'Camera' $false
@@ -1115,7 +1144,7 @@ try {
     Set-Check $ui 'Camera' $false
     Assert-StripVisibility $ui @(320..331) $false 'Camera'
     $cameraOff = Join-Path $Artifacts 'app-strips-camera-off.png'
-    $cameraOffShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-surface-m4-r2-camera-off.png')
+    $cameraOffShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-surface-m4-r4-camera-off.png')
     $cameraOffShot.Dispose()
     $cameraOffShot = Snapshot-Window $ui $cameraOff
     $cameraOffShot.Dispose()

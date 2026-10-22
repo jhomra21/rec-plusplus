@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -1312,11 +1313,14 @@ private:
         title.lfHeight = -MulDiv(16, static_cast<int>(dpi_), 72);
         title_ = CreateFontIndirectW(&title);
         for (auto& [id, hwnd] : controls_) {
+            const bool strip_title = id == kScreenColorLabel || id == kCameraColorLabel ||
+                                     id == kSystemLabel || id == kMicLabel;
             const bool header = id == kCaptureHeader || id == kQualityHeader || id == kStreamHeader || id == kReplayHeader ||
                                 id == kCameraHeader || id == kFolderHeader || id == kScenesHeader ||
-                                id == kScreenColorLabel || id == kCameraColorLabel ||
-                                id == kSystemLabel || id == kMicLabel;
-            const HFONT font = id == kStatus ? title_ : header || id == kLive ? bold_ : font_;
+                                strip_title;
+            // All four mixer titles use the regular font so the visual labels fit the
+            // remaining column width without abbreviating their source names.
+            const HFONT font = id == kStatus ? title_ : (header && !strip_title) || id == kLive ? bold_ : font_;
             SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
         if (detail_tooltip_window_) SendMessageW(detail_tooltip_window_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
@@ -1617,8 +1621,8 @@ private:
             y += h + gap;
         };
         const auto header = [&](int id) { y += px(10); line(id, px(20)); };
-        // Size audio strips to their bold source titles, then use the remaining column
-        // width for the two visual strips. Keep each readout paired to its fader.
+        // Give audio titles an 8-DIP inset. Both audio strips share one width, then the
+        // two visual strips share the remaining 420-DIP column after three 12-DIP gaps.
         const int strip_control_top = px(28), value_width = px(22), reset_width = px(58);
         const int strip_title_height = px(20), strip_bottom = px(212);
         const int strip_content_inset = px(8), audio_meter_inset = px(4);
@@ -1627,27 +1631,26 @@ private:
         const int audio_readout_top = px(160), strip_action_top = px(182), strip_action_height = px(22);
         const int strip_header_inset = px(6), visual_row_height = px(16);
         const int visual_slider_offset = px(17), visual_slider_height = px(24), visual_row_pitch = px(51);
-        const auto measure_text = [&](int control_id, const wchar_t* text) {
-            const HWND control = get(control_id);
-            HDC dc = GetDC(control);
+        const auto measure_text = [&](const wchar_t* text) {
+            // Measure all strip labels with the exact regular font used by their controls.
+            // A control DC can report the default font before theme/font propagation settles.
+            HDC dc = GetDC(window_);
             if (!dc) return 0;
-            const HFONT font = reinterpret_cast<HFONT>(SendMessageW(control, WM_GETFONT, 0, 0));
-            const HGDIOBJ previous = font ? SelectObject(dc, font) : nullptr;
+            const HGDIOBJ previous = SelectObject(dc, font_);
             SIZE extent{};
             const bool measured = GetTextExtentPoint32W(dc, text, static_cast<int>(wcslen(text)), &extent) != FALSE;
             if (previous) SelectObject(dc, previous);
-            ReleaseDC(control, dc);
+            ReleaseDC(window_, dc);
             return measured ? static_cast<int>(extent.cx) : 0;
         };
-        const int title_width = std::max(measure_text(kSystemLabel, L"System audio"),
-                                         measure_text(kMicLabel, L"Microphone"));
-        const int audio_strip_width = std::max(px(84), title_width + px(40));
-        const int visual_min_width = measure_text(kScreenSaturation, L"Saturation") +
+        const int title_width = std::max(measure_text(L"System audio"),
+                                         measure_text(L"Microphone"));
+        const int audio_strip_width = std::max(px(84), title_width + px(16));
+        const int visual_min_width = measure_text(L"Saturation") +
                                      value_width + 2 * strip_content_inset;
-        const int strip_gap = std::min(px(12), std::max(0, (column - 2 * audio_strip_width -
-                                                            2 * visual_min_width) / 3));
-        const int visual_strip_width = std::max(visual_min_width,
-            (column - 2 * audio_strip_width - 3 * strip_gap) / 2);
+        const int strip_gap = px(12);
+        const int visual_strip_width = (column - 2 * audio_strip_width - 3 * strip_gap) / 2;
+        assert(visual_strip_width >= visual_min_width);
         const int audio_strip_pitch = audio_strip_width + strip_gap;
         const int visual_strip_pitch = visual_strip_width + strip_gap;
         const auto audio_strip = [&](const rec::app::Strip& model, int index, int top) {
@@ -1661,8 +1664,8 @@ private:
             const int left = x + index * audio_strip_pitch;
             const int box_id = system ? kSystemStripBox : kMicStripBox;
             const int controls_left = left + audio_meter_inset;
-            place(label_id, left + audio_meter_inset, top + strip_header_inset,
-                  audio_strip_width - 2 * audio_meter_inset, strip_title_height);
+            place(label_id, left + strip_content_inset, top + strip_header_inset,
+                  audio_strip_width - 2 * strip_content_inset, strip_title_height);
             place(slider_id, left + audio_fader_inset, top + strip_control_top,
                   audio_fader_width, audio_control_height);
             RECT channel{};
