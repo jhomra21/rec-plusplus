@@ -1002,6 +1002,9 @@ struct PreviewHit {
     }
     NSButton* reset = [self button:@"Reset" action:@selector(resetColor:)];
     reset.accessibilityLabel = camera ? @"Reset camera color" : @"Reset screen color";
+    // Push buttons opt out of the automatic key loop when Full Keyboard Access is off.
+    // These resets are part of the mixer sequence, so they must accept Tab focus explicitly.
+    reset.refusesFirstResponder = NO;
     [reset.widthAnchor constraintEqualToConstant:60].active = YES;
     if (camera) _cameraColorReset = reset;
     else _screenColorReset = reset;
@@ -2971,6 +2974,7 @@ struct PreviewHit {
     });
     if (unnamed) fail([@"a control has no accessible name: " stringByAppendingString:unnamed]);
     note(@"accessibility=ok");
+    note([NSString stringWithFormat:@"keyboard-access=%@", NSApp.fullKeyboardAccessEnabled ? @"full" : @"basic"]);
     wait_for(@"Ready to record", 20);
     __block BOOL statusLineLayoutOK = NO;
     ui(^{
