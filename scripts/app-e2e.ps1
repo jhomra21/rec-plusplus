@@ -579,6 +579,19 @@ function Assert-StatusDpi($ui) {
             if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect $originalDpi }
             Assert-StatusRow $ui $dpi
             Assert-AudioStripGeometry $ui
+            $shot = Snapshot-Window $ui (Join-Path $Artifacts "app-audio-strips-dpi-$dpi.png")
+            try {
+                $system = Control-Rect $ui 104
+                $left = [Math]::Max(0, [Math]::Min($system.Left, (Control-Rect $ui 105).Left) - 8)
+                $top = [Math]::Max(0, $system.Top - 8)
+                $right = [Math]::Min($shot.Width, (Control-Rect $ui 110).Right + 8)
+                $bottom = [Math]::Min($shot.Height, (Control-Rect $ui 112).Bottom + 8)
+                if ($right -gt $left -and $bottom -gt $top) {
+                    $crop = $shot.Clone((New-Object System.Drawing.Rectangle $left, $top, ($right - $left), ($bottom - $top)), $shot.PixelFormat)
+                    try { $crop.Save((Join-Path $Artifacts "app-audio-strips-dpi-$dpi.png"), [System.Drawing.Imaging.ImageFormat]::Png) }
+                    finally { $crop.Dispose() }
+                } else { throw "audio-strip crop is outside the $($shot.Width)x$($shot.Height) client bitmap at $dpi DPI" }
+            } finally { $shot.Dispose() }
         }
     } finally {
         Set-TestDpi $ui $originalDpi $baseRect $originalDpi
@@ -596,11 +609,17 @@ function Assert-AudioStripGeometry($ui) {
         if (($meter.Bottom - $meter.Top) -le ($meter.Right - $meter.Left)) {
             throw "$($entry.Name) meter is not vertical: $($meter.Right - $meter.Left)x$($meter.Bottom - $meter.Top)"
         }
+        # TBM_GETCHANNELRECT.left is a 9-DIP vertical thumb inset for these standard trackbars.
+        $dpi = [AppWindow]::GetDpiForWindow((Find $ui "$($entry.Name) volume" $Slider).Handle)
+        $channelTop = $fader.Top + [int][Math]::Round(9 * $dpi / 96.0)
+        if ($meter.Left -ge $fader.Left -or [Math]::Abs($meter.Top - $channelTop) -gt 2) {
+            throw "$($entry.Name) meter is not aligned left of the fader channel: meter=$($meter.Left),$($meter.Top) channelTop=$channelTop fader=$($fader.Left),$($fader.Top)"
+        }
         if ($mute.Top -le $fader.Top -or $mute.Top -lt $fader.Bottom) {
             throw "$($entry.Name) Mute is not below its fader: fader=$($fader.Top)-$($fader.Bottom), mute=$($mute.Top)-$($mute.Bottom)"
         }
     }
-    Write-Host 'M2. strip geometry: faders/meters vertical; Mute below each fader'
+    Write-Host 'M2. strip geometry: meters left and channel-aligned; faders vertical; Mute below each fader'
 }
 function Assert-StripVisibility($ui, [int[]]$ids, [bool]$visible, [string]$name) {
     foreach ($id in $ids) {
@@ -641,14 +660,56 @@ function Meter-LitStats($ui, $bitmap, [int]$id) {
     if ($right -le $left -or $bottom -le $top) { throw "meter control $id has an empty rectangle after clamping to the $($bitmap.Width)x$($bitmap.Height) bitmap" }
     $vertical = ($bottom - $top) -gt ($right - $left)
     $channel = if ($vertical) { $bitmap.GetPixel($right - 1, $top) } else { $bitmap.GetPixel($right - 1, [int](($top + $bottom - 1) / 2)) }
-    $lit = 0; $sumY = 0
+    $lit = 0; $sumY = 0; $topLit = 0; $bottomLit = 0; $topCount = 0; $bottomCount = 0
+    $rowBand = [Math]::Max(1, [int][Math]::Ceiling(($bottom - $top) * 0.1))
     for ($y = $top; $y -lt $bottom; $y++) {
         for ($x = $left; $x -lt $right; $x++) {
             $pixel = $bitmap.GetPixel($x, $y)
-            if ($pixel.ToArgb() -ne $channel.ToArgb()) { $lit++; $sumY += $y }
+            $isLit = $pixel.ToArgb() -ne $channel.ToArgb()
+            if ($y -lt $top + $rowBand) { $topCount++; if ($isLit) { $topLit++ } }
+            if ($y -ge $bottom - $rowBand) { $bottomCount++; if ($isLit) { $bottomLit++ } }
+            if ($isLit) { $lit++; $sumY += $y }
         }
     }
-    return @{ count = $lit; meanY = if ($lit) { $sumY / [double]$lit } else { 0 }; top = $top; bottom = $bottom }
+    return @{ count = $lit; area = ($right - $left) * ($bottom - $top); meanY = if ($lit) { $sumY / [double]$lit } else { 0 }; top = $top; bottom = $bottom;
+              topLit = $topLit; bottomLit = $bottomLit; topCount = $topCount; bottomCount = $bottomCount }
+}
+function Fader-ThumbMeanY($ui, [IntPtr]$fader, [int]$position) {
+    [AppWindow]::SendMessage($fader, 0x0405, [IntPtr]1, [IntPtr]$position) | Out-Null # TBM_SETPOS
+    [AppWindow]::RedrawWindow($fader, [IntPtr]::Zero, [IntPtr]::Zero, 0x181) | Out-Null
+    $shot = Snapshot-Window $ui (Join-Path $Artifacts "app-fader-position-$position.png")
+    try {
+        $rect = Control-Rect $ui ([AppWindow]::GetDlgCtrlID($fader))
+        $left = [Math]::Max(0, $rect.Left); $right = [Math]::Min($shot.Width, $rect.Right)
+        $top = [Math]::Max(0, $rect.Top); $bottom = [Math]::Min($shot.Height, $rect.Bottom)
+        $sum = 0; $count = 0
+        for ($y = $top; $y -lt $bottom; $y++) {
+            for ($x = $left; $x -lt $right; $x++) {
+                $p = $shot.GetPixel($x, $y)
+                if ($p.R -ge 170 -and $p.G -ge 170 -and $p.B -ge 170 -and [Math]::Abs($p.B - $p.R) -le 12) {
+                    $sum += $y; $count++
+                }
+            }
+        }
+        if (-not $count) { throw "fader thumb was not visible at position $position" }
+        return @{ y = $sum / [double]$count; top = $top; height = $bottom - $top }
+    } finally { $shot.Dispose() }
+}
+function Assert-FaderDirection($ui) {
+    $slider = (Find $ui 'System audio volume' $Slider).Handle
+    $previous = [int][AppWindow]::SendMessage($slider, 0x0400, [IntPtr]::Zero, [IntPtr]::Zero)
+    try {
+        $maximum = Fader-ThumbMeanY $ui $slider 20
+        $minimum = Fader-ThumbMeanY $ui $slider -40
+        $maxPercent = 100 * ($maximum.y - $maximum.top) / $maximum.height
+        $minPercent = 100 * ($minimum.y - $minimum.top) / $minimum.height
+        if ($maxPercent -ge 33.4 -or $minPercent -le 66.6) {
+            throw "fader direction incorrect: max y=$([Math]::Round($maxPercent,1))%, min y=$([Math]::Round($minPercent,1))%"
+        }
+        Write-Host "M2. fader direction: max at y=$([Math]::Round($maxPercent,1))%, min at y=$([Math]::Round($minPercent,1))%"
+    } finally {
+        [AppWindow]::SendMessage($slider, 0x0405, [IntPtr]1, [IntPtr]$previous) | Out-Null
+    }
 }
 function Meter-ColorPixels($ui, $bitmap, [int]$id, [int]$r, [int]$g, [int]$b) {
     $rect = Control-Rect $ui $id
@@ -675,6 +736,39 @@ function Closest-Status-Color($bitmap, $ui, [int]$r, [int]$g, [int]$b) {
         }
     }
     return $closest
+}
+function Status-ColorStats($bitmap, $ui) {
+    $rect = Control-Rect $ui 100
+    $neutral = @(0, 0, 0, 0); $neutralCount = 0
+    $red = @(0, 0, 0); $redCount = 0
+    for ($y = [Math]::Max(0, $rect.Top); $y -lt [Math]::Min($bitmap.Height, $rect.Bottom); $y++) {
+        for ($x = [Math]::Max(0, $rect.Left); $x -lt [Math]::Min($bitmap.Width, $rect.Right); $x++) {
+            $p = $bitmap.GetPixel($x, $y)
+            if ($p.R -gt 150 -and $p.G -gt 150 -and $p.B -gt 150 -and
+                [Math]::Abs($p.R - $p.G) -le 12 -and [Math]::Abs($p.R - $p.B) -le 12) {
+                $neutral[0] += $p.R; $neutral[1] += $p.G; $neutral[2] += $p.B; $neutralCount++
+            }
+            if ($p.R -gt 50 -and $p.R -gt $p.G * 1.35 -and $p.R -gt $p.B * 1.35) {
+                $red[0] += $p.R; $red[1] += $p.G; $red[2] += $p.B; $redCount++
+            }
+        }
+    }
+    if (-not $redCount) { throw "status dot was not visible: neutral=$neutralCount red=$redCount" }
+    $text = if ($neutralCount) { @([int]($neutral[0] / $neutralCount), [int]($neutral[1] / $neutralCount), [int]($neutral[2] / $neutralCount)) } else { @(0, 0, 0) }
+    $dot = @([int]($red[0] / $redCount), [int]($red[1] / $redCount), [int]($red[2] / $redCount))
+    $backgroundPixel = $bitmap.GetPixel([Math]::Max(0, $rect.Left + 1), [Math]::Max(0, $rect.Top + 1))
+    $luminance = {
+        param($rgb)
+        $parts = @()
+        foreach ($v in $rgb) {
+            $c = $v / 255.0
+            $parts += $(if ($c -le 0.04045) { $c / 12.92 } else { [Math]::Pow(($c + 0.055) / 1.055, 2.4) })
+        }
+        return 0.2126 * $parts[0] + 0.7152 * $parts[1] + 0.0722 * $parts[2]
+    }
+    $textLum = & $luminance $text
+    $backLum = & $luminance @($backgroundPixel.R, $backgroundPixel.G, $backgroundPixel.B)
+    return @{ text = $text; dot = $dot; contrast = ([Math]::Max($textLum, $backLum) + 0.05) / ([Math]::Min($textLum, $backLum) + 0.05) }
 }
 # The mean color of part of a picture, given in fractions of its size, as Expect-Color reads it.
 function Picture-Color($bitmap, [double]$x, [double]$y, [double]$w, [double]$h) {
@@ -821,6 +915,7 @@ try {
     Expect-Dark $ui
     Assert-StatusDpi $ui
     Assert-StatusRow $ui ([int][AppWindow]::GetDpiForWindow($ui.Window))
+    Assert-FaderDirection $ui
     $statusRowShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-row.png')
     $statusRowShot.Dispose()
     Write-Host "Status row snapshot: $(Join-Path $Artifacts 'app-status-row.png')"
@@ -957,14 +1052,24 @@ try {
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
     $recordShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-recording.png')
-    if ((Closest-Status-Color $recordShot $ui 225 40 40) -gt 100) { throw 'recording status text did not use palette accent #E12828' }
+    if (-not (High-Contrast) -and (Closest-Status-Color $recordShot $ui 225 40 40) -gt 100) { throw 'recording status text did not use palette accent #E12828' }
+    $recordingStatusColors = if (-not (High-Contrast)) { Status-ColorStats $recordShot $ui }
     $recordShot.Dispose()
     Wait-Recorded $ui 2
     Assert-StatusTooltip $ui
     Press $ui 'Pause'
     Wait-Status $ui 'Paused' | Out-Null
     $pauseShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-paused.png')
-    if ((Closest-Status-Color $pauseShot $ui 126 34 36) -gt 100) { throw 'paused status text did not use the dimmed palette accent' }
+    if (-not (High-Contrast)) {
+        $pausedStatusColors = Status-ColorStats $pauseShot $ui
+        if ($pausedStatusColors.contrast -lt 4.5) { throw "paused status text contrast is below 4.5:1: $($pausedStatusColors.contrast)" }
+        if ([Math]::Abs($pausedStatusColors.text[0] - $pausedStatusColors.text[1]) -gt 12 -or
+            [Math]::Abs($pausedStatusColors.text[0] - $pausedStatusColors.text[2]) -gt 12) {
+            throw "paused status text is not neutral: RGB $($pausedStatusColors.text -join ',')"
+        }
+        if ($pausedStatusColors.dot[0] -ge $recordingStatusColors.dot[0]) { throw 'paused status dot is not dimmer than the recording dot' }
+        Write-Host "D1. paused status: text $($pausedStatusColors.text -join ',') contrast $([Math]::Round($pausedStatusColors.contrast,2)), dot $($pausedStatusColors.dot -join ','), recording dot $($recordingStatusColors.dot -join ',')"
+    } else { Write-Host 'D1. paused status color assertions skipped in high contrast' }
     $pauseShot.Dispose()
     Start-Sleep -Milliseconds 1500
     Press $ui 'Resume'
@@ -1538,8 +1643,9 @@ try {
     $meterStats = Meter-LitStats $ui $meterShot 104
     $meterLitBeforeMute = $meterStats.count
     $meterHeight = $meterStats.bottom - $meterStats.top
-    if ($meterHeight -le 0 -or $meterStats.meanY -le ($meterStats.top + 0.5 * $meterHeight)) {
-        throw "vertical meter is not filling from the bottom at the -6 dB fader setting: meanY=$($meterStats.meanY), rect=$($meterStats.top)-$($meterStats.bottom)"
+    if ($meterHeight -le 0 -or $meterStats.bottomLit -lt 1 -or
+        ($meterStats.topLit -gt 0 -and $meterStats.count -lt $meterStats.area)) {
+        throw "vertical meter is not filling bottom-up: top-row lit=$($meterStats.topLit)/$($meterStats.topCount), bottom-row lit=$($meterStats.bottomLit)/$($meterStats.bottomCount)"
     }
     if (-not (High-Contrast)) {
         $meterGreen = Meter-ColorPixels $ui $meterShot 104 70 190 105
@@ -1548,7 +1654,7 @@ try {
         Write-Host "7. meter color probe: green=$meterGreen red=$meterRed pixels"
     }
     $meterShot.Dispose()
-    Write-Host "7. vertical meter probe: system=$meterLitBeforeMute lit pixels, meanY=$([Math]::Round($meterStats.meanY, 1)) (lower half; -6 dB fader)"
+    Write-Host "M2. bottom-up meter: system=$meterLitBeforeMute lit pixels; top row=$($meterStats.topLit)/$($meterStats.topCount), bottom row=$($meterStats.bottomLit)/$($meterStats.bottomCount)"
     Start-Sleep -Milliseconds 2500
     Set-Check $ui 'Mute system' $true
     $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-muted-probe.png')
