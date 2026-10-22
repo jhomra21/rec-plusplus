@@ -62,6 +62,8 @@ public static class AppWindow {
   [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h, IntPtr update, IntPtr erase, uint flags);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool SystemParametersInfo(uint action, uint param, ref HIGHCONTRAST data, uint flags);
+  [StructLayout(LayoutKind.Sequential)] public struct HIGHCONTRAST { public int cbSize, dwFlags; public IntPtr lpszDefaultScheme; }
   [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
   [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
   [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
@@ -271,6 +273,56 @@ function Snapshot-Window($ui, [string]$path) {
     $graphics.Dispose()
     $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     return $bitmap
+}
+function High-Contrast {
+    $hc = New-Object AppWindow+HIGHCONTRAST
+    $hc.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($hc)
+    return [AppWindow]::SystemParametersInfo(0x0042, [uint32]$hc.cbSize, [ref]$hc, 0) -and (($hc.dwFlags -band 1) -ne 0)
+}
+function Expect-Dark($ui) {
+    $path = Join-Path $Artifacts 'app-surface.png'
+    $bitmap = Snapshot-Window $ui $path
+    try {
+        if (High-Contrast) {
+            Write-Host 'D1. dark surface assertions skipped: system high-contrast mode is on; screenshot saved'
+            return
+        }
+        $r = 0; $g = 0; $b = 0
+        for ($y = 0; $y -lt 10; $y++) {
+            for ($x = 0; $x -lt 10; $x++) {
+                $pixel = $bitmap.GetPixel($x, $y)
+                $r += $pixel.R; $g += $pixel.G; $b += $pixel.B
+            }
+        }
+        $r = [int]($r / 100); $g = [int]($g / 100); $b = [int]($b / 100)
+        if ($r -ge 45 -or $g -ge 45 -or $b -ge 45) {
+            throw "app surface margin is not dark: mean RGB $r,$g,$b"
+        }
+        $panel = Control-Rect $ui 311 # Screen strip panel's stable id.
+        $allControls = @(100..399 | ForEach-Object {
+            $handle = [AppWindow]::GetDlgItem($ui.Window, $_)
+            if ($handle -ne [IntPtr]::Zero -and $_ -ne 311) { Control-Rect $ui $_ }
+        })
+        $sample = $null
+        for ($y = $panel.Top + 2; $y -lt $panel.Bottom - 2 -and -not $sample; $y++) {
+            for ($x = $panel.Left + 2; $x -lt $panel.Right - 2; $x++) {
+                $covered = $false
+                foreach ($rect in $allControls) {
+                    if ($x -ge $rect.Left -and $x -lt $rect.Right -and $y -ge $rect.Top -and $y -lt $rect.Bottom) {
+                        $covered = $true; break
+                    }
+                }
+                if (-not $covered) { $sample = $bitmap.GetPixel($x, $y); break }
+            }
+        }
+        if (-not $sample) { throw 'could not find an uncovered point inside the Screen strip panel' }
+        $brightness = [int](($sample.R + $sample.G + $sample.B) / 3)
+        $surface = [int](($r + $g + $b) / 3)
+        if ($brightness -le $surface -or $brightness -ge 70) {
+            throw "Screen strip panel RGB $($sample.R),$($sample.G),$($sample.B) is not lighter than the surface and still dark"
+        }
+        Write-Host "D1. dark surface: margin mean $r,$g,$b; Screen panel $($sample.R),$($sample.G),$($sample.B); saved $path"
+    } finally { $bitmap.Dispose() }
 }
 function Set-TestDpi($ui, [int]$dpi, $baseRect, [int]$baseDpi) {
     $rect = New-Object AppWindow+RECT
@@ -622,6 +674,7 @@ $ui = $null
 try {
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
+    Expect-Dark $ui
     Assert-StatusDpi $ui
     Assert-StatusRow $ui ([int][AppWindow]::GetDpiForWindow($ui.Window))
     $statusRowShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-row.png')
