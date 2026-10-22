@@ -596,6 +596,18 @@ function Control-Rect($ui, [int]$id) {
     [AppWindow]::MapWindowPoints($handle, $ui.Window, [ref]$r, 2) | Out-Null
     return $r
 }
+function Meter-LitPixels($ui, $bitmap, [int]$id) {
+    $rect = Control-Rect $ui $id
+    $channel = $bitmap.GetPixel($rect.Right - 1, [int](($rect.Top + $rect.Bottom) / 2))
+    $lit = 0
+    for ($y = $rect.Top; $y -lt $rect.Bottom; $y++) {
+        for ($x = $rect.Left; $x -lt $rect.Right; $x++) {
+            $pixel = $bitmap.GetPixel($x, $y)
+            if ($pixel.ToArgb() -ne $channel.ToArgb()) { $lit++ }
+        }
+    }
+    return $lit
+}
 function Closest-Status-Color($bitmap, $ui, [int]$r, [int]$g, [int]$b) {
     $rect = Control-Rect $ui 100
     $closest = 765
@@ -1441,10 +1453,37 @@ try {
         Expect-CustomTrackbar $ui 105 (Join-Path $Artifacts 'app-volume-slider-d3.png')
     }
     [AppWindow]::SendMessage($ui.Window, 0x0114, [IntPtr]8, $slider) | Out-Null  # WM_HSCROLL, TB_ENDTRACK
+    $idleShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-idle.png')
+    try {
+        foreach ($meterId in 104, 109) {
+            if ((Meter-LitPixels $ui $idleShot $meterId) -ne 0) { throw "idle meter $meterId showed lit pixels" }
+        }
+    } finally { $idleShot.Dispose() }
+    Write-Host '7. meter idle probe: system=0 mic=0 lit pixels'
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
+    Wait-Until {
+        $probeShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-probe.png')
+        try { (Meter-LitPixels $ui $probeShot 104) -gt 0 } finally { $probeShot.Dispose() }
+    } 'system meter did not show lit pixels within 2 s' 2
+    $meter = Find $ui 'System audio level' 48  # ROLE_SYSTEM_PROGRESSBAR
+    $meterValue = [string]$meter.Item.accValue(0)
+    if ($meterValue -notmatch '-?\d+\.\d dB') { throw "system meter has no accessible dB value: '$meterValue'" }
+    Write-Host "7. meter accessibility probe: role=ProgressBar name=System audio level value=$meterValue"
+    $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter.png')
+    $meterLitBeforeMute = Meter-LitPixels $ui $meterShot 104
+    $meterShot.Dispose()
+    Write-Host "7. meter recording probe: system=$meterLitBeforeMute lit pixels"
     Start-Sleep -Milliseconds 2500
     Set-Check $ui 'Mute system' $true
+    Wait-Until {
+        $probeShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-muted-probe.png')
+        try { (Meter-LitPixels $ui $probeShot 104) -gt 0 } finally { $probeShot.Dispose() }
+    } 'system meter stopped moving after post-meter mute' 2
+    $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter.png')
+    $meterLitAfterMute = Meter-LitPixels $ui $meterShot 104
+    $meterShot.Dispose()
+    Write-Host "7. meter post-mute probe: system=$meterLitAfterMute lit pixels"
     Start-Sleep -Milliseconds 2000
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1006, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Mute System Audio"
     Start-Sleep -Milliseconds 2000

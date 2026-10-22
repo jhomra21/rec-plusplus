@@ -451,6 +451,12 @@ public:
         preview.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         preview.lpszClassName = L"RecPreview";
         RegisterClassExW(&preview);
+        WNDCLASSEXW meter{sizeof meter};
+        meter.lpfnWndProc = &App::meter_procedure;
+        meter.hInstance = instance;
+        meter.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        meter.lpszClassName = L"RecMeter";
+        RegisterClassExW(&meter);
         window_ = CreateWindowExW(WS_EX_CONTROLPARENT, wc.lpszClassName, L"Rec",
                                   WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_CLIPCHILDREN,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 480, 760, nullptr, nullptr, instance, this);
@@ -706,6 +712,53 @@ private:
         default:
             return DefWindowProcW(window, message, w, l);
         }
+    }
+    static LRESULT CALLBACK meter_procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
+        if (message == WM_NCCREATE) SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+        if (message == WM_ERASEBKGND) return 1;
+        if (message == WM_PAINT) {
+            PAINTSTRUCT paint{};
+            HDC dc = BeginPaint(window, &paint);
+            RECT r{};
+            GetClientRect(window, &r);
+            const int position = static_cast<int>(GetWindowLongPtrW(window, GWLP_USERDATA));
+            const int extent = r.bottom - r.top > r.right - r.left ? r.bottom - r.top : r.right - r.left;
+            const int lit = MulDiv(extent, position, 1000);
+            auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(GetParent(window), GWLP_USERDATA));
+            const Palette palette = app ? app->palette_ : Palette::current();
+            HBRUSH channel = CreateSolidBrush(palette.channel);
+            FillRect(dc, &r, channel);
+            DeleteObject(channel);
+            if (lit > 0) {
+                RECT fill = r;
+                const bool vertical = r.bottom - r.top > r.right - r.left;
+                if (vertical) fill.top = fill.bottom - lit;
+                else fill.right = fill.left + lit;
+                const int low = MulDiv(extent, 800, 1000); // -12 dB on the shared 60 dB scale.
+                const int hot = MulDiv(extent, 950, 1000); // -3 dB; reserve red for the 0 dB clip segment.
+                const auto segment = [&](int from, int to, COLORREF color) {
+                    RECT part = fill;
+                    if (vertical) {
+                        part.bottom = r.bottom - from;
+                        part.top = r.bottom - std::min(to, lit);
+                    } else {
+                        part.left = r.left + from;
+                        part.right = r.left + std::min(to, lit);
+                    }
+                    if (part.right > part.left && part.bottom > part.top) {
+                        HBRUSH brush = CreateSolidBrush(color);
+                        FillRect(dc, &part, brush);
+                        DeleteObject(brush);
+                    }
+                };
+                segment(0, low, palette.meter_green);
+                segment(low, hot, palette.meter_amber);
+                segment(hot, extent, palette.accent);
+            }
+            EndPaint(window, &paint);
+            return 0;
+        }
+        return DefWindowProcW(window, message, w, l);
     }
 
     // The vertical video's preview shows the second canvas; the other the recording's picture.
@@ -1226,12 +1279,12 @@ private:
             window_, nullptr, instance_, nullptr);
         // Each source: its level before volume, the volume, and mute.
         label(kSystemLabel, L"System audio");
-        add(kSystemMeter, PROGRESS_CLASSW, L"", PBS_SMOOTH);
+        add(kSystemMeter, L"RecMeter", L"System audio level", 0);
         add(kSystemVolume, TRACKBAR_CLASSW, L"System audio volume", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
         label(kSystemVolumeText, L"");
         check(kSystemMute, L"Mute system");
         label(kMicLabel, L"Microphone");
-        add(kMicMeter, PROGRESS_CLASSW, L"", PBS_SMOOTH);
+        add(kMicMeter, L"RecMeter", L"Microphone level", 0);
         add(kMicVolume, TRACKBAR_CLASSW, L"Microphone volume", TBS_HORZ | TBS_NOTICKS | WS_TABSTOP);
         label(kMicVolumeText, L"");
         check(kMicMute, L"Mute mic");
@@ -1383,7 +1436,6 @@ private:
         for (auto seconds : rec::app::kReplayLengths)
             SendMessageW(replay, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(duration_label(seconds).c_str()));
         for (auto rate : kFrameRates) SendMessageW(fps, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>((std::to_wstring(rate) + L" fps").c_str()));
-        for (int meter : {kSystemMeter, kMicMeter}) SendMessageW(get(meter), PBM_SETRANGE32, 0, 1000);
         for (int slider : {kSystemVolume, kMicVolume}) {
             SendMessageW(get(slider), TBM_SETRANGEMIN, FALSE, rec::app::kVolumeMin);
             SendMessageW(get(slider), TBM_SETRANGEMAX, FALSE, rec::app::kVolumeMax);
@@ -2753,10 +2805,23 @@ private:
     }
 
     void meter(int id, float peak, rec::app::Meter& meter_state) {
-        const auto position = static_cast<int>(meter_state.feed(peak) * 1000);
-        // Setting one past and back skips the progress bar's smoothing animation.
-        SendMessageW(get(id), PBM_SETPOS, static_cast<WPARAM>(std::min(1000, position + 1)), 0);
-        SendMessageW(get(id), PBM_SETPOS, static_cast<WPARAM>(position), 0);
+        const float level = meter_state.feed(peak);
+        SetWindowLongPtrW(get(id), GWLP_USERDATA, static_cast<LONG_PTR>(std::clamp(level, 0.0f, 1.0f) * 1000));
+        if (access_) {
+            const float db = std::clamp(level * 60.0f - 60.0f, -60.0f, 0.0f);
+            wchar_t value[32];
+            std::swprintf(value, 32, L"%.1f dB", std::max(-60.0f, db));
+            const wchar_t* name = id == kSystemMeter ? L"System audio level" : L"Microphone level";
+            access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_NAME, name);
+            access_->SetHwndPropStr(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_VALUE, value);
+            VARIANT role{};
+            role.vt = VT_I4;
+            role.lVal = ROLE_SYSTEM_PROGRESSBAR;
+            access_->SetHwndProp(get(id), OBJID_CLIENT, CHILDID_SELF, PROPID_ACC_ROLE, role);
+            VariantClear(&role);
+            NotifyWinEvent(EVENT_OBJECT_VALUECHANGE, get(id), OBJID_CLIENT, CHILDID_SELF);
+        }
+        InvalidateRect(get(id), nullptr, FALSE);
     }
 
     void set_text(int id, const std::wstring& text) {
