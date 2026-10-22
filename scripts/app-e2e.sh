@@ -182,7 +182,10 @@ grep -qx 'meter-accessibility=ok' "$report"
 grep '^margins=' "$report"
 grep -qx 'status-line=ok' "$report"
 grep -qx 'screen-strip=ok' "$report"
+grep -qx 'strip-panels=ok top-bottom=shared gaps=12 reset-mute=baseline' "$report"
+grep -qx 'mixer-content-height=before:869.0 after:760.0' "$report"
 grep -qx 'camera-strip-hidden=ok' "$report"
+grep -Eqx 'key-view-order-camera-off=ok focusable=[0-9]+' "$report"
 grep -Eqx 'key-view-order=ok focusable=[0-9]+' "$report"
 grep -qx 'audio-strip-geometry=ok titles=one-line faders-aligned' "$report"
 grep -qx 'fader-direction=ok max=top min=bottom' "$report"
@@ -194,6 +197,9 @@ grep -Eqx 'paused-status=ok text=[0-9]+\.[0-9]{2} dot=[0-9]+\.[0-9]{2},[0-9]+\.[
 grep -Eq '^readout-drag=ok .*live-apply-during-drag=ok save-on-release-once=ok disabled-readout-inert=ok window-coordinates=ok ' "$report"
 grep -qx 'attention-text=ok' "$report"
 grep -qx 'camera-strip-visible=ok' "$report"
+grep -qx 'strip-panels=ok top-bottom=shared gaps=12 reset-mute=baseline camera=visible' "$report"
+grep -qx 'mixer-content-height=before:869.0 after:760.0' "$report"
+grep -Eqx 'key-view-order-camera-on=ok focusable=[0-9]+' "$report"
 check_window_png() {
   local file="$1"
   [[ -s "$file" ]] || { echo "the app window snapshot is missing: $file" >&2; exit 1; }
@@ -208,7 +214,8 @@ check_window_png() {
   grep -Eq "^snapshot-luminance.$(basename "$file")=[0-9]+\.[0-9]+$" "$report" \
     || { echo "the app window snapshot has no opaque-pixel luminance measurement: $file" >&2; exit 1; }
 }
-check_window_png "$artifacts/app-strips-m3.png"
+check_window_png "$artifacts/app-strips-m4-camera-off.png"
+check_window_png "$artifacts/app-strips-m4.png"
 check_window_png "$artifacts/app-status-row.png"
 check_window_png "$artifacts/app-recording-status.png"
 check_window_png "$artifacts/app-paused-status.png"
