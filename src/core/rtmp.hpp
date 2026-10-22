@@ -153,9 +153,11 @@ class WhipPublisher;
 class Broadcast {
 public:
     struct Counters {
-        bool live = false, reconnecting = false;
+        bool live = false, reconnecting = false, whip = false;
         std::uint32_t reconnects = 0, queued_ms = 0;
         std::uint64_t frames = 0, dropped = 0, bytes = 0;  // frames: video frames queued to send.
+        std::uint64_t pli = 0, fir = 0, nacked_packets = 0, forced_keyframes = 0, send_failures = 0;
+        std::int64_t server_lost = 0;
     };
 
     Broadcast();

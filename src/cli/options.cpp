@@ -602,11 +602,17 @@ std::string summary(const Options& options, const Stats& stats, double wall_seco
             << static_cast<int>(static_cast<double>(stats.stream_bytes) * 8 / 1000 / std::max(1.0, wall_seconds))
             << " kb/s), skipped " << stats.stream_dropped
             << (stats.stream_reconnects ? ", reconnected " + std::to_string(stats.stream_reconnects) : std::string()) << '\n';
-    for (std::uint32_t i = 0; stats.stream_count > 1 && i < stats.stream_count && i < urls.size(); ++i) {
+    for (std::uint32_t i = 0; i < stats.stream_count && i < urls.size(); ++i) {
         const auto& s = stats.streams[i];
+        if (stats.stream_count == 1 && !s.whip) continue;
         out << "  " << redact(urls[i]) << ": " << s.frames << " frames, " << std::fixed << std::setprecision(1)
             << static_cast<double>(s.bytes) / 1e6 << " MB, skipped " << s.dropped
-            << (s.reconnects ? ", reconnected " + std::to_string(s.reconnects) : std::string()) << '\n';
+            << (s.reconnects ? ", reconnected " + std::to_string(s.reconnects) : std::string());
+        if (s.whip)
+            out << ", lost " << s.server_lost << " (server), PLI " << s.pli << ", FIR " << s.fir
+                << ", NACKed packets " << s.nacked_packets << ", keyframes forced " << s.forced_keyframes
+                << ", send failures " << s.send_failures;
+        out << '\n';
     }
     return out.str();
 }

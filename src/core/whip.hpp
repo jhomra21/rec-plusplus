@@ -51,6 +51,12 @@ public:
     std::uint32_t reconnects() const noexcept { return reconnects_.load(); }
     std::uint64_t bytes() const noexcept { return bytes_.load(); }
     std::uint64_t dropped_frames() const noexcept { return dropped_.load(); }
+    std::uint64_t pli_count() const noexcept { return pli_count_.load(); }
+    std::uint64_t fir_count() const noexcept { return fir_count_.load(); }
+    std::uint64_t nacked_packets() const noexcept { return nacked_packets_.load(); }
+    std::uint64_t forced_keyframes() const noexcept { return forced_keyframes_.load(); }
+    std::uint64_t send_failures() const noexcept { return send_failures_.load(); }
+    std::int64_t server_lost() const noexcept { return server_lost_.load(); }
     std::uint32_t queued_ms() const;
     std::string failure() const;
     // The URL without its path or token, safe to print.
@@ -90,10 +96,12 @@ private:
     std::chrono::steady_clock::time_point flush_deadline_{};
     std::string failure_;
     std::thread sender_;
-    std::atomic_bool live_{false}, reconnecting_{false}, keyframe_wanted_{false};
-    std::atomic<std::int64_t> last_key_request_ns_{0};  // Last encoder request from server feedback.
+    std::atomic_bool live_{false}, reconnecting_{false}, keyframe_wanted_{false}, refresh_wanted_{false};
+    std::atomic<std::int64_t> last_key_ns_{0}, last_forced_ns_{0};
     std::atomic<std::uint32_t> reconnects_{0};
     std::atomic<std::uint64_t> bytes_{0}, dropped_{0};
+    std::atomic<std::uint64_t> pli_count_{0}, fir_count_{0}, nacked_packets_{0}, forced_keyframes_{0}, send_failures_{0};
+    std::atomic<std::int64_t> server_lost_{0};
 };
 
 } // namespace rec::core

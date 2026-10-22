@@ -279,6 +279,13 @@ public:
             const auto s = servers_.counters(i);
             auto& out = c.servers[i];
             out = {s.live && !broken, s.reconnecting && !broken, s.reconnects, s.frames, s.dropped, s.bytes, s.queued_ms};
+            out.whip = s.whip;
+            out.pli = s.pli;
+            out.fir = s.fir;
+            out.nacked_packets = s.nacked_packets;
+            out.forced_keyframes = s.forced_keyframes;
+            out.send_failures = s.send_failures;
+            out.server_lost = s.server_lost;
             c.live = c.live || out.live;
             c.reconnecting = c.reconnecting || out.reconnecting;
             c.reconnects += out.reconnects;
