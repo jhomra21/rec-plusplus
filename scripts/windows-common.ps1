@@ -327,22 +327,38 @@ public class RecRelay {
     readonly TcpListener listener;
     readonly List<TcpClient> clients = new List<TcpClient>();
     readonly int target;
+    readonly Thread acceptThread;
+    bool stopped;
     public RecRelay(int port, int target) {
         this.target = target;
         listener = new TcpListener(IPAddress.Loopback, port);
         listener.Start();
-        new Thread(Accept) { IsBackground = true }.Start();
+        acceptThread = new Thread(Accept) { IsBackground = true };
+        acceptThread.Start();
     }
     void Accept() {
-        try {
-            for (;;) {
-                var a = listener.AcceptTcpClient();
-                var b = new TcpClient("127.0.0.1", target);
-                lock (clients) { clients.Add(a); clients.Add(b); }
+        for (;;) {
+            TcpClient a = null, b = null;
+            try {
+                a = listener.AcceptTcpClient();
+                b = new TcpClient("127.0.0.1", target);
+                lock (clients) {
+                    if (stopped) {
+                        Abort(a);
+                        Abort(b);
+                        return;
+                    }
+                    clients.Add(a);
+                    clients.Add(b);
+                }
                 Pump(a, b);
                 Pump(b, a);
+            } catch (Exception) {
+                Abort(a);
+                Abort(b);
+                return;
             }
-        } catch (Exception) {}
+        }
     }
     static void Pump(TcpClient from, TcpClient to) {
         new Thread(() => {
@@ -350,9 +366,20 @@ public class RecRelay {
             try { to.Client.Shutdown(SocketShutdown.Both); } catch (Exception) {}
         }) { IsBackground = true }.Start();
     }
+    static void Abort(TcpClient client) {
+        if (client == null) return;
+        try { client.Client.LingerState = new LingerOption(true, 0); } catch (Exception) {}
+        try { client.Client.Shutdown(SocketShutdown.Both); } catch (Exception) {}
+        try { client.Close(); } catch (Exception) {}
+    }
     public void Stop() {
         listener.Stop();
-        lock (clients) { foreach (var c in clients) { try { c.Client.Close(); } catch (Exception) {} } }
+        lock (clients) {
+            stopped = true;
+            foreach (var c in clients) Abort(c);
+            clients.Clear();
+        }
+        acceptThread.Join();
     }
 }
 '@
