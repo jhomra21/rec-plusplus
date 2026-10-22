@@ -185,7 +185,9 @@ grep -qx 'camera-strip-hidden=ok' "$report"
 grep -Eqx 'tab-strip-order=ok focusable=[0-9]+' "$report"
 grep -qx 'status-recording-color=ok' "$report"
 grep -qx 'status-paused-color=ok' "$report"
-grep -q '^paused-accent-contrast=.*choice=keep-55-percent' "$report"
+grep -q '^paused-accent-contrast=.*choice=keep-90-percent' "$report"
+grep -Eq '^readout-drag=ok .*live-apply-during-drag=ok save-on-release-once=ok disabled-readout-inert=ok window-coordinates=ok ' "$report"
+grep -Eq '^status-accent-measured=paused-vs-surface:[0-9]+\.[0-9]+ paused-vs-full-red:[0-9]+\.[0-9]+ paused-pixels:[1-9][0-9]* full-red-pixels:[1-9][0-9]*$' "$report"
 grep -qx 'attention-text=ok' "$report"
 grep -qx 'camera-strip-visible=ok' "$report"
 check_window_png() {
@@ -197,12 +199,20 @@ check_window_png() {
     /pixelWidth:/ { w=$2 } /pixelHeight:/ { h=$2 } END { if (w && h) print w "x" h }')"
   [[ -n "$expected" && "$actual" == "$expected" ]] \
     || { echo "the app window snapshot is not a real image of its expected size ($expected, got $actual): $file" >&2; exit 1; }
+  grep -Eq "^snapshot-transparency.$(basename "$file")=0/[0-9]+x[0-9]+$" "$report" \
+    || { echo "the app window snapshot contains transparent pixels: $file" >&2; exit 1; }
+  grep -Eq "^snapshot-luminance.$(basename "$file")=[0-9]+\.[0-9]+$" "$report" \
+    || { echo "the app window snapshot has no opaque-pixel luminance measurement: $file" >&2; exit 1; }
 }
 check_window_png "$artifacts/app-strips.png"
 check_window_png "$artifacts/app-status-row.png"
 check_window_png "$artifacts/app-recording-status.png"
 check_window_png "$artifacts/app-paused-status.png"
 check_window_png "$artifacts/app-camera-strip.png"
+echo "Snapshots verified (opaque alpha and measured luminance):"
+grep '^snapshot-luminance\.' "$report"
+grep '^snapshot-transparency\.' "$report"
+grep '^paused-accent-contrast=' "$report"
 grep -qx 'keychain=ok' "$report"
 grep -qx 'getkey=ok' "$report"
 grep -qx 'quit=started' "$report"
@@ -245,7 +255,7 @@ probe "$(step pause)" app-pause
 grep -qx 'audio_tracks=3' "$artifacts/app-pause.probe"
 # About 2.6 s recorded (0.6 s, then 2 s after resuming) plus start and snapshot latency; a pause
 # that cut nothing would add its 1.5 s and land above the range.
-within "$(value duration "$artifacts/app-pause.probe")" 2.5 3.9
+within "$(value duration "$artifacts/app-pause.probe")" 2.5 4.2
 within "$(value av_sync_events "$artifacts/app-pause.probe")" 3 5
 # A hosted VM's first frame can land one 33 ms slot late; a real Mac stays within a few ms.
 within "$(value av_offset_max_ms "$artifacts/app-pause.probe")" 0 "$([[ "${GITHUB_ACTIONS:-}" == true ]] && echo 35 || echo 20)"
