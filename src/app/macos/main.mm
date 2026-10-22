@@ -1002,9 +1002,6 @@ struct PreviewHit {
     }
     NSButton* reset = [self button:@"Reset" action:@selector(resetColor:)];
     reset.accessibilityLabel = camera ? @"Reset camera color" : @"Reset screen color";
-    // Push buttons opt out of the automatic key loop when Full Keyboard Access is off.
-    // These resets are part of the mixer sequence, so they must accept Tab focus explicitly.
-    reset.refusesFirstResponder = NO;
     [reset.widthAnchor constraintEqualToConstant:60].active = YES;
     if (camera) _cameraColorReset = reset;
     else _screenColorReset = reset;
@@ -3162,17 +3159,29 @@ struct PreviewHit {
             [stripOrder addObject:focus];
             [trace addObject:[(NSControl*)focus accessibilityLabel] ?: focus.className];
         }
-        tabName = [trace componentsJoinedByString:@" → "];
-        NSArray<NSView*>* expected = @[self->_micMute, self->_screenColor[0], self->_screenColor[1],
-                                       self->_screenColor[2], self->_screenColorReset];
+        tabName = @"strip order ok";
+        const BOOL fullAccess = NSApp.fullKeyboardAccessEnabled;
+        // With Full Keyboard Access off, AppKit keeps push buttons and checkboxes out of the key
+        // loop (NSButton.canBecomeKeyView is NO), so only the sliders are expected then.
+        NSMutableArray<NSView*>* expected = [NSMutableArray arrayWithObjects:
+            self->_screenColor[0], self->_screenColor[1], self->_screenColor[2], nil];
+        if (fullAccess) {
+            [expected insertObject:self->_micMute atIndex:0];
+            [expected addObject:self->_screenColorReset];
+        }
         NSUInteger at = 0;
         for (NSView* view in stripOrder) if (at < expected.count && view == expected[at]) ++at;
-        if (at == expected.count) tabName = @"strip order ok";
-        const NSUInteger resetIndex = [stripOrder indexOfObject:self->_screenColorReset];
-        if (resetIndex == NSNotFound || resetIndex + 1 >= stripOrder.count || stripOrder[resetIndex + 1] != self->_systemMute)
-            tabName = @"Hidden camera strip did not skip to the next non-camera control";
+        if (at != expected.count)
+            tabName = [NSString stringWithFormat:@"Expected mixer controls were not in order: %@", [trace componentsJoinedByString:@" → "]];
+        if (fullAccess) {
+            const NSUInteger resetIndex = [stripOrder indexOfObject:self->_screenColorReset];
+            if ((resetIndex == NSNotFound || resetIndex + 1 >= stripOrder.count || stripOrder[resetIndex + 1] != self->_systemMute) &&
+                [tabName isEqualToString:@"strip order ok"])
+                tabName = @"Hidden camera strip did not skip to the next non-camera control";
+        }
         for (NSView* view in @[(NSView*)self->_cameraColor[0], self->_cameraColor[1], self->_cameraColor[2], self->_cameraColorReset])
-            if ([stripOrder containsObject:view]) tabName = @"Hidden camera control appeared in the key-view loop";
+            if ([stripOrder containsObject:view] && [tabName isEqualToString:@"strip order ok"])
+                tabName = @"Hidden camera control appeared in the key-view loop";
         NSMutableSet<NSValue*>* visited = [NSMutableSet set];
         focus = self->_systemVolume;
         BOOL returnedToStart = NO;
@@ -3184,15 +3193,17 @@ struct PreviewHit {
             [visited addObject:key];
             focus = focus.nextValidKeyView;
         }
-        if (!returnedToStart) tabName = @"Key-view loop did not return to its start";
+        if (!returnedToStart && [tabName isEqualToString:@"strip order ok"])
+            tabName = @"Key-view loop did not return to its start";
         NSArray<NSControl*>* mixerControls = @[self->_systemVolume, self->_systemMute, self->_micVolume, self->_micMute,
             self->_screenColor[0], self->_screenColor[1], self->_screenColor[2], self->_screenColorReset];
         for (NSControl* control in mixerControls) {
-            if (control.hiddenOrHasHiddenAncestor || ![control acceptsFirstResponder]) continue;
+            if (control.hiddenOrHasHiddenAncestor || ![control canBecomeKeyView]) continue;
             NSUInteger occurrences = 0;
             for (NSValue* key in visited) if (key.nonretainedObjectValue == control) ++occurrences;
-            if (occurrences != 1) tabName = [NSString stringWithFormat:@"Accessible mixer control '%@' visited %lu times",
-                ((NSControl*)control).accessibilityLabel, static_cast<unsigned long>(occurrences)];
+            if (occurrences != 1 && [tabName isEqualToString:@"strip order ok"])
+                tabName = [NSString stringWithFormat:@"Accessible mixer control '%@' visited %lu times",
+                    ((NSControl*)control).accessibilityLabel, static_cast<unsigned long>(occurrences)];
         }
     });
     if (!stripLayoutOK) fail([@"Screen strip geometry mismatch: " stringByAppendingString:stripGeometry]);
