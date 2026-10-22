@@ -3085,6 +3085,7 @@ struct PreviewHit {
     __block BOOL stripLayoutOK = NO;
     __block BOOL cameraInitiallyHidden = NO;
     __block NSString* tabName;
+    __block NSUInteger tabFocusable = 0;
     __block NSString* stripGeometry;
     ui(^{
         NSView* content = self->_window.contentView;
@@ -3124,14 +3125,13 @@ struct PreviewHit {
         }
         tabName = @"strip order ok";
         const BOOL fullAccess = NSApp.fullKeyboardAccessEnabled;
-        // With Full Keyboard Access off, AppKit keeps push buttons and checkboxes out of the key
-        // loop (NSButton.canBecomeKeyView is NO), so only the sliders are expected then.
-        NSMutableArray<NSView*>* expected = [NSMutableArray arrayWithObjects:
-            self->_screenColor[0], self->_screenColor[1], self->_screenColor[2], nil];
-        if (fullAccess) {
-            [expected insertObject:self->_micMute atIndex:0];
-            [expected addObject:self->_screenColorReset];
-        }
+        // With Full Keyboard Access off, AppKit keeps sliders, push buttons and checkboxes out of
+        // the key loop (canBecomeKeyView is NO), so only the controls that can take focus are expected.
+        NSMutableArray<NSView*>* expected = [NSMutableArray array];
+        for (NSView* view in @[(NSView*)self->_micMute, self->_screenColor[0], self->_screenColor[1],
+                               self->_screenColor[2], self->_screenColorReset])
+            if (view.canBecomeKeyView) [expected addObject:view];
+        tabFocusable = expected.count;
         NSUInteger at = 0;
         for (NSView* view in stripOrder) if (at < expected.count && view == expected[at]) ++at;
         if (at != expected.count)
@@ -3156,7 +3156,7 @@ struct PreviewHit {
             [visited addObject:key];
             focus = focus.nextValidKeyView;
         }
-        if (!returnedToStart && [tabName isEqualToString:@"strip order ok"])
+        if (self->_systemVolume.canBecomeKeyView && !returnedToStart && [tabName isEqualToString:@"strip order ok"])
             tabName = @"Key-view loop did not return to its start";
         NSArray<NSControl*>* mixerControls = @[self->_systemVolume, self->_systemMute, self->_micVolume, self->_micMute,
             self->_screenColor[0], self->_screenColor[1], self->_screenColor[2], self->_screenColorReset];
@@ -3175,7 +3175,7 @@ struct PreviewHit {
         fail([NSString stringWithFormat:@"Tab loop did not follow mixer strip order: %@", tabName]);
     note(@"screen-strip=ok");
     note(@"camera-strip-hidden=ok");
-    note(@"tab-strip-order=ok");
+    note([NSString stringWithFormat:@"tab-strip-order=ok focusable=%lu", static_cast<unsigned long>(tabFocusable)]);
     save_window_png(@"app-strips.png");
     // 30 fps keeps the check light on virtual machines.
     ui(^{ [self->_fps selectItemAtIndex:std::find(kFrameRates.begin(), kFrameRates.end(), 30u) - kFrameRates.begin()]; });
