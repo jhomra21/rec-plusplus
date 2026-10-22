@@ -1380,13 +1380,7 @@ private:
             label(value_id, L"");
             check(mute_id, L"Mute");
         }
-        // Keyboard navigation follows the audio strips left-to-right, then the recording
-        // actions; the Screen/Camera settings controls remain later in tab order.
-        button(kRecord, L"&Start Recording", BS_DEFPUSHBUTTON);
-        button(kPause, L"&Pause");
-        button(kSaveReplay, L"Save Rep&lay");
-        // Screen/Camera color controls remain in the settings columns; their tab stops follow
-        // the audio strips and recording actions until the visual-strip step.
+        // Focus order follows the mixer row: audio, Screen, Camera, then recording actions.
         label(kScreenColorLabel, wide(strip_name(rec::app::SourceRef::Kind::screen)).c_str());
         label(kScreenBrightnessLabel, L"Brightness");
         label(kScreenContrastLabel, L"Contrast");
@@ -1411,6 +1405,9 @@ private:
         for (int id : {kCameraBrightnessValue, kCameraContrastValue, kCameraSaturationValue})
             label(id, L"0");
         button(kCameraColorReset, L"Reset");
+        button(kRecord, L"&Start Recording", BS_DEFPUSHBUTTON);
+        button(kPause, L"&Pause");
+        button(kSaveReplay, L"Save Rep&lay");
         // Shown only when a permission the settings need is off.
         label(kPermission, L"");
         button(kOpenPrivacy, L"Open privacy settings");
@@ -1593,7 +1590,7 @@ private:
     }
 
     // A full-width status area over two columns of settings: what and how to record on the
-    // left, where it goes on the right. The mixer adds about 44 px at 96 DPI.
+    // left, where it goes on the right.
     void layout() {
         const int margin = px(20), column = px(420), scenes_column = px(290), label_width = px(130), row = px(26),
                   gap = px(8);
@@ -1642,15 +1639,7 @@ private:
             place(control_id, x + label_width, y, width - label_width, px(240));
             y += row + gap;
         };
-        const auto color_slider = [&](int label_id, int slider_id, int value_id, int reserved) {
-            const int value = px(50), mute = reserved;
-            place(label_id, x, y, label_width - gap, px(18));
-            const int slider = width - value - mute - 2 * gap;
-            place(slider_id, x, y + px(18), slider, px(22));
-            place(value_id, x + slider + gap, y + px(19), value, px(20));
-            y += px(40);
-        };
-        const auto strip = [&](const rec::app::Strip& model, bool visible) {
+        const auto strip = [&](const rec::app::Strip& model, bool visible, int left, int top, int strip_width) {
             if (model.kind != rec::app::Strip::Kind::visual || !model.color || !model.source) return;
             const bool camera_strip = model.source->kind == rec::app::SourceRef::Kind::camera;
             const int header_id = camera_strip ? kCameraColorLabel : kScreenColorLabel;
@@ -1671,32 +1660,27 @@ private:
                 for (int id : all_ids) ShowWindow(get(id), SW_HIDE);
                 return;
             }
-            const int top = y;
             const int inset = px(8);
             const auto put = [&](int id, int left, int top, int w, int h) {
                 place(id, left, top, w, h);
                 ShowWindow(get(id), SW_SHOWNA);
             };
-            put(header_id, x + inset, y + px(14), width - px(120) - inset, px(20));
-            put(reset_id, x + width - px(8) - px(70), y + px(12), px(70), px(22));
-            y += px(36);
+            put(header_id, left + inset, top, strip_width - 2 * inset, px(20));
+            int row_top = top + px(28);
             for (int i = 0; i < 3; ++i) {
-                const int left = x;
-                const int row_width = width;
-                x += inset;
-                width -= 2 * inset;
-                color_slider(labels[i], sliders[i], values[i], 0);
-                x = left;
-                width = row_width;
-                ShowWindow(get(labels[i]), SW_SHOWNA);
-                ShowWindow(get(sliders[i]), SW_SHOWNA);
-                ShowWindow(get(values[i]), SW_SHOWNA);
+                const int inner_left = left + inset;
+                const int inner_width = strip_width - 2 * inset;
+                const int value_width = px(34);
+                put(labels[i], inner_left, row_top, inner_width - value_width, px(16));
+                put(values[i], inner_left + inner_width - value_width, row_top, value_width, px(16));
+                put(sliders[i], inner_left, row_top + px(17), inner_width, px(24));
+                row_top += px(45);
             }
-            const int bottom = y + px(2);
-            put(box_id, x, top, width, bottom - top);
+            put(reset_id, left + strip_width - inset - px(58), row_top, px(58), px(22));
+            const int bottom = row_top + px(24);
+            put(box_id, left, top, strip_width, bottom - top);
             SetWindowPos(get(box_id), HWND_BOTTOM, 0, 0, 0, 0,
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-            y = bottom + gap;
         };
 
         // Status, levels and the record buttons on the left, the preview on the right.
@@ -1736,7 +1720,21 @@ private:
             if (model.kind != rec::app::Strip::Kind::audio || !model.input) continue;
             audio_strip(model, audio_index++);
         }
-        y += px(220) + gap;
+        const int mixer_top = y;
+        for (const auto& model : strips) {
+            if (model.kind != rec::app::Strip::Kind::visual || !model.color || !model.source) continue;
+            const bool camera = model.source->kind == rec::app::SourceRef::Kind::camera;
+            const int left = x + px(176) + (camera ? px(112) : 0);
+            strip(model, !camera || settings_.camera, left, mixer_top, px(108));
+        }
+        if (!settings_.camera) {
+            for (int id : {kCameraColorLabel, kCameraColorReset, kCameraStripBox,
+                           kCameraBrightnessLabel, kCameraContrastLabel, kCameraSaturationLabel,
+                           kCameraBrightness, kCameraContrast, kCameraSaturation,
+                           kCameraBrightnessValue, kCameraContrastValue, kCameraSaturationValue})
+                ShowWindow(get(id), SW_HIDE);
+        }
+        y = mixer_top + px(220) + gap;
         const int button_width = px(110);
         place(kRecord, x, y, width - 2 * (button_width + gap), px(40));
         place(kPause, x + width - 2 * button_width - gap, y, button_width, px(40));
@@ -1769,15 +1767,6 @@ private:
         place(kCursor, x, y, label_width - gap, px(22));
         place(kClicks, x + label_width, y, width - label_width, px(22));
         y += px(22) + gap;
-        const rec::app::Strip* screen_strip = nullptr;
-        const rec::app::Strip* camera_strip = nullptr;
-        for (const auto& model : strips) {
-            if (!model.source) continue;
-            if (model.source->kind == rec::app::SourceRef::Kind::screen) screen_strip = &model;
-            if (model.source->kind == rec::app::SourceRef::Kind::camera) camera_strip = &model;
-        }
-        if (screen_strip) strip(*screen_strip, true);
-
         header(kQualityHeader);
         pair(kResolutionLabel, kResolution, row);
         pair(kFpsLabel, kFps, row);
@@ -1873,13 +1862,6 @@ private:
         row_of(kBorderLabel, kBorder, true);
         place(kShadow, x + short_label, y, width - short_label, px(22));
         y += row + gap;
-        if (camera_strip) {
-            strip(*camera_strip, settings_.camera);
-        } else {
-            const rec::app::Strip camera{rec::app::Strip::Kind::visual, "Camera", std::nullopt,
-                rec::app::SourceRef{rec::app::SourceRef::Kind::camera, 0}, true};
-            strip(camera, false);
-        }
         place(kImage, x, y, box - gap, px(22));
         place(kImageFile, x + box, y + px(4), width - box, px(20));
         y += row;

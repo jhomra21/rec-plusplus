@@ -509,8 +509,9 @@ function Assert-StripGeometry($ui, [bool]$camera) {
     $valueId = $base + 7
     $valueRect = New-Object AppWindow+RECT
     [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, $valueId), [ref]$valueRect) | Out-Null
-    if ($valueRect.Left -le $sliderRects[0].Right -or $valueRect.Right -ge ($panelRect.Right - 2)) {
-        throw "$label value readouts are not beside the slider at the padded panel edge"
+    $labelRect = Rect-OfId $ui ($base + 1)
+    if ($valueRect.Left -ne $labelRect.Right -or $valueRect.Right -ge ($panelRect.Right - 2)) {
+        throw "$label value readouts are not beside the control labels at the padded panel edge"
     }
     if ($camera) {
         $otherValue = New-Object AppWindow+RECT
@@ -530,8 +531,42 @@ function Assert-StripGeometry($ui, [bool]$camera) {
         }
     }
     $reset = Rect-Of $ui "Reset $($label.ToLower()) color" $PushButton
+    if ($reset.Top -lt $sliderRects[2].Bottom -or $reset.Bottom -gt $panelRect.Bottom - 2) {
+        throw "$label Reset is not below the visual controls inside the strip"
+    }
     $header = Rect-Of $ui $label 41
-    if ([Math]::Abs($header.Top - $reset.Top) -gt 4) { throw "$label Reset is not on the header row" }
+    $audioTop = Rect-OfId $ui 103
+    if ([Math]::Abs($panelRect.Top - $audioTop.Top) -gt 2 -or [Math]::Abs($header.Top - $audioTop.Top) -gt 2) {
+        throw "$label strip does not share the audio strips' top edge"
+    }
+}
+function Snapshot-VisualMixerDpi($ui, [string]$directory) {
+    $originalDpi = [int][AppWindow]::GetDpiForWindow($ui.Window)
+    $baseRect = New-Object AppWindow+RECT
+    if (-not [AppWindow]::GetWindowRect($ui.Window, [ref]$baseRect)) { throw 'GetWindowRect failed before visual mixer DPI checks' }
+    try {
+        foreach ($dpi in @(96, 144, 192)) {
+            if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect $originalDpi }
+            Assert-StripGeometry $ui $false
+            Assert-StripGeometry $ui $true
+            Write-Host "M4. visual strip geometry: Screen/Camera top edge aligned; Reset below controls at $dpi DPI"
+            $bitmap = Snapshot-Window $ui (Join-Path $directory "app-visual-strips-dpi-$dpi.png")
+            try {
+                $screen = Rect-OfId $ui 311
+                $camera = Rect-OfId $ui 331
+                [AppWindow]::MapWindowPoints([IntPtr]::Zero, $ui.Window, [ref]$screen, 2) | Out-Null
+                [AppWindow]::MapWindowPoints([IntPtr]::Zero, $ui.Window, [ref]$camera, 2) | Out-Null
+                $left = [Math]::Max(0, $screen.Left - 8)
+                $top = [Math]::Max(0, $screen.Top - 8)
+                $right = [Math]::Min($bitmap.Width, $camera.Right + 8)
+                $bottom = [Math]::Min($bitmap.Height, [Math]::Max($screen.Bottom, $camera.Bottom) + 8)
+                if ($right -le $left -or $bottom -le $top) { throw "visual strip crop is outside the window at $dpi DPI" }
+                $crop = $bitmap.Clone((New-Object System.Drawing.Rectangle $left, $top, ($right - $left), ($bottom - $top)), $bitmap.PixelFormat)
+                try { $crop.Save((Join-Path $directory "app-visual-strips-dpi-$dpi.png"), [System.Drawing.Imaging.ImageFormat]::Png) }
+                finally { $crop.Dispose() }
+            } finally { $bitmap.Dispose() }
+        }
+    } finally { Set-TestDpi $ui $originalDpi $baseRect $originalDpi }
 }
 function Rect-OfId($ui, [int]$id) {
     $r = New-Object AppWindow+RECT
@@ -889,7 +924,7 @@ $bitmap.Save($overlayImage, [System.Drawing.Imaging.ImageFormat]::Png)
 $bitmap.Dispose()
 # 30 fps keeps the check light on CI runners, which encode in software and draw with WARP;
 # at 60 fps a slow runner fell over 500 ms behind in the camera step and dropped frames.
-[IO.File]::WriteAllText((Join-Path $appHome 'settings.conf'), "fps=30`ncamera_device=test`nimage_path=$overlayImage`nkeep_recording=no`n")
+[IO.File]::WriteAllText((Join-Path $appHome 'settings.conf'), "fps=30`ncamera=0`ncamera_device=test`nimage_path=$overlayImage`nkeep_recording=no`n")
 # The app's recordings run in a background engine; this home has its own.
 $engineSocket = Join-Path $appHome 'engine.sock'
 # A rec command on this home's engine; its output, errors included.
@@ -921,10 +956,11 @@ try {
     Write-Host "Status row snapshot: $(Join-Path $Artifacts 'app-status-row.png')"
     if ([AppWindow]::IsWindowVisible((Find $ui 'Camera brightness' $Slider).Handle)) { throw 'Camera strip is visible while Camera is off' }
     Assert-StripVisibility $ui @(320..331) $false 'Camera'
+    Write-Host 'M4. camera strip visibility: all controls hidden while Camera is off'
     Find $ui 'Screen' 41 | Out-Null
     $screenHeader = Rect-Of $ui 'Screen' 41
     $screenReset = Rect-Of $ui 'Reset screen color' $PushButton
-    if ([Math]::Abs($screenHeader.Top - $screenReset.Top) -gt 4) { throw 'Screen Reset is not on the header row' }
+    if ($screenReset.Top -le $screenHeader.Bottom) { throw 'Screen Reset is not below the visual strip controls' }
     Show-TrackbarClassStyle $ui
     $screenSlider = (Find $ui 'Screen brightness' $Slider).Handle
     $volumeSlider = (Find $ui 'System audio volume' $Slider).Handle
@@ -940,18 +976,24 @@ try {
     $volumeValueRect = New-Object AppWindow+RECT
     [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 307), [ref]$screenValueRect) | Out-Null
     [AppWindow]::GetWindowRect([AppWindow]::GetDlgItem($ui.Window, 106), [ref]$volumeValueRect) | Out-Null  # kSystemVolumeText
-    if ($screenValueRect.Left -le $screenSliderRect.Right -or
-        [Math]::Abs($screenValueRect.Right - ($screenPanelRect.Right - 2 * $stripInset)) -gt 2) {
-        throw 'Screen value labels are not beside the slider at the inset panel edge'
+    $screenLabelRect = Rect-OfId $ui 301
+    if ($screenValueRect.Left -ne $screenLabelRect.Right -or
+        $screenValueRect.Right -gt ($screenPanelRect.Right - $stripInset + 2)) {
+        throw 'Screen value labels are not beside their labels inside the strip'
     }
     Snapshot-StripDpi $ui $Artifacts 'app-strips'
     Set-Check $ui 'Camera' $true
     Assert-StripVisibility $ui @(320..331) $true 'Camera'
+    if (-not [AppWindow]::IsWindowVisible((Find $ui 'Camera brightness' $Slider).Handle)) {
+        throw 'Camera brightness is not visible after enabling Camera'
+    }
+    Write-Host 'M4. camera strip visibility: brightness visible after Camera is enabled'
     $cameraStripBitmap = Snapshot-Window $ui (Join-Path $Artifacts 'app-strips-camera-contrast.png')
     try {
         if (-not (High-Contrast)) { Expect-Strip $ui $cameraStripBitmap 320 $script:appSurfaceMean }
     } finally { $cameraStripBitmap.Dispose() }
     Snapshot-StripDpi $ui $Artifacts 'app-strips-camera'
+    Snapshot-VisualMixerDpi $ui $Artifacts
     Set-Check $ui 'Camera' $false
     Assert-StripVisibility $ui @(320..331) $false 'Camera'
     $cameraOff = Join-Path $Artifacts 'app-strips-camera-off.png'
@@ -1022,6 +1064,7 @@ try {
     # 1. Record, pause, resume, stop: 2 + 2 s recorded around a 1.5 s pause.
     Set-Check $ui 'System audio' $true
     Set-Check $ui 'Microphone' $true
+    Set-Check $ui 'Camera' $true
     $micFader = (Find $ui 'Microphone volume' $Slider).Handle
     [AppWindow]::SetForegroundWindow($ui.Window) | Out-Null
     Wait-Until { [AppWindow]::GetForegroundWindow() -eq $ui.Window } 'refusing to send Tab because the test app window is not foreground' 5
@@ -1045,10 +1088,18 @@ try {
         if ($tabName -ne 'Mute mic') { throw "Tab after Microphone volume reached '$tabName', not Mute mic" }
         [Windows.Forms.SendKeys]::SendWait('{TAB}')
         $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
-        if ($tabName -ne 'Start Recording') { throw "Tab after Mute mic reached '$tabName', not Start Recording" }
+        if ($tabName -ne 'Screen brightness') { throw "Tab after Mute mic reached '$tabName', not Screen brightness" }
+        foreach ($expected in @('Screen contrast', 'Screen saturation', 'Reset screen color',
+                                'Camera brightness', 'Camera contrast', 'Camera saturation',
+                                'Reset camera color', 'Start Recording')) {
+            [Windows.Forms.SendKeys]::SendWait('{TAB}')
+            $tabName = ([AppWindow]::Of((Focused-Control $ui))).accName(0)
+            if ($tabName -ne $expected) { throw "Tab order reached '$tabName', not '$expected'" }
+        }
     } finally {
         [AppWindow]::AttachThreadInput($testThread, $mainThread, $false) | Out-Null
     }
+    Set-Check $ui 'Camera' $false
     Press $ui 'Start Recording'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
     $recordShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-recording.png')
@@ -1257,7 +1308,7 @@ try {
     if (-not [AppWindow]::IsWindowVisible((Find $ui 'Camera brightness' $Slider).Handle)) { throw 'Camera strip stayed hidden after Camera was enabled' }
     $cameraHeader = Rect-Of $ui 'Camera' 41
     $cameraReset = Rect-Of $ui 'Reset camera color' $PushButton
-    if ([Math]::Abs($cameraHeader.Top - $cameraReset.Top) -gt 4) { throw 'Camera Reset is not on the header row' }
+    if ($cameraReset.Top -le $cameraHeader.Bottom) { throw 'Camera Reset is not below the visual strip controls' }
     Assert-StripGeometry $ui $true
     Set-Check $ui 'Image overlay' $true
     # Before Start the preview already shows the scene; with Show preview off it stops.
