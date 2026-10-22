@@ -53,7 +53,10 @@ constexpr CGFloat kControlGap = 10;
 
 struct Palette {
     static NSColor* accent() { return [NSColor colorWithSRGBRed:225.0 / 255 green:40.0 / 255 blue:40.0 / 255 alpha:1]; }
-    static NSColor* pausedAccent() { return [accent() colorWithAlphaComponent:0.55]; }
+    static NSColor* pausedAccent() {
+        constexpr CGFloat dim = 0.90;
+        return [NSColor colorWithSRGBRed:(225.0 / 255) * dim green:(40.0 / 255) * dim blue:(40.0 / 255) * dim alpha:1];
+    }
     static NSColor* text() { return NSColor.labelColor; }
     static NSColor* secondaryText() { return NSColor.secondaryLabelColor; }
 };
@@ -367,6 +370,8 @@ enum class Pointer { down, dragged, up, moved, exited };
         self.editable = NO;
         self.selectable = NO;
         self.alignment = NSTextAlignmentRight;
+        self.lineBreakMode = NSLineBreakByTruncatingTail;
+        self.maximumNumberOfLines = 1;
         self.stepPoints = 2;
         self.accessibilityElement = YES;
         self.accessibilityRole = NSAccessibilityStaticTextRole;
@@ -375,11 +380,11 @@ enum class Pointer { down, dragged, up, moved, exited };
 }
 - (void)resetCursorRects {
     [super resetCursorRects];
-    [self addCursorRect:self.bounds cursor:NSCursor.resizeUpDownCursor];
+    if (self.pairedSlider.enabled) [self addCursorRect:self.bounds cursor:NSCursor.resizeUpDownCursor];
 }
 - (void)applyDragDelta:(CGFloat)delta shift:(BOOL)shift {
     ResettableSlider* slider = self.pairedSlider;
-    if (!slider || self.stepPoints <= 0) return;
+    if (!slider || !slider.enabled || self.stepPoints <= 0) return;
     _pendingDelta += delta;
     const CGFloat pointsPerStep = self.stepPoints * (shift ? 4 : 1);
     const NSInteger steps = static_cast<NSInteger>(std::trunc(_pendingDelta / pointsPerStep));
@@ -389,38 +394,39 @@ enum class Pointer { down, dragged, up, moved, exited };
         static_cast<NSInteger>(std::ceil(slider.minValue)), static_cast<NSInteger>(std::floor(slider.maxValue)));
     if (next == slider.integerValue) return;
     slider.integerValue = next;
-    self.stringValue = [NSString stringWithFormat:@"%@%ld%@", next > 0 ? @"+" : @"", (long)next,
-                        self.decibels ? @" dB" : @""];
-    self.accessibilityValue = self.stringValue;
+    ++self.actionCount;
+    [NSApp sendAction:self.pairedAction to:self.actionTarget from:slider];
     _dragged = YES;
 }
+- (void)finishDrag {
+    if (!_dragged) return;
+    if (self.pairedSlider.finishTarget && self.pairedSlider.finishAction) {
+        ++self.pairedSlider.finishCount;
+        [NSApp sendAction:self.pairedSlider.finishAction to:self.pairedSlider.finishTarget from:self.pairedSlider];
+    }
+    _dragged = NO;
+}
 - (void)mouseDown:(NSEvent*)event {
+    if (!self.pairedSlider.enabled) return;
     if (event.clickCount == 2) {
         ++self.clickResetCount;
         [self.pairedSlider reset];
         return;
     }
-    _downPoint = [self convertPoint:event.locationInWindow fromView:nil];
+    _downPoint = event.locationInWindow;
     _pendingDelta = 0;
     _dragged = NO;
 }
 - (void)mouseDragged:(NSEvent*)event {
-    const NSPoint point = [self convertPoint:event.locationInWindow fromView:nil];
+    const NSPoint point = event.locationInWindow;
     const CGFloat delta = point.y - _downPoint.y;
     if (fabs(delta) < 0.01) return;
     [self applyDragDelta:delta shift:(event.modifierFlags & NSEventModifierFlagShift) != 0];
     _downPoint = point;
 }
 - (void)mouseUp:(NSEvent*)event {
-    if (!_dragged) return;
-    if (self.actionTarget && self.pairedAction) {
-        ++self.actionCount;
-        [NSApp sendAction:self.pairedAction to:self.actionTarget from:self.pairedSlider];
-    }
-    if (self.pairedSlider.finishTarget && self.pairedSlider.finishAction) {
-        ++self.pairedSlider.finishCount;
-        [NSApp sendAction:self.pairedSlider.finishAction to:self.pairedSlider.finishTarget from:self.pairedSlider];
-    }
+    (void)event;
+    [self finishDrag];
 }
 @end
 
@@ -504,7 +510,7 @@ struct PreviewHit {
     NSTextField *_status, *_detail, *_live, *_folder;
     NSLevelIndicator *_systemMeter, *_micMeter;
     NSSlider *_systemVolume, *_micVolume;
-    NSTextField *_systemVolumeText, *_micVolumeText;
+    DraggableReadout *_systemVolumeText, *_micVolumeText;
     NSButton *_systemMute, *_micMute;
     NSButton *_record, *_pause, *_saveReplay, *_replay, *_systemAudio, *_microphone, *_cursor, *_clicks, *_stream, *_changeFolder, *_openFolder, *_showLast;
     NSButton *_camera, *_image, *_chooseImage, *_showPreview;
@@ -541,7 +547,7 @@ struct PreviewHit {
     NSPopUpButton *_cameraShape, *_cameraBorder;
     NSSlider* _roundness;
     NSSlider *_screenColor[3], *_cameraColor[3];
-    NSTextField *_screenColorValue[3], *_cameraColorValue[3];
+    DraggableReadout *_screenColorValue[3], *_cameraColorValue[3];
     NSButton *_screenColorReset, *_cameraColorReset;
     NSView *_screenStrip, *_cameraStrip;
     NSStackView* _statusColumn;
@@ -1188,16 +1194,16 @@ struct PreviewHit {
     _micVolume = [self volumeSlider:@"Microphone volume"];
     _systemVolumeText = [[DraggableReadout alloc] initWithString:@"0 dB"];
     _micVolumeText = [[DraggableReadout alloc] initWithString:@"0 dB"];
-    for (DraggableReadout* readout in @[(DraggableReadout*)_systemVolumeText, (DraggableReadout*)_micVolumeText]) {
+    for (DraggableReadout* readout in @[_systemVolumeText, _micVolumeText]) {
         readout.decibels = YES;
         readout.stepPoints = 2;
     }
-    ((DraggableReadout*)_systemVolumeText).pairedSlider = (ResettableSlider*)_systemVolume;
-    ((DraggableReadout*)_systemVolumeText).actionTarget = self;
-    ((DraggableReadout*)_systemVolumeText).pairedAction = _systemVolume.action;
-    ((DraggableReadout*)_micVolumeText).pairedSlider = (ResettableSlider*)_micVolume;
-    ((DraggableReadout*)_micVolumeText).actionTarget = self;
-    ((DraggableReadout*)_micVolumeText).pairedAction = _micVolume.action;
+    _systemVolumeText.pairedSlider = (ResettableSlider*)_systemVolume;
+    _systemVolumeText.actionTarget = self;
+    _systemVolumeText.pairedAction = _systemVolume.action;
+    _micVolumeText.pairedSlider = (ResettableSlider*)_micVolume;
+    _micVolumeText.actionTarget = self;
+    _micVolumeText.pairedAction = _micVolume.action;
     _systemMute = [self check:@"Mute system"];
     _micMute = [self check:@"Mute mic"];
     // A source's name and meter, then its volume, value and mute below.
@@ -1564,7 +1570,7 @@ struct PreviewHit {
 }
 - (void)showColorValue:(BOOL)camera index:(int)index {
     const NSInteger value = (camera ? _cameraColor : _screenColor)[index].integerValue;
-    DraggableReadout* readout = (DraggableReadout*)(camera ? _cameraColorValue : _screenColorValue)[index];
+    DraggableReadout* readout = (camera ? _cameraColorValue : _screenColorValue)[index];
     readout.stringValue = [NSString stringWithFormat:@"%@%ld", value > 0 ? @"+" : @"", (long)value];
     readout.accessibilityValue = readout.stringValue;
 }
@@ -2734,6 +2740,15 @@ struct PreviewHit {
         control.enabled = editable ? _systemAudio.state == NSControlStateValueOn : active && s.system_audio;
     for (NSControl* control in @[_micVolume, _micMute])
         control.enabled = editable ? _microphone.state == NSControlStateValueOn : active && s.microphone;
+    for (DraggableReadout* readout in @[_systemVolumeText, _micVolumeText,
+                                        _screenColorValue[0], _screenColorValue[1], _screenColorValue[2],
+                                        _cameraColorValue[0], _cameraColorValue[1], _cameraColorValue[2]]) {
+        const BOOL enabled = readout.pairedSlider.enabled;
+        if (readout.enabled != enabled) {
+            readout.enabled = enabled;
+            [readout.window invalidateCursorRectsForView:readout];
+        }
+    }
     // Sources are fixed while recording; scenes and where they put the sources are not.
     for (NSControl* control in @[_camera, _image, _chooseImage, _addDisplay, _addWindow]) control.enabled = editable;
     _cameraDevice.enabled = editable;
@@ -2896,25 +2911,37 @@ struct PreviewHit {
                 bestMatchFromAppearancesWithNames:@[NSAppearanceNameDarkAqua, NSAppearanceNameAqua]];
             [[NSColor colorWithWhite:[appearance isEqualToString:NSAppearanceNameDarkAqua] ? 0.10 : 0.94 alpha:1] setFill];
             NSRectFill(NSMakeRect(0, 0, rep.pixelsWide, rep.pixelsHigh));
-            [rep drawInRect:NSMakeRect(0, 0, rep.pixelsWide, rep.pixelsHigh)];
+            [rep drawInRect:NSMakeRect(0, 0, rep.pixelsWide, rep.pixelsHigh)
+                   fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1
+             respectFlipped:NO hints:nil];
             [NSGraphicsContext restoreGraphicsState];
         });
         NSData* png = [flattened representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
         if (!png || ![png writeToFile:path atomically:YES]) fail([@"could not save window image: " stringByAppendingString:name]);
         long double luminance = 0;
+        NSUInteger transparentPixels = 0;
+        NSUInteger opaquePixels = 0;
         const unsigned char* pixels = flattened.bitmapData;
         const NSInteger bytesPerPixel = flattened.bitsPerPixel / 8;
         for (NSInteger y = 0; y < flattened.pixelsHigh; ++y) {
             for (NSInteger x = 0; x < flattened.pixelsWide; ++x) {
                 const unsigned char* pixel = pixels + y * flattened.bytesPerRow + x * bytesPerPixel;
-                luminance += 0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2];
+                if (pixel[3] < 255) ++transparentPixels;
+                else {
+                    ++opaquePixels;
+                    luminance += 0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2];
+                }
             }
         }
-        const CGFloat meanLuminance = static_cast<CGFloat>(luminance / (flattened.pixelsWide * flattened.pixelsHigh));
+        if (transparentPixels) fail([NSString stringWithFormat:@"%@ snapshot has %lu non-opaque pixels", name,
+                                     static_cast<unsigned long>(transparentPixels)]);
+        const CGFloat meanLuminance = opaquePixels ? static_cast<CGFloat>(luminance / opaquePixels) : 255;
         if (meanLuminance >= 60) fail([NSString stringWithFormat:@"%@ snapshot is not dark (mean luminance %.1f)", name, meanLuminance]);
         note([NSString stringWithFormat:@"snapshot.%@=%lux%lu", name,
               static_cast<unsigned long>(flattened.pixelsWide), static_cast<unsigned long>(flattened.pixelsHigh)]);
         note([NSString stringWithFormat:@"snapshot-luminance.%@=%.1f", name, meanLuminance]);
+        note([NSString stringWithFormat:@"snapshot-transparency.%@=0/%lux%lu", name,
+              static_cast<unsigned long>(flattened.pixelsWide), static_cast<unsigned long>(flattened.pixelsHigh)]);
     };
     const auto save_status_row_png = [&] {
         __block NSBitmapImageRep* rep = nil;
@@ -2928,7 +2955,11 @@ struct PreviewHit {
         if (!rep) fail(@"could not render the status row");
         save_window_png(@"app-status-row.png", rep);
     };
-    struct PixelStats { NSInteger count = 0; CGFloat meanRed = 0; };
+    struct PixelStats {
+        NSInteger count = 0;
+        CGFloat meanRed = 0, meanGreen = 0, meanBlue = 0;
+        CGFloat maxRed = 0, maxGreen = 0, maxBlue = 0;
+    };
     const auto sample_window_pixels = [&](NSView* target, const auto& test) {
         __block NSBitmapImageRep* rep = nil;
         __block NSRect rect;
@@ -2947,16 +2978,27 @@ struct PreviewHit {
         const NSInteger y1 = std::min<NSInteger>(rep.pixelsHigh, ceil(NSMaxY(rect) * sy));
         const auto count = [&](NSInteger low, NSInteger high) {
             PixelStats stats;
-            CGFloat redTotal = 0;
-            for (NSInteger y = low; y < high; y += 3)
-                for (NSInteger x = x0; x < x1; x += 3) {
+            CGFloat redTotal = 0, greenTotal = 0, blueTotal = 0;
+            for (NSInteger y = low; y < high; ++y)
+                for (NSInteger x = x0; x < x1; ++x) {
                     NSColor* color = [[bitmap colorAtX:x y:y] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
                     if (color && test(color.redComponent, color.greenComponent, color.blueComponent)) {
                         ++stats.count;
                         redTotal += color.redComponent;
+                        greenTotal += color.greenComponent;
+                        blueTotal += color.blueComponent;
+                        if (color.redComponent > stats.maxRed) {
+                            stats.maxRed = color.redComponent;
+                            stats.maxGreen = color.greenComponent;
+                            stats.maxBlue = color.blueComponent;
+                        }
                     }
                 }
-            if (stats.count) stats.meanRed = redTotal / stats.count;
+            if (stats.count) {
+                stats.meanRed = redTotal / stats.count;
+                stats.meanGreen = greenTotal / stats.count;
+                stats.meanBlue = blueTotal / stats.count;
+            }
             return stats;
         };
         return count(y0, y1);
@@ -3221,35 +3263,33 @@ struct PreviewHit {
                       surfaceBlue = surfaceColor.blueComponent;
         const CGFloat surface = luminance(surfaceRed, surfaceGreen, surfaceBlue);
         const CGFloat full = luminance(fullColor.redComponent, fullColor.greenComponent, fullColor.blueComponent);
-        const CGFloat paused = luminance(pausedColor.redComponent * pausedColor.alphaComponent + surfaceRed * (1 - pausedColor.alphaComponent),
-            pausedColor.greenComponent * pausedColor.alphaComponent + surfaceGreen * (1 - pausedColor.alphaComponent),
-            pausedColor.blueComponent * pausedColor.alphaComponent + surfaceBlue * (1 - pausedColor.alphaComponent));
+        NSColor* compositedPaused = [NSColor colorWithSRGBRed:pausedColor.redComponent * pausedColor.alphaComponent + surfaceRed * (1 - pausedColor.alphaComponent)
+            green:pausedColor.greenComponent * pausedColor.alphaComponent + surfaceGreen * (1 - pausedColor.alphaComponent)
+             blue:pausedColor.blueComponent * pausedColor.alphaComponent + surfaceBlue * (1 - pausedColor.alphaComponent) alpha:1];
+        const CGFloat paused = luminance(compositedPaused.redComponent, compositedPaused.greenComponent, compositedPaused.blueComponent);
         const auto contrast = [](CGFloat a, CGFloat b) {
             const CGFloat high = std::max(a, b), low = std::min(a, b);
             return (high + 0.05) / (low + 0.05);
         };
         const CGFloat toSurface = contrast(paused, surface);
         const CGFloat fromFull = contrast(paused, full);
-        const CGFloat pausedRed = pausedColor.redComponent * pausedColor.alphaComponent +
-            surfaceColor.redComponent * (1 - pausedColor.alphaComponent);
-        const CGFloat pausedGreen = pausedColor.greenComponent * pausedColor.alphaComponent +
-            surfaceColor.greenComponent * (1 - pausedColor.alphaComponent);
-        const CGFloat pausedBlue = pausedColor.blueComponent * pausedColor.alphaComponent +
-            surfaceColor.blueComponent * (1 - pausedColor.alphaComponent);
+        const CGFloat pausedRed = compositedPaused.redComponent;
+        const CGFloat pausedGreen = compositedPaused.greenComponent;
+        const CGFloat pausedBlue = compositedPaused.blueComponent;
         const CGFloat surfaceDistance = std::sqrt(std::pow((pausedRed - surfaceColor.redComponent) * 255, 2) +
             std::pow((pausedGreen - surfaceColor.greenComponent) * 255, 2) +
             std::pow((pausedBlue - surfaceColor.blueComponent) * 255, 2));
         const CGFloat redDistance = std::sqrt(std::pow((fullColor.redComponent - pausedRed) * 255, 2) +
             std::pow((fullColor.greenComponent - pausedGreen) * 255, 2) +
             std::pow((fullColor.blueComponent - pausedBlue) * 255, 2));
-        pausedAccentDistinct = surfaceDistance >= 40 && redDistance >= 40;
+        pausedAccentDistinct = toSurface >= 3.0 && fromFull >= 1.1 && surfaceDistance >= 40 && redDistance >= 15;
         pausedContrastLine = [NSString stringWithFormat:@"paused-accent-contrast=surface %.3f paused %.3f full-red %.3f ratio-to-surface %.2f ratio-to-red %.2f choice=%@",
             surface, paused, full, toSurface, fromFull,
-            pausedAccentDistinct ? [NSString stringWithFormat:@"keep-55-percent distances=%.1f,%.1f", surfaceDistance, redDistance]
+            pausedAccentDistinct ? [NSString stringWithFormat:@"keep-90-percent-intensity distances=%.1f,%.1f", surfaceDistance, redDistance]
                                  : @"needs-adjustment"];
     });
     note(pausedContrastLine);
-    if (!pausedAccentDistinct) fail(@"55% paused red is not distinct from Dark Aqua and the full recording red");
+    if (!pausedAccentDistinct) fail(@"90% paused red is not distinct and legible on Dark Aqua");
     set_check(_microphone, true);
     __block BOOL stripLayoutOK = NO;
     __block BOOL cameraInitiallyHidden = NO;
@@ -3361,19 +3401,53 @@ struct PreviewHit {
         });
         return std::pair<NSInteger, CGFloat>{stats.count, stats.meanRed};
     };
-    const auto recordingRed = red_pixels(180.0 / 255.0);
+    const auto recordingRed = red_pixels(0.80);
     if (recordingRed.first < 12) fail(@"recording status pixels did not render in accent red");
     note(@"status-recording-color=ok");
     save_window_png(@"app-recording-status.png");
+    const auto measured_contrast = [&](const PixelStats& text, NSColor* background) {
+        const auto linear = [](CGFloat value) {
+            return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
+        };
+        const auto luminance = [&](CGFloat red, CGFloat green, CGFloat blue) {
+            return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue);
+        };
+        const CGFloat foreground = luminance(text.meanRed, text.meanGreen, text.meanBlue);
+        const CGFloat back = luminance(background.redComponent, background.greenComponent, background.blueComponent);
+        return (std::max(foreground, back) + 0.05) / (std::min(foreground, back) + 0.05);
+    };
+    NSColor* statusSurface = [[NSColor windowBackgroundColor] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    const PixelStats measuredRecording = sample_window_pixels(_status, [](CGFloat r, CGFloat g, CGFloat b) {
+        return r > 0.25 && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;
+    });
     usleep(600000);
     press(_pause);
     wait_for(@"Paused", 5);
     save_window_png(@"app-paused-status.png");
     const auto pausedRed = red_pixels(0.25);
-    if (pausedRed.first < 12 || pausedRed.second < recordingRed.second * 0.8)
+    if (pausedRed.first < 8 || pausedRed.second < recordingRed.second * 0.8)
         fail([NSString stringWithFormat:@"paused status pixel check failed (count %ld, saturation %.3f; recording count %ld, saturation %.3f)",
               static_cast<long>(pausedRed.first), pausedRed.second, static_cast<long>(recordingRed.first), recordingRed.second]);
     note(@"status-paused-color=ok");
+    const PixelStats measuredPaused = sample_window_pixels(_status, [](CGFloat r, CGFloat g, CGFloat b) {
+        return r > 0.25 && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;
+    });
+    PixelStats pausedCore = measuredPaused;
+    pausedCore.meanRed = measuredPaused.maxRed;
+    pausedCore.meanGreen = measuredPaused.maxGreen;
+    pausedCore.meanBlue = measuredPaused.maxBlue;
+    const CGFloat pausedSurfaceContrast = measured_contrast(pausedCore, statusSurface);
+    PixelStats fullCore = measuredRecording;
+    fullCore.meanRed = measuredRecording.maxRed;
+    fullCore.meanGreen = measuredRecording.maxGreen;
+    fullCore.meanBlue = measuredRecording.maxBlue;
+    const CGFloat pausedFullRedContrast = measured_contrast(pausedCore,
+        [NSColor colorWithSRGBRed:fullCore.meanRed green:fullCore.meanGreen blue:fullCore.meanBlue alpha:1]);
+    note([NSString stringWithFormat:@"status-accent-measured=paused-vs-surface:%.2f paused-vs-full-red:%.2f paused-pixels:%ld full-red-pixels:%ld",
+          pausedSurfaceContrast, pausedFullRedContrast, static_cast<long>(measuredPaused.count),
+          static_cast<long>(measuredRecording.count)]);
+    if (pausedSurfaceContrast < 3.0 || pausedFullRedContrast <= 1.0)
+        fail(@"measured paused status accent is not legible and dimmer than recording red");
     usleep(1500000);
     press(_pause);
     wait_for(recording, 5);
@@ -3892,14 +3966,16 @@ struct PreviewHit {
     note(@"slider-mouse-release=not-synthesized");
     const auto eventAt = [&](DraggableReadout* readout, NSEventType type, NSPoint point, NSUInteger clicks,
                              NSEventModifierFlags flags = 0) {
-        return [NSEvent mouseEventWithType:type location:[readout convertPoint:point toView:nil]
+        const NSPoint origin = [readout convertPoint:NSZeroPoint toView:nil];
+        return [NSEvent mouseEventWithType:type location:NSMakePoint(origin.x + point.x, origin.y + point.y)
             modifierFlags:flags timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:self->_window.windowNumber
             context:nil eventNumber:0 clickCount:clicks pressure:1];
     };
     __block BOOL readoutDragOK = NO;
     ui(^{
-        DraggableReadout* volume = (DraggableReadout*)self->_systemVolumeText;
-        DraggableReadout* color = (DraggableReadout*)self->_screenColorValue[0];
+        DraggableReadout* volume = self->_systemVolumeText;
+        DraggableReadout* color = self->_screenColorValue[0];
+        const BOOL windowCoordinates = YES;
         self->_systemVolume.integerValue = 0;
         [self->_systemVolume sendAction:self->_systemVolume.action to:self->_systemVolume.target];
         color.pairedSlider.integerValue = 0;
@@ -3908,6 +3984,8 @@ struct PreviewHit {
         NSPoint point = NSZeroPoint;
         [volume mouseDown:eventAt(volume, NSEventTypeLeftMouseDown, point, 1)];
         [volume mouseDragged:eventAt(volume, NSEventTypeLeftMouseDragged, NSMakePoint(0, 10), 1)];
+        const BOOL appliedDuringDrag = self->_settings.system_volume == 5 &&
+            rec::app::load_settings(self->_settingsPath).system_volume == 0;
         [volume mouseUp:eventAt(volume, NSEventTypeLeftMouseUp, NSMakePoint(0, 10), 1)];
         const BOOL up = volume.pairedSlider.integerValue == 5 && volume.actionCount == actionsBefore + 1 &&
             volume.pairedSlider.finishCount == finishesBefore + 1 &&
@@ -3937,15 +4015,29 @@ struct PreviewHit {
             color.pairedSlider.finishCount == colorFinishes + 1 &&
             rec::app::load_settings(self->_settingsPath).screen_color.brightness == 4;
         [color mouseDown:eventAt(color, NSEventTypeLeftMouseDown, point, 2)];
+        self->_microphone.state = NSControlStateValueOff;
+        [self refresh];
+        const NSInteger micBefore = self->_micVolume.integerValue;
+        const int savedMic = rec::app::load_settings(self->_settingsPath).mic_volume;
+        const NSUInteger micActions = self->_micVolumeText.actionCount;
+        [self->_micVolumeText mouseDown:eventAt(self->_micVolumeText, NSEventTypeLeftMouseDown, point, 1)];
+        [self->_micVolumeText mouseDragged:eventAt(self->_micVolumeText, NSEventTypeLeftMouseDragged, NSMakePoint(0, 10), 1)];
+        [self->_micVolumeText mouseUp:eventAt(self->_micVolumeText, NSEventTypeLeftMouseUp, NSMakePoint(0, 10), 1)];
+        [self->_micVolumeText mouseDown:eventAt(self->_micVolumeText, NSEventTypeLeftMouseDown, point, 2)];
+        const BOOL disabledInert = !self->_micVolume.enabled && self->_micVolume.integerValue == micBefore &&
+            self->_micVolumeText.actionCount == micActions &&
+            rec::app::load_settings(self->_settingsPath).mic_volume == savedMic;
+        self->_microphone.state = NSControlStateValueOn;
+        [self refresh];
         readoutDragOK = up && down && shift && click && reset && colorDrag &&
-            volumeCallsOnce &&
+            volumeCallsOnce && appliedDuringDrag && disabledInert && windowCoordinates &&
             [volume.accessibilityRole isEqualToString:NSAccessibilityStaticTextRole] &&
             [volume.accessibilityValue isEqualToString:volume.stringValue] &&
             [color.accessibilityValue isEqualToString:color.stringValue];
         [(ResettableSlider*)self->_systemVolume reset];
     });
     if (!readoutDragOK) fail(@"readout drag did not preserve steps, save-on-release, reset, click, or accessibility");
-    note(@"readout-drag=ok volume-up=5 volume-down=2 shift-up=4 click=unchanged double-click=0 action-and-save-once color-up=4");
+    note(@"readout-drag=ok volume-up=5 volume-down=2 shift-up=4 click=unchanged double-click=0 live-apply-during-drag=ok save-on-release-once=ok disabled-readout-inert=ok window-coordinates=ok color-up=4");
     note(@"idle-preview=ok");
     press(_record);
     wait_for(recording, 20);
