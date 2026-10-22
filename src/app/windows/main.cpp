@@ -520,6 +520,78 @@ private:
         return result;
     }
 
+    static LRESULT CALLBACK readout_procedure(HWND readout, UINT message, WPARAM w, LPARAM l,
+                                              UINT_PTR subclass, DWORD_PTR data) {
+        auto* app = reinterpret_cast<App*>(data);
+        if (!app) return DefSubclassProc(readout, message, w, l);
+        const int readout_id = static_cast<int>(subclass);
+        const int slider_id = app->readout_slider(readout_id);
+        if (!slider_id) return DefSubclassProc(readout, message, w, l);
+        auto& drag = app->readout_drags_[readout_id];
+        if (message == WM_SETCURSOR && LOWORD(l) == HTCLIENT) {
+            SetCursor(LoadCursorW(nullptr, IDC_SIZENS));
+            return TRUE;
+        }
+        if (message == WM_LBUTTONDOWN) {
+            const DWORD now = static_cast<DWORD>(GetMessageTime());
+            const POINT point{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            const auto previous = app->readout_last_click_[readout_id];
+            if (previous.valid && now - previous.time <= GetDoubleClickTime() &&
+                std::abs(point.x - previous.point.x) <= GetSystemMetrics(SM_CXDOUBLECLK) &&
+                std::abs(point.y - previous.point.y) <= GetSystemMetrics(SM_CYDOUBLECLK)) {
+                app->readout_last_click_[readout_id].valid = false;
+                drag.active = false;
+                app->reset_slider(slider_id);
+                return 0;
+            }
+            app->readout_last_click_[readout_id] = {now, point, true};
+            drag = {true, false, point.y, 0};
+            SetCapture(readout); // Best effort: posted messages used by E2E still drive this state.
+            return 0;
+        }
+        if (message == WM_LBUTTONDBLCLK) {
+            app->readout_last_click_[readout_id].valid = false;
+            drag.active = false;
+            app->reset_slider(slider_id);
+            return 0;
+        }
+        if (message == WM_MOUSEMOVE && drag.active && (w & MK_LBUTTON)) {
+            const int y = GET_Y_LPARAM(l);
+            const int delta = drag.last_y - y;
+            drag.last_y = y;
+            if (delta) app->readout_last_click_[readout_id].valid = false;
+            drag.distance_scaled += delta * 96;
+            const bool fine = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+            const int step_dip_units = (fine ? 8 : 2) * static_cast<int>(app->dpi_);
+            const int steps = drag.distance_scaled / step_dip_units;
+            if (steps) {
+                drag.distance_scaled -= steps * step_dip_units;
+                const HWND slider = app->get(slider_id);
+                const int minimum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMIN, 0, 0));
+                const int maximum = static_cast<int>(SendMessageW(slider, TBM_GETRANGEMAX, 0, 0));
+                const int current = static_cast<int>(SendMessageW(slider, TBM_GETPOS, 0, 0));
+                const int next = std::clamp(current + steps, minimum, maximum);
+                if (next != current) {
+                    SendMessageW(slider, TBM_SETPOS, TRUE, next);
+                    drag.changed = true;
+                    app->notify_slider(slider_id, TB_THUMBTRACK, next);
+                }
+            }
+            return 0;
+        }
+        if (message == WM_LBUTTONUP || message == WM_CAPTURECHANGED) {
+            if (drag.active) {
+                const bool changed = drag.changed;
+                drag.active = false;
+                if (message == WM_LBUTTONUP && GetCapture() == readout) ReleaseCapture();
+                if (changed) app->notify_slider(slider_id, TB_ENDTRACK,
+                    static_cast<int>(SendMessageW(app->get(slider_id), TBM_GETPOS, 0, 0)));
+            }
+            return 0;
+        }
+        return DefSubclassProc(readout, message, w, l);
+    }
+
     static LRESULT CALLBACK preview_procedure(HWND window, UINT message, WPARAM w, LPARAM l) {
         auto* app = reinterpret_cast<App*>(GetWindowLongPtrW(GetParent(window), GWLP_USERDATA));
         switch (message) {
@@ -818,6 +890,10 @@ private:
             for (int slider : {kSystemVolume, kMicVolume, kScreenBrightness, kScreenContrast,
                                kScreenSaturation, kCameraBrightness, kCameraContrast, kCameraSaturation})
                 RemoveWindowSubclass(get(slider), &App::slider_procedure, static_cast<UINT_PTR>(slider));
+            for (int readout : {kSystemVolumeText, kMicVolumeText, kScreenBrightnessValue,
+                                kScreenContrastValue, kScreenSaturationValue, kCameraBrightnessValue,
+                                kCameraContrastValue, kCameraSaturationValue})
+                RemoveWindowSubclass(get(readout), &App::readout_procedure, static_cast<UINT_PTR>(readout));
             UnregisterHotKey(window_, kHotkey);
             UnregisterHotKey(window_, kReplayHotkey);
             Shell_NotifyIconW(NIM_DELETE, &tray_);
@@ -831,6 +907,26 @@ private:
     }
 
     int px(int dips) const { return MulDiv(dips, static_cast<int>(dpi_), 96); }
+
+    int readout_slider(int id) const {
+        switch (id) {
+        case kSystemVolumeText: return kSystemVolume;
+        case kMicVolumeText: return kMicVolume;
+        case kScreenBrightnessValue: return kScreenBrightness;
+        case kScreenContrastValue: return kScreenContrast;
+        case kScreenSaturationValue: return kScreenSaturation;
+        case kCameraBrightnessValue: return kCameraBrightness;
+        case kCameraContrastValue: return kCameraContrast;
+        case kCameraSaturationValue: return kCameraSaturation;
+        default: return 0;
+        }
+    }
+
+    void notify_slider(int id, int code, int position) {
+        const DWORD style = static_cast<DWORD>(GetWindowLongPtrW(get(id), GWL_STYLE));
+        const UINT message = (style & TBS_VERT) ? WM_VSCROLL : WM_HSCROLL;
+        SendMessageW(window_, message, MAKEWPARAM(code, position), reinterpret_cast<LPARAM>(get(id)));
+    }
 
     void make_fonts() {
         for (HFONT* font : {&font_, &bold_, &title_})
@@ -871,7 +967,8 @@ private:
         const bool right = value || id == kSystemVolumeText || id == kMicVolumeText;
         const DWORD centered = id == kStatus || id == kDetail || id == kLive ? SS_CENTERIMAGE : 0;
         return add(id, WC_STATICW, text, (right ? SS_RIGHT : SS_LEFT) | centered |
-                   ((plain || value) ? SS_NOPREFIX : 0) | (id == kDetail ? SS_ENDELLIPSIS : 0));
+                   ((plain || value) ? SS_NOPREFIX : 0) | (id == kDetail ? SS_ENDELLIPSIS : 0) |
+                   (readout_slider(id) ? SS_NOTIFY : 0));
     }
     HWND combo(int id) { return add(id, WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP); }
     HWND check(int id, const wchar_t* text) { return add(id, WC_BUTTONW, text, BS_AUTOCHECKBOX | WS_TABSTOP); }
@@ -1080,6 +1177,11 @@ private:
         for (int slider : {kSystemVolume, kMicVolume, kScreenBrightness, kScreenContrast,
                            kScreenSaturation, kCameraBrightness, kCameraContrast, kCameraSaturation})
             SetWindowSubclass(get(slider), &App::slider_procedure, static_cast<UINT_PTR>(slider),
+                              reinterpret_cast<DWORD_PTR>(this));
+        for (int readout : {kSystemVolumeText, kMicVolumeText, kScreenBrightnessValue,
+                            kScreenContrastValue, kScreenSaturationValue, kCameraBrightnessValue,
+                            kCameraContrastValue, kCameraSaturationValue})
+            SetWindowSubclass(get(readout), &App::readout_procedure, static_cast<UINT_PTR>(readout),
                               reinterpret_cast<DWORD_PTR>(this));
 
         show_settings();
@@ -2833,6 +2935,9 @@ private:
     std::array<UINT, 500> slider_pending_key_{};
     std::array<SliderClick, 500> slider_last_click_{};
     std::array<bool, 500> slider_suppress_mouse_up_{};
+    struct ReadoutDrag { bool active = false, changed = false; int last_y = 0, distance_scaled = 0; };
+    std::array<ReadoutDrag, 500> readout_drags_{};
+    std::array<SliderClick, 500> readout_last_click_{};
     int content_width_ = 0, content_height_ = 0;
     std::wstring home_;
     bool test_pattern_ = false;
