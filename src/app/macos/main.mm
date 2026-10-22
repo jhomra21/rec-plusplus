@@ -312,6 +312,39 @@ enum class Pointer { down, dragged, up, moved, exited };
 - (void)mouseMoved:(NSEvent*)event { [self.delegate preview:self pointer:Pointer::moved event:event]; }
 - (void)mouseExited:(NSEvent*)event { [self.delegate preview:self pointer:Pointer::exited event:event]; }
 @end
+@interface RecMeterView : NSControl
+@property(nonatomic) double level;
+@property(nonatomic) BOOL clipped;
+@property(nonatomic, copy) NSString* meterLabel;
+@property(nonatomic, copy) NSString* meterValue;
+@end
+@implementation RecMeterView
+- (BOOL)isFlipped { return YES; }
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    [[NSColor colorWithWhite:0.16 alpha:1] setFill];
+    NSRectFill(self.bounds);
+    const CGFloat height = NSHeight(self.bounds) * std::clamp(self.level, 0.0, 1.0);
+    if (height <= 0) return;
+    const CGFloat greenHeight = NSHeight(self.bounds) * 0.8;
+    NSRect green = NSMakeRect(0, NSHeight(self.bounds) - std::min(height, greenHeight),
+                              NSWidth(self.bounds), std::min(height, greenHeight));
+    [[NSColor colorWithSRGBRed:0.20 green:0.72 blue:0.38 alpha:1] setFill];
+    NSRectFill(green);
+    if (height > greenHeight) {
+        const CGFloat amberHeight = std::min(height - greenHeight, NSHeight(self.bounds) - greenHeight);
+        [[NSColor colorWithSRGBRed:0.92 green:0.62 blue:0.18 alpha:1] setFill];
+        NSRectFill(NSMakeRect(0, NSHeight(self.bounds) - greenHeight - amberHeight, NSWidth(self.bounds), amberHeight));
+    }
+    if (self.clipped) {
+        [[NSColor colorWithSRGBRed:0.88 green:0.20 blue:0.20 alpha:1] setFill];
+        NSRectFill(NSMakeRect(0, 0, NSWidth(self.bounds), NSHeight(self.bounds) * 0.035));
+    }
+}
+- (NSString*)accessibilityRole { return NSAccessibilityProgressIndicatorRole; }
+- (NSString*)accessibilityLabel { return self.meterLabel; }
+- (id)accessibilityValue { return self.meterValue ?: @"silent"; }
+@end
 
 @interface ResettableSlider : NSSlider
 @property(nonatomic, weak) id resetTarget;
@@ -343,7 +376,16 @@ enum class Pointer { down, dragged, up, moved, exited };
         [self reset];
         return;
     }
-    [super keyDown:event];
+    const BOOL verticalArrow = self.vertical &&
+        (event.keyCode == kVK_UpArrow || event.keyCode == kVK_DownArrow);
+    if (verticalArrow) {
+        const NSInteger delta = event.keyCode == kVK_UpArrow ? 1 : -1;
+        self.integerValue = std::clamp<NSInteger>(self.integerValue + delta,
+            static_cast<NSInteger>(std::ceil(self.minValue)), static_cast<NSInteger>(std::floor(self.maxValue)));
+        [NSApp sendAction:self.action to:self.target from:self];
+    } else {
+        [super keyDown:event];
+    }
     if (self.finishTarget && self.finishAction) {
         ++self.finishCount;
         [NSApp sendAction:self.finishAction to:self.finishTarget from:self];
@@ -510,10 +552,11 @@ struct PreviewHit {
     rec::app::Meter _systemMeterState, _micMeterState;
     float _pendingSystemPeak, _pendingMicPeak;
     bool _meterTick;
+    NSTimeInterval _systemMeterAXUpdate, _micMeterAXUpdate;
     EventHotKeyRef _hotkeyRef, _replayHotkeyRef;
     NSWindow* _window;
     NSTextField *_status, *_detail, *_live, *_folder;
-    NSLevelIndicator *_systemMeter, *_micMeter;
+    RecMeterView *_systemMeter, *_micMeter;
     NSSlider *_systemVolume, *_micVolume;
     DraggableReadout *_systemVolumeText, *_micVolumeText;
     NSButton *_systemMute, *_micMute;
@@ -1050,14 +1093,9 @@ struct PreviewHit {
     return grid;
 }
 
-- (NSLevelIndicator*)meter:(NSString*)name {
-    NSLevelIndicator* meter = [[NSLevelIndicator alloc] init];
-    meter.levelIndicatorStyle = NSLevelIndicatorStyleContinuousCapacity;
-    meter.minValue = 0;
-    meter.maxValue = 1;
-    meter.warningValue = 0.9;
-    meter.criticalValue = 0.97;
-    meter.accessibilityLabel = name;
+- (RecMeterView*)meter:(NSString*)name {
+    RecMeterView* meter = [[RecMeterView alloc] init];
+    meter.meterLabel = name;
     return meter;
 }
 
@@ -1148,6 +1186,8 @@ struct PreviewHit {
     ResettableSlider* slider = [ResettableSlider sliderWithValue:0 minValue:rec::app::kVolumeMin maxValue:rec::app::kVolumeMax
                                                           target:self action:@selector(volumeChanged:)];
     slider.continuous = YES;
+    slider.vertical = YES;
+    slider.trackFillColor = [NSColor colorWithWhite:0.38 alpha:1];
     slider.accessibilityLabel = name;
     slider.resetTarget = self;
     slider.resetAction = @selector(resetSlider:);
@@ -1211,18 +1251,46 @@ struct PreviewHit {
     _micVolumeText.pairedAction = _micVolume.action;
     _systemMute = [self check:@"Mute system"];
     _micMute = [self check:@"Mute mic"];
-    // A source's name and meter, then its volume, value and mute below.
-    const auto volumeRow = ^NSStackView*(NSSlider* slider, NSTextField* value, NSButton* mute) {
-        [value.widthAnchor constraintEqualToConstant:kControlValueWidth].active = YES;
-        [mute.widthAnchor constraintEqualToConstant:kMuteWidth].active = YES;
-        NSView* labelColumn = [[NSView alloc] init];
-        [labelColumn.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
-        NSStackView* row = [NSStackView stackViewWithViews:@[labelColumn, slider, value, mute]];
-        row.distribution = NSStackViewDistributionFill;
-        row.spacing = kControlGap;
-        [slider setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
-        [slider.widthAnchor constraintGreaterThanOrEqualToConstant:80].active = YES;
-        return row;
+    _systemMute.title = @"Mute";
+    _micMute.title = @"Mute";
+    _systemMute.accessibilityLabel = @"Mute system";
+    _micMute.accessibilityLabel = @"Mute mic";
+    // Compact channel strips: source, meter and fader, value, then mute.
+    const auto volumeStrip = ^NSView*(NSString* title, RecMeterView* meter, NSSlider* slider,
+                                      NSTextField* value, NSButton* mute) {
+        NSTextField* titleLabel = label(title);
+        titleLabel.alignment = NSTextAlignmentCenter;
+        titleLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+        titleLabel.maximumNumberOfLines = 2;
+        titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
+        NSView* lane = [[NSView alloc] init];
+        [lane addSubview:meter];
+        [lane addSubview:slider];
+        lane.translatesAutoresizingMaskIntoConstraints = NO;
+        meter.translatesAutoresizingMaskIntoConstraints = NO;
+        slider.translatesAutoresizingMaskIntoConstraints = NO;
+        NSStackView* strip = [NSStackView stackViewWithViews:@[titleLabel, lane, value, mute]];
+        strip.orientation = NSUserInterfaceLayoutOrientationVertical;
+        strip.alignment = NSLayoutAttributeCenterX;
+        strip.distribution = NSStackViewDistributionFill;
+        strip.spacing = 5;
+        [slider.widthAnchor constraintEqualToConstant:30].active = YES;
+        [slider.heightAnchor constraintEqualToConstant:150].active = YES;
+        [meter.widthAnchor constraintEqualToConstant:10].active = YES;
+        [meter.heightAnchor constraintEqualToAnchor:slider.heightAnchor constant:-18].active = YES;
+        [slider.centerXAnchor constraintEqualToAnchor:lane.centerXAnchor].active = YES;
+        [slider.centerYAnchor constraintEqualToAnchor:lane.centerYAnchor].active = YES;
+        [meter.trailingAnchor constraintEqualToAnchor:slider.centerXAnchor constant:-6].active = YES;
+        [meter.centerYAnchor constraintEqualToAnchor:slider.centerYAnchor].active = YES;
+        [lane.heightAnchor constraintEqualToAnchor:slider.heightAnchor].active = YES;
+        [value.widthAnchor constraintEqualToConstant:76].active = YES;
+        [mute.widthAnchor constraintEqualToConstant:76].active = YES;
+        [strip.widthAnchor constraintEqualToConstant:76].active = YES;
+        [titleLabel.widthAnchor constraintEqualToAnchor:strip.widthAnchor].active = YES;
+        [lane.widthAnchor constraintEqualToAnchor:strip.widthAnchor].active = YES;
+        [value.widthAnchor constraintEqualToAnchor:strip.widthAnchor].active = YES;
+        [mute.widthAnchor constraintEqualToAnchor:strip.widthAnchor].active = YES;
+        return strip;
     };
     NSTextField* systemTitle = label(@"");
     NSTextField* micTitle = label(@"");
@@ -1251,10 +1319,12 @@ struct PreviewHit {
                 cameraStrip = [self colorStrip:strip];
         }
     }
-    [systemTitle.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
-    [micTitle.widthAnchor constraintEqualToConstant:kControlTitleWidth].active = YES;
-    NSGridView* meters = [self grid:@[@[systemTitle, _systemMeter], @[volumeRow(_systemVolume, _systemVolumeText, _systemMute)],
-                                      @[micTitle, _micMeter], @[volumeRow(_micVolume, _micVolumeText, _micMute)]]];
+    NSStackView* meters = [NSStackView stackViewWithViews:@[
+        volumeStrip(systemTitle.stringValue, _systemMeter, _systemVolume, _systemVolumeText, _systemMute),
+        volumeStrip(micTitle.stringValue, _micMeter, _micVolume, _micVolumeText, _micMute)]];
+    meters.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    meters.alignment = NSLayoutAttributeTop;
+    meters.spacing = 12;
     [self showCameraStrip:_settings.camera];
     // The newest frame as encoded, in the output's shape on dark gray.
     _preview = [[PreviewView alloc] init];
@@ -2635,8 +2705,21 @@ struct PreviewHit {
     [self showOutline];
 }
 
-- (void)meter:(NSLevelIndicator*)meter peak:(float)peak state:(rec::app::Meter&)state {
-    meter.doubleValue = state.feed(peak);
+- (void)meter:(RecMeterView*)meter peak:(float)peak state:(rec::app::Meter&)state {
+    meter.level = state.feed(peak);
+    meter.clipped = state.clipped();
+    NSTimeInterval* lastUpdate = meter == _systemMeter ? &_systemMeterAXUpdate : &_micMeterAXUpdate;
+    const NSTimeInterval now = NSProcessInfo.processInfo.systemUptime;
+    if (now - *lastUpdate >= 0.5) {
+        *lastUpdate = now;
+        NSString* value = meter.level <= 0 ? @"silent" : [NSString stringWithFormat:@"%d dB",
+            std::clamp(static_cast<int>(std::lround(meter.level * 60.0 - 60.0)), -60, 0)];
+        if (![meter.meterValue isEqualToString:value]) {
+            meter.meterValue = value;
+            NSAccessibilityPostNotification(meter, NSAccessibilityValueChangedNotification);
+        }
+    }
+    [meter setNeedsDisplay:YES];
 }
 
 - (void)refresh {
@@ -2716,7 +2799,9 @@ struct PreviewHit {
     // Hide the last level once recording ends; polling stops with it.
     if (!active) {
         _systemMeterState.shown = _micMeterState.shown = 0;
-        _systemMeter.doubleValue = _micMeter.doubleValue = 0;
+        _systemMeter.level = _micMeter.level = 0;
+        _systemMeter.clipped = _micMeter.clipped = NO;
+        _systemMeter.meterValue = _micMeter.meterValue = @"silent";
         _pendingSystemPeak = _pendingMicPeak = 0;
     }
     _pendingSystemPeak = std::max(_pendingSystemPeak, s.system_peak);
@@ -3288,9 +3373,7 @@ struct PreviewHit {
     ui(^{
         NSView* content = self->_window.contentView;
         [content layoutSubtreeIfNeeded];
-        const NSRect volume = [self->_systemVolume.superview convertRect:self->_systemVolume.frame toView:content];
         const NSRect color = [self->_screenColor[0].superview convertRect:self->_screenColor[0].frame toView:content];
-        const NSRect volumeValue = [self->_systemVolumeText.superview convertRect:self->_systemVolumeText.frame toView:content];
         const NSRect colorValue = [self->_screenColorValue[0].superview convertRect:self->_screenColorValue[0].frame toView:content];
         const NSRect reset = [self->_screenColorReset.superview convertRect:self->_screenColorReset.frame toView:content];
         NSBox* screenGroup = (NSBox*)self->_screenStrip;
@@ -3298,17 +3381,13 @@ struct PreviewHit {
         NSView* titleView = screenStack.arrangedSubviews.firstObject;
         const NSRect title = [titleView.superview convertRect:titleView.frame toView:content];
         const NSRect strip = [self->_screenStrip.superview convertRect:self->_screenStrip.frame toView:content];
-        stripLayoutOK = std::abs(volume.origin.x - color.origin.x) < 2 &&
-                        std::abs(volume.size.width - color.size.width) < 2 &&
-                        std::abs(volumeValue.origin.x - colorValue.origin.x) < 2 &&
-                        std::abs(volumeValue.size.width - colorValue.size.width) < 2 &&
-                        std::abs(NSMidY(reset) - NSMidY(title)) < 4 &&
+        stripLayoutOK = std::abs(NSMidY(reset) - NSMidY(title)) < 4 &&
                         NSPointInRect(NSMakePoint(NSMidX(reset), NSMidY(reset)), strip) &&
                         std::abs(NSMaxX(reset) - NSMaxX(strip)) < 10 &&
                         [self->_screenColorReset.title isEqualToString:@"Reset"] &&
                         [self->_screenColorReset.accessibilityLabel isEqualToString:@"Reset screen color"];
-        stripGeometry = [NSString stringWithFormat:@"volume %.1f/%.1f, color %.1f/%.1f, value %.1f/%.1f, reset x%.1f..%.1f y%.1f title x%.1f..%.1f y%.1f strip %.1f..%.1f",
-            volume.origin.x, volume.size.width, color.origin.x, color.size.width, volumeValue.origin.x, colorValue.origin.x,
+        stripGeometry = [NSString stringWithFormat:@"color %.1f/%.1f, value %.1f/%.1f, reset x%.1f..%.1f y%.1f title x%.1f..%.1f y%.1f strip %.1f..%.1f",
+            color.origin.x, color.size.width, colorValue.origin.x, colorValue.size.width,
             NSMinX(reset), NSMaxX(reset), NSMidY(reset), NSMinX(title), NSMaxX(title), NSMidY(title), NSMinX(strip), NSMaxX(strip)];
         cameraInitiallyHidden = self->_cameraStrip.hiddenOrHasHiddenAncestor;
         NSMutableArray<NSView*>* stripOrder = [NSMutableArray array];
@@ -3374,7 +3453,78 @@ struct PreviewHit {
     note(@"screen-strip=ok");
     note(@"camera-strip-hidden=ok");
     note([NSString stringWithFormat:@"tab-strip-order=ok focusable=%lu", static_cast<unsigned long>(tabFocusable)]);
-    save_window_png(@"app-strips.png");
+    save_window_png(@"app-strips-m3.png");
+    __block BOOL audioStripGeometry = NO;
+    __block BOOL maxTop = NO, minBottom = NO;
+    __block NSString* audioGeometry;
+    ui(^{
+        [self->_window.contentView layoutSubtreeIfNeeded];
+        const NSRect fader = [self->_systemVolume.superview convertRect:self->_systemVolume.frame toView:self->_window.contentView];
+        const NSRect meter = [self->_systemMeter convertRect:self->_systemMeter.bounds toView:self->_window.contentView];
+        const NSRect value = [self->_systemVolumeText.superview convertRect:self->_systemVolumeText.frame toView:self->_window.contentView];
+        const NSRect mute = [self->_systemMute.superview convertRect:self->_systemMute.frame toView:self->_window.contentView];
+        self->_systemVolume.integerValue = rec::app::kVolumeMax;
+        [self->_systemVolume layoutSubtreeIfNeeded];
+        NSRect maxKnob = [self->_systemVolume.cell knobRectFlipped:self->_systemVolume.isFlipped];
+        self->_systemVolume.integerValue = rec::app::kVolumeMin;
+        [self->_systemVolume layoutSubtreeIfNeeded];
+        NSRect minKnob = [self->_systemVolume.cell knobRectFlipped:self->_systemVolume.isFlipped];
+        self->_systemVolume.integerValue = self->_settings.system_volume;
+        [self showDecibels:YES];
+        const CGFloat meterTop = NSMinY(meter), meterBottom = NSMaxY(meter);
+        const CGFloat visualMuteTop = self->_window.contentView.isFlipped ? NSMinY(mute) : -NSMaxY(mute);
+        const CGFloat visualValueBottom = self->_window.contentView.isFlipped ? NSMaxY(value) : -NSMinY(value);
+        const NSRect maxKnobInWindow = [self->_systemVolume convertRect:maxKnob toView:self->_window.contentView];
+        const NSRect minKnobInWindow = [self->_systemVolume convertRect:minKnob toView:self->_window.contentView];
+        audioStripGeometry = fader.size.height > fader.size.width &&
+            std::abs(NSMaxX(meter) - (NSMidX(maxKnobInWindow) - 6)) <= 2 &&
+            std::abs(meterTop - std::min(NSMidY(maxKnobInWindow), NSMidY(minKnobInWindow))) <= 2 &&
+            std::abs(meterBottom - std::max(NSMidY(maxKnobInWindow), NSMidY(minKnobInWindow))) <= 2 &&
+            std::abs(NSMidX(value) - NSMidX(fader)) < 2 &&
+            visualMuteTop >= visualValueBottom;
+        maxTop = NSMidY(maxKnobInWindow) > NSMidY(fader) + NSHeight(fader) / 6;
+        minBottom = NSMidY(minKnobInWindow) < NSMidY(fader) - NSHeight(fader) / 6;
+        audioGeometry = [NSString stringWithFormat:@"fader %.1f,%.1f %.1fx%.1f meter %.1f,%.1f %.1fx%.1f value %.1f center delta %.1f mute %.1f max knob y %.1f min knob y %.1f mute/value %.1f",
+            NSMinX(fader), NSMinY(fader),
+            fader.size.width, fader.size.height, NSMinX(meter), NSMinY(meter), meter.size.width, meter.size.height,
+            value.size.height, NSMidX(value) - NSMidX(fader), NSMinY(mute), NSMidY(maxKnob), NSMidY(minKnob),
+            visualMuteTop - visualValueBottom];
+    });
+    if (!audioStripGeometry) fail([@"audio strip geometry mismatch: " stringByAppendingString:audioGeometry]);
+    if (!maxTop || !minBottom) fail([@"vertical fader direction mismatch: " stringByAppendingString:audioGeometry]);
+    note(@"audio-strip-geometry=ok");
+    note(@"fader-direction=ok max=top min=bottom");
+    __block BOOL upLouder = NO;
+    ui(^{
+        const NSInteger saved = self->_systemVolume.integerValue;
+        self->_systemVolume.integerValue = 0;
+        NSEvent* up = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+            modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:self->_window.windowNumber
+            context:nil characters:@"\uF700" charactersIgnoringModifiers:@"\uF700" isARepeat:NO keyCode:126];
+        [self->_systemVolume keyDown:up];
+        upLouder = self->_systemVolume.integerValue > 0;
+        NSEvent* down = [NSEvent keyEventWithType:NSEventTypeKeyDown location:NSZeroPoint
+            modifierFlags:0 timestamp:NSProcessInfo.processInfo.systemUptime windowNumber:self->_window.windowNumber
+            context:nil characters:@"\uF701" charactersIgnoringModifiers:@"\uF701" isARepeat:NO keyCode:125];
+        [self->_systemVolume keyDown:down];
+        self->_systemVolume.integerValue = saved;
+        [NSApp sendAction:self->_systemVolume.action to:self->_systemVolume.target from:self->_systemVolume];
+        [self showDecibels:YES];
+        [self sliderFinished:(ResettableSlider*)self->_systemVolume];
+    });
+    if (!upLouder) fail(@"Up Arrow did not raise the vertical fader");
+    note(@"fader-keyboard=ok up=louder");
+    __block BOOL recordVisibleAtTarget = NO;
+    ui(^{
+        NSView* content = self->_window.contentView;
+        [content layoutSubtreeIfNeeded];
+        const NSRect record = [self->_record.superview convertRect:self->_record.frame toView:content];
+        const NSRect box = content.bounds;
+        const NSSize fitting = content.subviews.firstObject.fittingSize;
+        recordVisibleAtTarget = NSContainsRect(box, record) && fitting.height <= 868;
+    });
+    if (!recordVisibleAtTarget) fail(@"Record is not visible within a 1440x900 point display viewport");
+    note(@"record-visible=ok target=1440x900");
     // 30 fps keeps the check light on virtual machines.
     ui(^{ [self->_fps selectItemAtIndex:std::find(kFrameRates.begin(), kFrameRates.end(), 30u) - kFrameRates.begin()]; });
 
@@ -3383,6 +3533,26 @@ struct PreviewHit {
     set_check(_microphone, true);
     press(_record);
     wait_for(recording, 20);
+    __block BOOL meterBottomUp = NO;
+    for (int attempt = 0; attempt < 40 && !meterBottomUp; ++attempt) {
+        ui(^{
+            [self->_systemMeter displayIfNeeded];
+            const NSRect rect = self->_systemMeter.bounds;
+            NSBitmapImageRep* shot = [self->_systemMeter bitmapImageRepForCachingDisplayInRect:rect];
+            [self->_systemMeter cacheDisplayInRect:rect toBitmapImageRep:shot];
+            const NSBitmapImageRep* bitmap = shot;
+            const auto lit = [&](NSInteger y) {
+                const NSColor* pixel = [[bitmap colorAtX:bitmap.pixelsWide / 2 y:y]
+                    colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+                return pixel.greenComponent > pixel.redComponent * 1.2 && pixel.greenComponent > 0.25;
+            };
+            if (bitmap.pixelsWide > 0 && bitmap.pixelsHigh > 2)
+                meterBottomUp = lit(bitmap.pixelsHigh - 2) && !lit(1);
+        });
+        if (!meterBottomUp) usleep(100000);
+    }
+    if (!meterBottomUp) fail(@"meter did not fill from the bottom during the test tone");
+    note(@"meter-bottom-up=ok");
     const auto red_pixels = [&](CGFloat threshold) {
         const PixelStats stats = sample_window_pixels(_status, [=](CGFloat r, CGFloat g, CGFloat b) {
             const bool red = r > threshold && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;

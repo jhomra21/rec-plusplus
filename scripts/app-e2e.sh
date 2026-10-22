@@ -183,6 +183,11 @@ grep -qx 'status-line=ok' "$report"
 grep -qx 'screen-strip=ok' "$report"
 grep -qx 'camera-strip-hidden=ok' "$report"
 grep -Eqx 'tab-strip-order=ok focusable=[0-9]+' "$report"
+grep -qx 'audio-strip-geometry=ok' "$report"
+grep -qx 'fader-direction=ok max=top min=bottom' "$report"
+grep -qx 'fader-keyboard=ok up=louder' "$report"
+grep -qx 'record-visible=ok target=1440x900' "$report"
+grep -qx 'meter-bottom-up=ok' "$report"
 grep -qx 'status-recording-color=ok' "$report"
 grep -Eqx 'paused-status=ok text=[0-9]+\.[0-9]{2} dot=[0-9]+\.[0-9]{2},[0-9]+\.[0-9]{2},[0-9]+\.[0-9]{2} recording-dot=[0-9]+\.[0-9]{2},[0-9]+\.[0-9]{2},[0-9]+\.[0-9]{2}' "$report"
 grep -Eq '^readout-drag=ok .*live-apply-during-drag=ok save-on-release-once=ok disabled-readout-inert=ok window-coordinates=ok ' "$report"
@@ -202,7 +207,7 @@ check_window_png() {
   grep -Eq "^snapshot-luminance.$(basename "$file")=[0-9]+\.[0-9]+$" "$report" \
     || { echo "the app window snapshot has no opaque-pixel luminance measurement: $file" >&2; exit 1; }
 }
-check_window_png "$artifacts/app-strips.png"
+check_window_png "$artifacts/app-strips-m3.png"
 check_window_png "$artifacts/app-status-row.png"
 check_window_png "$artifacts/app-recording-status.png"
 check_window_png "$artifacts/app-paused-status.png"
