@@ -78,7 +78,7 @@ bool layer_areas(std::string_view s, std::size_t& layer, Area& first, std::optio
     if (name == "screen") layer = kScreen;
     else {
         std::uint32_t n = 0;
-        if (!integer(name, n) || n < 1 || n > 15) return false;
+        if (!integer(name, n) || n < 1 || n > kMaxOverlays) return false;
         layer = n - 1;
     }
     auto rest = s.substr(colon + 1);
@@ -133,7 +133,7 @@ std::optional<std::size_t> layer_index(std::string_view text) {
     if (text == "screen") return kScreen;
     std::size_t n = 0;
     const auto [p, ec] = std::from_chars(text.data(), text.data() + text.size(), n);
-    if (ec != std::errc{} || p != text.data() + text.size() || n < 1 || n > 15) return std::nullopt;
+    if (ec != std::errc{} || p != text.data() + text.size() || n < 1 || n > kMaxOverlays) return std::nullopt;
     return n - 1;
 }
 
@@ -221,7 +221,7 @@ bool parse_options(const std::vector<std::string>& args, Options& o, std::string
         } else if (arg == "--camera" || arg == "--image") {
             const bool camera = arg == "--camera";
             if (value.empty()) { error = camera ? "--camera needs a device: default, test, or an ID or name from `rec devices`" : "--image needs a file"; return false; }
-            if (o.overlays.size() == 15) { error = "at most 15 overlays"; return false; }
+            if (o.overlays.size() == kMaxOverlays) { error = "at most " + std::to_string(kMaxOverlays) + " overlays"; return false; }
             const auto at = value.rfind('@');
             Area checked;
             if (at != std::string_view::npos && !area(value.substr(at + 1), checked) &&
@@ -241,7 +241,7 @@ bool parse_options(const std::vector<std::string>& args, Options& o, std::string
             }
             if (!core::parse_style(value, o.overlays.back().style, error)) return false;
         } else if (arg == "--add-display" || arg == "--add-window") {
-            if (o.overlays.size() == 15) { error = "at most 15 overlays"; return false; }
+            if (o.overlays.size() == kMaxOverlays) { error = "at most " + std::to_string(kMaxOverlays) + " overlays"; return false; }
             Overlay layer = overlay(Overlay::Kind::display, value, Area{});
             const auto at = value.rfind('@');
             if (layer.source.size() == value.size() && at != std::string_view::npos &&
@@ -588,6 +588,24 @@ std::string summary(const Options& options, const Stats& stats, double wall_seco
     if (stats.audio_reconnects) out << "Audio devices reopened " << stats.audio_reconnects << '\n';
     if (std::any_of(options.overlays.begin(), options.overlays.end(), [](const Overlay& o) { return o.kind == Overlay::Kind::camera; }))
         out << "Camera frames " << stats.camera_frames << '\n';
+#ifdef _WIN32
+    for (std::size_t i = 0; i < std::min(options.overlays.size(), stats.window_layers.size()); ++i) {
+        if (options.overlays[i].kind != Overlay::Kind::window) continue;
+        const auto& layer = stats.window_layers[i];
+        out << "Window layer " << i + 1 << ": " << layer.frames << " frames, first at ";
+        if (layer.first_frame_ms < 0) out << "never";
+        else out << layer.first_frame_ms << " ms";
+        if (layer.first_frame_ms < 0 || layer.failures > 0 || layer.retries > 0) {
+            out << " (callbacks " << layer.callbacks << ", resize skips " << layer.resize_skips
+                << ", failures " << layer.failures << ", retries " << layer.retries;
+            if (layer.last_error)
+                out << ", last error 0x" << std::hex << std::uppercase
+                    << static_cast<std::uint32_t>(layer.last_error) << std::dec;
+            out << ')';
+        }
+        out << '\n';
+    }
+#endif
     if (stats.paused_seconds > 0)
         out << "Paused " << std::fixed << std::setprecision(1) << stats.paused_seconds << " s (not in the movie)\n";
     std::vector<std::string> urls = options.stream_urls;

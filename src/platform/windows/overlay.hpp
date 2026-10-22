@@ -58,6 +58,7 @@ public:
     Result set_style(std::size_t index, const Style& style);
     Result set_color(ColorTarget target, const ColorAdjust& color);
     std::uint64_t camera_frames() const;
+    rec::Stats::WindowLayer window_layer_stats(std::size_t index) const;
     bool camera_lost() const;  // A camera stopped delivering frames.
     void stop();
 

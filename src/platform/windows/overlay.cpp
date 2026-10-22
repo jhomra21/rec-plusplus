@@ -503,6 +503,8 @@ public:
     Result open(const wgdx::Direct3D11::IDirect3DDevice& device, const Overlay& overlay, bool cursor) {
         device_ = device;
         const bool window = overlay.kind == Overlay::Kind::window;
+        window_ = window;
+        cursor_ = cursor;
         const auto name = window ? std::string("the window") : "display " + std::to_string(overlay.display);
         try {
             auto interop = winrt::get_activation_factory<wgc::GraphicsCaptureItem, IGraphicsCaptureItemInterop>();
@@ -536,7 +538,8 @@ public:
             }
             pool_ = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(device_, wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, pool_size_);
             accepting_ = true;
-            token_ = pool_.FrameArrived({this, &ScreenFeed::on_frame});
+            const auto generation = ++generation_;
+            token_ = pool_.FrameArrived([this, generation](auto const& sender, auto const&) { on_frame(generation, sender); });
             session_ = pool_.CreateCaptureSession(item_);
             try { session_.IsCursorCaptureEnabled(cursor); } catch (...) {}
             try { session_.IsBorderRequired(false); } catch (...) {}
@@ -548,6 +551,10 @@ public:
 
     Result start() {
         try {
+            {
+                std::lock_guard lock(mutex_);
+                started_at_ = std::chrono::steady_clock::now();
+            }
             session_.StartCapture();
         } catch (winrt::hresult_error const& e) {
             return {failed("could not start a screen capture", e.code())};
@@ -557,20 +564,24 @@ public:
 
     void stop() {
         wgc::Direct3D11CaptureFrame held{nullptr};
+        wgc::Direct3D11CaptureFramePool pool{nullptr};
+        wgc::GraphicsCaptureSession session{nullptr};
+        winrt::event_token token{};
         {
             std::lock_guard lock(mutex_);
             accepting_ = false;
             held = std::exchange(latest_, nullptr);
+            pool = std::exchange(pool_, nullptr);
+            session = std::exchange(session_, nullptr);
+            token = std::exchange(token_, {});
         }
         try {
             if (held) held.Close();
-            if (pool_) pool_.FrameArrived(token_);
-            if (session_) session_.Close();
-            if (pool_) pool_.Close();
+            if (pool) pool.FrameArrived(token);
+            if (session) session.Close();
+            if (pool) pool.Close();
         } catch (...) {
         }
-        session_ = nullptr;
-        pool_ = nullptr;
         item_ = nullptr;
     }
 
@@ -581,33 +592,175 @@ public:
     }
 
     const std::optional<Region>& region() const { return region_; }
-
-private:
-    void on_frame(wgc::Direct3D11CaptureFramePool const& sender, winrt::Windows::Foundation::IInspectable const&) {
+    rec::Stats::WindowLayer stats() const noexcept {
+        rec::Stats::WindowLayer out;
+        out.callbacks = callbacks_.load();
+        out.frames = frames_.load();
+        out.resize_skips = resize_skips_.load();
+        out.failures = failures_.load();
+        out.retries = retries_.load();
+        out.last_error = last_error_.load();
+        out.first_frame_ms = first_frame_ms_.load();
+        return out;
+    }
+    void upload_failed() noexcept { failures_.fetch_add(1); }
+    void finish_resize() noexcept {
+        wgc::Direct3D11CaptureFramePool pool{nullptr};
+        winrt::Windows::Graphics::SizeInt32 size{};
         try {
-            auto frame = sender.TryGetNextFrame();
-            if (!frame) return;
-            const auto content = frame.ContentSize();
-            wgc::Direct3D11CaptureFrame replaced{nullptr};
-            bool resized = false;
             {
                 std::lock_guard lock(mutex_);
-                if (!accepting_) { frame.Close(); return; }
-                resized = content.Width != pool_size_.Width || content.Height != pool_size_.Height;
-                // A resized pool starts from the next frame, so none from the old one is held.
-                if (resized) {
-                    pool_size_ = content;
-                    replaced = std::exchange(latest_, nullptr);
+                if (!accepting_ || !recreate_pending_ || latest_) return;
+                pool = pool_;
+                size = recreate_size_;
+                recreate_pending_ = false;
+            }
+            pool.Recreate(device_, wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+            std::lock_guard lock(mutex_);
+            if (pool_ == pool) pool_size_ = size;
+        } catch (winrt::hresult_error const& e) {
+            failures_.fetch_add(1);
+            last_error_.store(static_cast<std::int32_t>(e.code()));
+            recovery_requested_.store(true);
+        } catch (...) {
+            failures_.fetch_add(1);
+            last_error_.store(static_cast<std::int32_t>(winrt::to_hresult()));
+            recovery_requested_.store(true);
+        }
+    }
+    void recover_if_needed() noexcept {
+        if (!window_) return;
+        wgc::Direct3D11CaptureFrame held{nullptr};
+        wgc::Direct3D11CaptureFramePool old_pool{nullptr};
+        wgc::GraphicsCaptureSession old_session{nullptr};
+        winrt::event_token old_token{};
+        winrt::Windows::Graphics::SizeInt32 size{};
+        const auto now = std::chrono::steady_clock::now();
+        {
+            std::lock_guard lock(mutex_);
+            const bool requested = recovery_requested_.load();
+            if (!accepting_ || retries_.load() >= 2 ||
+                (!requested && (first_frame_ms_.load() >= 0 || now - started_at_ < std::chrono::milliseconds(250))) ||
+                (!requested && now - last_recovery_ < std::chrono::milliseconds(250))) return;
+            ++retries_;
+            last_recovery_ = now;
+            recovery_requested_.store(false);
+            accepting_ = false;
+            held = std::exchange(latest_, nullptr);
+            old_session = std::exchange(session_, nullptr);
+            old_pool = std::exchange(pool_, nullptr);
+            old_token = std::exchange(token_, {});
+            size = recreate_pending_ ? recreate_size_ : pool_size_;
+            recreate_pending_ = false;
+        }
+        try {
+            if (held) held.Close();
+            if (old_pool) old_pool.FrameArrived(old_token);
+            if (old_session) old_session.Close();
+            if (old_pool) old_pool.Close();
+            wgc::Direct3D11CaptureFramePool pool = wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(
+                device_, wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, size);
+            auto session = pool.CreateCaptureSession(item_);
+            try { session.IsCursorCaptureEnabled(cursor_); } catch (...) {}
+            try { session.IsBorderRequired(false); } catch (...) {}
+            std::uint64_t generation;
+            winrt::event_token token;
+            {
+                std::lock_guard lock(mutex_);
+                generation = ++generation_;
+                token = pool.FrameArrived([this, generation](auto const& sender, auto const&) { on_frame(generation, sender); });
+                pool_ = pool;
+                session_ = session;
+                pool_size_ = size;
+                token_ = token;
+                accepting_ = true;
+            }
+            session.StartCapture();
+        } catch (winrt::hresult_error const& e) {
+            failures_.fetch_add(1);
+            last_error_.store(static_cast<std::int32_t>(e.code()));
+            clear_failed_recovery();
+        } catch (...) {
+            failures_.fetch_add(1);
+            last_error_.store(static_cast<std::int32_t>(winrt::to_hresult()));
+            clear_failed_recovery();
+        }
+    }
+
+private:
+    void on_frame(std::uint64_t generation, wgc::Direct3D11CaptureFramePool const& sender) noexcept {
+        callbacks_.fetch_add(1);
+        wgc::Direct3D11CaptureFrame newest{nullptr};
+        try {
+            while (auto frame = sender.TryGetNextFrame()) {
+                if (newest) newest.Close();
+                newest = std::move(frame);
+            }
+            if (!newest) return;
+            const auto content = newest.ContentSize();
+            const auto timestamp = std::chrono::steady_clock::now();
+            wgc::Direct3D11CaptureFrame replaced{nullptr};
+            bool discard = false;
+            {
+                std::lock_guard lock(mutex_);
+                if (generation != generation_ || !accepting_) {
+                    discard = true;
+                } else if (recreate_pending_ || content.Width < 2 || content.Height < 2) {
+                    resize_skips_.fetch_add(1);
+                    discard = true;
                 } else {
-                    replaced = std::exchange(latest_, frame);
+                    const bool resized = content.Width != pool_size_.Width || content.Height != pool_size_.Height;
+                    if (first_frame_ms_.load() < 0)
+                        first_frame_ms_.store(std::chrono::duration_cast<std::chrono::milliseconds>(timestamp - started_at_).count());
+                    frames_.fetch_add(1);
+                    replaced = std::exchange(latest_, std::move(newest));
+                    if (resized) {
+                        recreate_size_ = content;
+                        recreate_pending_ = true;
+                    }
                 }
             }
+            if (discard && newest) newest.Close();
             if (replaced) replaced.Close();
-            if (resized) {
-                frame.Close();
-                if (content.Width >= 2 && content.Height >= 2)
-                    sender.Recreate(device_, wgdx::DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, content);
-            }
+            // Retain this frame even when ContentSize changed. Its surface remains valid and
+            // upload_screen copies only the content rectangle before the frame is closed.
+        } catch (winrt::hresult_error const& e) {
+            if (newest) try { newest.Close(); } catch (...) {}
+            failures_.fetch_add(1);
+            last_error_.store(static_cast<std::int32_t>(e.code()));
+            request_recovery(generation);
+        } catch (...) {
+            if (newest) try { newest.Close(); } catch (...) {}
+            failures_.fetch_add(1);
+            last_error_.store(static_cast<std::int32_t>(winrt::to_hresult()));
+            request_recovery(generation);
+        }
+    }
+
+    void request_recovery(std::uint64_t generation) noexcept {
+        if (!window_) return;
+        std::lock_guard lock(mutex_);
+        if (generation == generation_ && accepting_) recovery_requested_.store(true);
+    }
+
+    void clear_failed_recovery() noexcept {
+        wgc::Direct3D11CaptureFrame held{nullptr};
+        wgc::Direct3D11CaptureFramePool pool{nullptr};
+        wgc::GraphicsCaptureSession session{nullptr};
+        winrt::event_token token{};
+        {
+            std::lock_guard lock(mutex_);
+            accepting_ = false;
+            held = std::exchange(latest_, nullptr);
+            pool = std::exchange(pool_, nullptr);
+            session = std::exchange(session_, nullptr);
+            token = std::exchange(token_, {});
+        }
+        try {
+            if (held) held.Close();
+            if (pool) pool.FrameArrived(token);
+            if (session) session.Close();
+            if (pool) pool.Close();
         } catch (...) {
         }
     }
@@ -620,6 +773,17 @@ private:
     std::optional<Region> region_;
     std::mutex mutex_;  // Guards accepting_, latest_ and pool_size_.
     bool accepting_ = false;
+    bool recreate_pending_ = false;
+    winrt::Windows::Graphics::SizeInt32 recreate_size_{};
+    bool window_ = false;
+    bool cursor_ = true;
+    std::atomic<unsigned> retries_{0};
+    std::atomic_bool recovery_requested_{false};
+    std::atomic<std::uint64_t> callbacks_{0}, frames_{0}, resize_skips_{0}, failures_{0};
+    std::atomic<std::int32_t> last_error_{0};
+    std::atomic<std::int64_t> first_frame_ms_{-1};
+    std::chrono::steady_clock::time_point started_at_{}, last_recovery_{};
+    std::uint64_t generation_ = 0;
     wgc::Direct3D11CaptureFrame latest_{nullptr};
     winrt::Windows::Graphics::SizeInt32 pool_size_{};
 };
@@ -938,6 +1102,13 @@ public:
         return total;
     }
 
+    rec::Stats::WindowLayer window_layer_stats(std::size_t index) const {
+        std::lock_guard lock(mutex_);
+        if (index >= layers_.size() || !layers_[index].screen ||
+            layers_[index].overlay.kind != Overlay::Kind::window) return {};
+        return layers_[index].screen->stats();
+    }
+
     bool camera_lost() const {
         std::lock_guard lock(mutex_);
         return std::any_of(layers_.begin(), layers_.end(), [](const auto& layer) { return layer.camera && layer.camera->lost(); });
@@ -1203,6 +1374,7 @@ private:
 
     // Copies a display's or window's newest frame into the layer's texture.
     void upload_screen(ID3D11DeviceContext* context, Layer& layer) {
+        layer.screen->recover_if_needed();
         auto frame = layer.screen->take();
         if (!frame) return;
         try {
@@ -1225,7 +1397,9 @@ private:
                 if (FAILED(device_->CreateTexture2D(&copy, nullptr, &layer.texture)) ||
                     FAILED(device_->CreateShaderResourceView(layer.texture.Get(), nullptr, &layer.view))) {
                     layer.texture.Reset();
+                    layer.screen->upload_failed();
                     frame.Close();
+                    layer.screen->finish_resize();
                     return;
                 }
             }
@@ -1247,8 +1421,10 @@ private:
             layer.crop[3] = y1 / h;
             layer.ready = true;
         } catch (...) {
+            layer.screen->upload_failed();
         }
         frame.Close();
+        layer.screen->finish_resize();
     }
 
     // Encoder frames come from a fixed pool, so their views are kept.
@@ -1405,6 +1581,7 @@ bool Overlays::needs_composition(std::size_t canvas) const { return impl_->needs
 Result Overlays::set(std::size_t index, bool visible, const std::optional<Area>& area) { return impl_->set(index, visible, area); }
 Result Overlays::set_screen(bool visible, const std::optional<Area>& area) { return impl_->set_screen(visible, area); }
 std::uint64_t Overlays::camera_frames() const { return impl_->camera_frames(); }
+rec::Stats::WindowLayer Overlays::window_layer_stats(std::size_t index) const { return impl_->window_layer_stats(index); }
 bool Overlays::camera_lost() const { return impl_->camera_lost(); }
 void Overlays::stop() { impl_->stop(); }
 

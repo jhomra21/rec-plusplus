@@ -151,7 +151,7 @@ struct Options {
     Area screen_crop; // The part of the capture shown, in fractions of it.
     ColorAdjust screen_color;
     ColorAdjust camera_color;
-    std::vector<Overlay> overlays; // At most 15, drawn over the capture.
+    std::vector<Overlay> overlays; // At most kMaxOverlays, drawn over the capture.
     Canvas canvas2; // A second canvas, usually vertical; off while its width is 0.
     // Make preview() frames up to this many pixels wide, in the output's shape; 0 = no preview.
     std::uint32_t preview_width = 0;
@@ -186,6 +186,7 @@ struct Camera {
 };
 
 inline constexpr std::size_t kMaxStreams = 4;
+inline constexpr std::size_t kMaxOverlays = 15;
 
 // One server of a live stream.
 struct StreamStats {
@@ -232,6 +233,16 @@ struct Stats {
     std::uint32_t stream_count = 0;
     double replay_seconds = 0; // Media the replay buffer holds now.
     std::uint64_t camera_frames = 0; // Frames received from camera overlays.
+    struct WindowLayer {
+        std::uint64_t callbacks = 0;
+        std::uint64_t frames = 0;
+        std::uint64_t resize_skips = 0;
+        std::uint64_t failures = 0;
+        std::uint32_t retries = 0;
+        std::int32_t last_error = 0;
+        std::int64_t first_frame_ms = -1;
+    };
+    std::array<WindowLayer, kMaxOverlays> window_layers{}; // Indexed by the overlay position.
     // The second canvas: frames composed and encoded, and frames skipped because its encoder
     // fell behind. Its servers follow the main canvas's in streams.
     std::uint64_t canvas2_frames = 0;
