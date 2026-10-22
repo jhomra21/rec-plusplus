@@ -194,7 +194,9 @@ if [[ -n "${REC_APP_SELF_TEST_PHONE:-}" ]]; then
 fi
 probe "$(step pause)" app-pause
 grep -qx 'audio_tracks=3' "$artifacts/app-pause.probe"
-within "$(value duration "$artifacts/app-pause.probe")" 3.5 4.9
+# About 2.6 s recorded (0.6 s, then 2 s after resuming) plus start and snapshot latency; a pause
+# that cut nothing would add its 1.5 s and land above the range.
+within "$(value duration "$artifacts/app-pause.probe")" 2.5 3.9
 within "$(value av_sync_events "$artifacts/app-pause.probe")" 3 5
 # A hosted VM's first frame can land one 33 ms slot late; a real Mac stays within a few ms.
 within "$(value av_offset_max_ms "$artifacts/app-pause.probe")" 0 "$([[ "${GITHUB_ACTIONS:-}" == true ]] && echo 35 || echo 20)"
