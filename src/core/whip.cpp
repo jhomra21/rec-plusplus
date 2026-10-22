@@ -712,12 +712,12 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
         // establish a later segment start before the opening IDR is written. Prefer the latest
         // Opus sample at or before the IDR; if none is queued, use the nearest later one.
         const Media* first_audio = best_before ? best_before : best_after;
-        // If no nearby packet exists, use the closest available audio. Avoid leading the
-        // IDR with stale audio: a later packet is preferable when the prior one is >200 ms old.
+        // If no nearby packet exists, use the closest available audio. In particular, don't
+        // anchor to an older packet merely because it falls inside an arbitrary staleness window.
         if (!first_audio) {
-            const bool stale_before = latest_before && key_sample - latest_before->sample > 200 * 48;
-            first_audio = stale_before && nearest_after ? nearest_after
-                                                        : (latest_before ? latest_before : nearest_after);
+            const bool before_is_nearer =
+                latest_before && (!nearest_after || key_sample - latest_before->sample <= nearest_after->sample - key_sample);
+            first_audio = before_is_nearer ? latest_before : nearest_after;
         }
         const std::int64_t ref = first_audio ? first_audio->sample : key_sample;
         queue_.erase(std::remove_if(queue_.begin(), queue_.end(),
@@ -755,12 +755,37 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
                     return true;
                 }
             }
+            // Preserve audio between the opening packet and the IDR. These packets must retain
+            // their inter-track spacing in receivers that derive audio sample durations from
+            // packet arrival times rather than RTP timestamps alone.
+            if (s.opening_audio_sent) {
+                for (std::size_t i = 0; i < queue_.size(); ++i) {
+                    const auto& m = queue_[i];
+                    if (m.video || m.sample <= s.ref_sample || m.ms >= s.t0_ms) continue;
+                    if (pick == queue_.size() || m.sample < queue_[pick].sample) pick = i;
+                }
+                if (pick != queue_.size()) {
+                    const auto& audio = queue_[pick];
+                    const auto offset_ms = static_cast<std::int64_t>(audio.ms) -
+                                           static_cast<std::int64_t>(s.t0_ms);
+                    const auto audio_due = s.at + milliseconds(offset_ms) - kOpeningAudioLead;
+                    if (audio_due > now) {
+                        next = audio_due;
+                        return false;
+                    }
+                    item = std::move(queue_[pick]);
+                    queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(pick));
+                    return true;
+                }
+            }
             // Residual race: if the receiver still decodes video first, MediaMTX's recorder
             // can drop the opening IDR. Holding audio until video frame two would bound this,
             // but would delay opening audio.
-            const auto key = std::find_if(queue_.begin(), queue_.end(),
-                                          [](const Media& m) { return m.video && m.key; });
-            if (key != queue_.end()) pick = static_cast<std::size_t>(key - queue_.begin());
+            if (!s.opening_audio_sent || pick == queue_.size()) {
+                const auto key = std::find_if(queue_.begin(), queue_.end(),
+                                              [](const Media& m) { return m.video && m.key; });
+                if (key != queue_.end()) pick = static_cast<std::size_t>(key - queue_.begin());
+            }
         } else {
             const std::size_t span = std::min<std::size_t>(queue_.size(), 64);
             pick = 0;
@@ -769,11 +794,12 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
         }
         if (pick == queue_.size()) return false;
         const auto& m = queue_[static_cast<std::ptrdiff_t>(pick)];
-        if (m.ms < s.t0_ms && (m.video || m.sample != s.ref_sample)) {
+        if ((m.video && m.ms < s.t0_ms) || (!m.video && m.sample < s.ref_sample)) {
             queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(pick));
             continue;
         }
-        const auto due = s.at + milliseconds(m.ms - s.t0_ms);
+        // Audio kept from before the keyframe has ms < t0_ms; subtracting as uint32 would wrap.
+        const auto due = s.at + milliseconds(static_cast<std::int64_t>(m.ms) - static_cast<std::int64_t>(s.t0_ms));
         if (due > now) { next = due; return false; }
         item = std::move(queue_[static_cast<std::ptrdiff_t>(pick)]);
         queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(pick));
