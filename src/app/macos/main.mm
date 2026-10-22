@@ -459,6 +459,7 @@ struct PreviewHit {
     NSButton *_screenColorReset, *_cameraColorReset;
     NSView *_screenStrip, *_cameraStrip;
     NSStackView* _statusColumn;
+    NSStackView* _statusLine;
     NSButton* _shadow;
     NSTextField *_bitrate, *_imageFile;
     NSStatusItem* _statusItem;
@@ -1066,16 +1067,30 @@ struct PreviewHit {
     _window.releasedWhenClosed = NO;
 
     _status = label(@"Ready to record");
-    _status.font = [NSFont systemFontOfSize:24 weight:NSFontWeightSemibold];
+    _status.font = [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold];
     _status.accessibilityLabel = @"Status";
-    _detail = [NSTextField wrappingLabelWithString:@""];
+    _detail = label(@"");
+    _detail.accessibilityLabel = @"Status detail";
+    _detail.maximumNumberOfLines = 1;
+    _detail.lineBreakMode = NSLineBreakByTruncatingTail;
     _detail.textColor = Palette::secondaryText();
-    _detail.maximumNumberOfLines = 2;
-    _detail.preferredMaxLayoutWidth = 440;
     [_detail setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     _live = label(@"");
     _live.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
     _live.textColor = Palette::accent();
+    _live.hidden = YES;
+    _statusLine = [NSStackView stackViewWithViews:@[_status, _detail, _live]];
+    _statusLine.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    _statusLine.alignment = NSLayoutAttributeCenterY;
+    _statusLine.distribution = NSStackViewDistributionFill;
+    _statusLine.spacing = 6;
+    [_statusLine.widthAnchor constraintEqualToConstant:440].active = YES;
+    [_status.widthAnchor constraintLessThanOrEqualToConstant:230].active = YES;
+    [_live.widthAnchor constraintLessThanOrEqualToConstant:150].active = YES;
+    [_status setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_live setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_live setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_detail setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     // Each source: its level before volume, the volume, and mute.
     _systemMeter = [self meter:@"System audio level"];
@@ -1334,7 +1349,7 @@ struct PreviewHit {
     // Status and preview side by side over two columns: what and how to record on the left,
     // where it goes on the right, and the scenes in a narrower third column. One column would
     // be taller than a 13-inch screen.
-    NSArray<NSView*>* status = @[_status, _detail, _live, meters, screenStrip, cameraStrip, buttons, _permissionRow];
+    NSArray<NSView*>* status = @[_statusLine, meters, screenStrip, cameraStrip, buttons, _permissionRow];
     NSArray<NSView*>* left = @[header(@"Capture"), capture,
                                header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons,
                                _verticalMovie];
@@ -2568,6 +2583,8 @@ struct PreviewHit {
     if (_attention && detail.length && ![detail hasPrefix:@"!"]) detail = [@"! " stringByAppendingString:detail];
     if (![_status.stringValue isEqualToString:status]) _status.stringValue = status;
     if (![_detail.stringValue isEqualToString:detail]) _detail.stringValue = detail;
+    _detail.accessibilityValue = detail;
+    _detail.toolTip = detail.length ? detail : nil;
     _status.textColor = s.state == State::recording ? Palette::accent()
                       : s.state == State::paused    ? Palette::pausedAccent()
                                                     : Palette::text();
@@ -2578,6 +2595,7 @@ struct PreviewHit {
                    : s.live ? [NSString stringWithFormat:@"● LIVE  %.1f Mb/s", s.stream_kbps / 1000.0]
                    : s.reconnecting ? @"Reconnecting…" : @"";
     if (![_live.stringValue isEqualToString:live]) _live.stringValue = live;
+    _live.hidden = live.length == 0;
     // Hide the last level once recording ends; polling stops with it.
     if (!active) {
         _systemMeterState.shown = _micMeterState.shown = 0;
@@ -2776,6 +2794,42 @@ struct PreviewHit {
         note([NSString stringWithFormat:@"snapshot.%@=%lux%lu", name,
               static_cast<unsigned long>(flattened.pixelsWide), static_cast<unsigned long>(flattened.pixelsHigh)]);
     };
+    const auto save_status_row_png = [&] {
+        __block NSBitmapImageRep* bitmap = nil;
+        ui(^{
+            const CGFloat scale = 2;
+            bitmap = [[NSBitmapImageRep alloc] initWithBitmapDataPlanes:nullptr
+                pixelsWide:static_cast<NSInteger>(ceil(self->_statusLine.bounds.size.width * scale))
+                pixelsHigh:static_cast<NSInteger>(ceil(self->_statusLine.bounds.size.height * scale))
+                bitsPerSample:8 samplesPerPixel:4 hasAlpha:YES isPlanar:NO
+                colorSpaceName:NSCalibratedRGBColorSpace bytesPerRow:0 bitsPerPixel:0];
+            NSGraphicsContext* context = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmap];
+            [NSGraphicsContext saveGraphicsState];
+            [NSGraphicsContext setCurrentContext:context];
+            CGContextScaleCTM(context.CGContext, scale, scale);
+            [[NSColor colorWithWhite:0.10 alpha:1] setFill];
+            NSRectFill(self->_statusLine.bounds);
+            NSMutableParagraphStyle* style = [[NSMutableParagraphStyle alloc] init];
+            style.lineBreakMode = NSLineBreakByTruncatingTail;
+            const auto draw = [&](NSTextField* field, NSColor* color) {
+                const NSRect frame = [field.superview convertRect:field.frame toView:self->_statusLine];
+                [field.stringValue drawInRect:frame withAttributes:@{
+                    NSFontAttributeName: field.font,
+                    NSForegroundColorAttributeName: color,
+                    NSParagraphStyleAttributeName: style,
+                }];
+            };
+            draw(self->_status, Palette::accent());
+            draw(self->_detail, NSColor.whiteColor);
+            draw(self->_live, Palette::accent());
+            [NSGraphicsContext restoreGraphicsState];
+        });
+        NSString* path = [artifacts stringByAppendingPathComponent:@"app-status-row.png"];
+        NSData* png = [bitmap representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        if (!png || ![png writeToFile:path atomically:YES]) fail(@"could not save the status row snapshot");
+        note([NSString stringWithFormat:@"snapshot.app-status-row.png=%lux%lu",
+              static_cast<unsigned long>(bitmap.pixelsWide), static_cast<unsigned long>(bitmap.pixelsHigh)]);
+    };
     struct PixelStats { NSInteger count = 0; CGFloat meanRed = 0; };
     const auto sample_window_pixels = [&](NSView* target, const auto& test) {
         __block NSBitmapImageRep* rep = nil;
@@ -2918,6 +2972,61 @@ struct PreviewHit {
     if (unnamed) fail([@"a control has no accessible name: " stringByAppendingString:unnamed]);
     note(@"accessibility=ok");
     wait_for(@"Ready to record", 20);
+    __block BOOL statusLineLayoutOK = NO;
+    ui(^{
+        self->_statusLine.hidden = NO;
+        self->_status.stringValue = @"● Recording 00:00";
+        self->_status.textColor = Palette::accent();
+        self->_live.stringValue = @"● LIVE 2/2  8.0 Mb/s";
+        self->_live.hidden = NO;
+        NSString* longDetail = @"! This is a deliberately long attention detail used to prove that text is truncated at the tail without wrapping or overlapping the LIVE badge, while its full value remains accessible.";
+        self->_detail.textColor = Palette::text();
+        self->_detail.stringValue = longDetail;
+        self->_detail.accessibilityValue = longDetail;
+        self->_detail.toolTip = longDetail;
+        [self->_window.contentView layoutSubtreeIfNeeded];
+        [self->_statusLine layoutSubtreeIfNeeded];
+        [self->_status setNeedsDisplay:YES];
+        [self->_detail setNeedsDisplay:YES];
+        [self->_live setNeedsDisplay:YES];
+        [self->_statusLine setNeedsDisplay:YES];
+        [self->_status displayIfNeeded];
+        [self->_detail displayIfNeeded];
+        [self->_live displayIfNeeded];
+        [self->_statusLine displayIfNeeded];
+        [self->_window displayIfNeeded];
+        const NSRect status = [self->_status.superview convertRect:self->_status.frame toView:self->_statusLine];
+        const NSRect detail = [self->_detail.superview convertRect:self->_detail.frame toView:self->_statusLine];
+        const NSRect live = [self->_live.superview convertRect:self->_live.frame toView:self->_statusLine];
+        const CGFloat statusCenter = NSMidY(status), detailCenter = NSMidY(detail), liveCenter = NSMidY(live);
+        const CGFloat fullDetailWidth = [longDetail sizeWithAttributes:@{NSFontAttributeName: self->_detail.font}].width;
+        statusLineLayoutOK = fabs(statusCenter - detailCenter) <= 3 && fabs(detailCenter - liveCenter) <= 3 &&
+            NSMaxX(status) <= NSMinX(detail) + 1 && NSMaxX(detail) <= NSMinX(live) + 1 &&
+            NSMinX(status) >= -2 && NSMaxX(live) <= NSMaxX(self->_statusLine.bounds) + 2 && detail.size.width >= 30 &&
+            fullDetailWidth > detail.size.width &&
+            detail.size.height <= self->_statusLine.bounds.size.height &&
+            self->_detail.lineBreakMode == NSLineBreakByTruncatingTail &&
+            self->_detail.maximumNumberOfLines == 1 &&
+            [self->_detail.toolTip isEqualToString:longDetail] &&
+            [self->_detail.accessibilityValue isEqualToString:longDetail];
+    });
+    if (!statusLineLayoutOK) {
+        __block NSString* geometry;
+        ui(^{
+            const NSRect status = [self->_status.superview convertRect:self->_status.frame toView:self->_statusLine];
+            const NSRect detail = [self->_detail.superview convertRect:self->_detail.frame toView:self->_statusLine];
+            const NSRect live = [self->_live.superview convertRect:self->_live.frame toView:self->_statusLine];
+            geometry = [NSString stringWithFormat:@"status %.1f,%.1f %.1fx%.1f detail %.1f,%.1f %.1fx%.1f live %.1f,%.1f %.1fx%.1f line %.1fx%.1f",
+                        status.origin.x, status.origin.y, status.size.width, status.size.height,
+                        detail.origin.x, detail.origin.y, detail.size.width, detail.size.height,
+                        live.origin.x, live.origin.y, live.size.width, live.size.height,
+                        self->_statusLine.bounds.size.width, self->_statusLine.bounds.size.height];
+        });
+        fail([@"status, detail and LIVE do not share a non-overlapping row with full accessible detail: " stringByAppendingString:geometry]);
+    }
+    note(@"status-line=ok");
+    save_status_row_png();
+    ui(^{ [self refresh]; });
     // The space between the controls and the window's edges, reported for the layout check.
     __block NSString* margins = nil;
     __block bool tight = false;
