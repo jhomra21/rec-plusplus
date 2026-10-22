@@ -35,6 +35,7 @@ using System;
 using System.Text;
 using System.Runtime.InteropServices;
 public static class AppWindow {
+  [StructLayout(LayoutKind.Sequential)] public struct SIZE { public int cx, cy; }
   [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO {
     public int cbSize, flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public RECT rcCaret;
   }
@@ -61,18 +62,30 @@ public static class AppWindow {
   [DllImport("user32.dll")] public static extern bool RedrawWindow(IntPtr h, IntPtr update, IntPtr erase, uint flags);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
   [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] static extern IntPtr GetDC(IntPtr h);
+  [DllImport("user32.dll")] static extern int ReleaseDC(IntPtr h, IntPtr dc);
+  [DllImport("gdi32.dll")] static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+  [DllImport("gdi32.dll", CharSet=CharSet.Unicode)] static extern bool GetTextExtentPoint32(IntPtr dc, string text, int length, out SIZE size);
   [DllImport("user32.dll", EntryPoint="GetClassLongPtrW")] public static extern UIntPtr GetClassLongPtr(IntPtr h, int index);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder name, int count);
   [DllImport("user32.dll")] public static extern int MapWindowPoints(IntPtr from, IntPtr to, ref RECT r, uint count);
   [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool SetWindowText(IntPtr h, string text);
   public static Accessibility.IAccessible Of(IntPtr h) {
     Guid iid = new Guid("618736E0-3C3D-11CF-810C-00AA00389B71"); object o;
     Marshal.ThrowExceptionForHR(AccessibleObjectFromWindow(h, 0xFFFFFFFC, ref iid, out o));
     return (Accessibility.IAccessible)o;
   }
   public static void SetValue(IntPtr h, string value) { Of(h).set_accValue(0, value); }
-  public static void SetText(IntPtr h, string value) { if (!SetWindowText(h, value)) throw new Exception("SetWindowText failed"); }
+  public static int TextWidth(IntPtr h, string text) {
+    IntPtr dc = GetDC(h); if (dc == IntPtr.Zero) throw new Exception("GetDC failed for status detail");
+    IntPtr font = SendMessage(h, 0x0031, IntPtr.Zero, IntPtr.Zero); // WM_GETFONT
+    IntPtr previous = font == IntPtr.Zero ? IntPtr.Zero : SelectObject(dc, font);
+    try { SIZE size; if (!GetTextExtentPoint32(dc, text, text.Length, out size)) throw new Exception("GetTextExtentPoint32 failed"); return size.cx; }
+    finally { if (previous != IntPtr.Zero) SelectObject(dc, previous); ReleaseDC(h, dc); }
+  }
+  public static bool TooltipMatches(IntPtr window, IntPtr detail) {
+    return SendMessage(window, 0x8003, detail, IntPtr.Zero) != IntPtr.Zero;
+  }
 }
 '@
 
@@ -213,7 +226,7 @@ function Wait-Recorded($ui, [int]$seconds, [int]$timeout = 60) {
     $deadline = $start.AddSeconds($timeout)
     $report = $start.AddSeconds(5)
     while ((Get-Date) -lt $deadline) {
-        if ((Text-Of $ui 100) -match '(\d+):(\d\d)$' -and [int]$Matches[1] * 60 + [int]$Matches[2] -ge $seconds) { return }
+        if ((Text-Of $ui 101) -match '^!?\s*(\d+):(\d\d) recorded' -and [int]$Matches[1] * 60 + [int]$Matches[2] -ge $seconds) { return }
         # A slow wait shows whether the engine still writes, drops, or stopped.
         if ((Get-Date) -gt $report) {
             Write-Host "  waiting for $seconds s, $([int]((Get-Date) - $start).TotalSeconds) s in: $(Text-Of $ui 100); $(Text-Of $ui 101)"
@@ -246,6 +259,9 @@ function Snapshot-Preview($ui, [string]$path) {
 function Snapshot-Window($ui, [string]$path) {
     $client = New-Object AppWindow+RECT
     [AppWindow]::GetClientRect($ui.Window, [ref]$client) | Out-Null
+    if ($client.Right -lt 1 -or $client.Bottom -lt 1) {
+        throw "test app client area is invalid for a screenshot: $($client.Right)x$($client.Bottom)"
+    }
     $bitmap = New-Object System.Drawing.Bitmap $client.Right, $client.Bottom
     $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
     $dc = $graphics.GetHdc()
@@ -255,9 +271,9 @@ function Snapshot-Window($ui, [string]$path) {
     $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
     return $bitmap
 }
-function Set-TestDpi($ui, [int]$dpi, $baseRect) {
+function Set-TestDpi($ui, [int]$dpi, $baseRect, [int]$baseDpi) {
     $rect = New-Object AppWindow+RECT
-    $scale = $dpi / 96.0
+    $scale = $dpi / [double]$baseDpi
     $rect.Left = $baseRect.Left
     $rect.Top = $baseRect.Top
     $rect.Right = $rect.Left + [int](($baseRect.Right - $baseRect.Left) * $scale)
@@ -288,7 +304,7 @@ function Snapshot-StripDpi($ui, [string]$directory, [string]$prefix) {
             if (-not $keep) { [AppWindow]::ShowWindow($handle, 0) | Out-Null }
         }
         foreach ($dpi in @(96, 144, 192)) {
-            if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect }
+            if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect $originalDpi }
             Assert-StripGeometry $ui ($prefix -eq 'app-strips-camera')
             $path = Join-Path $directory "$prefix-dpi-$([int]($dpi * 100 / 96)).png"
             $bitmap = Snapshot-Window $ui $path
@@ -320,7 +336,7 @@ function Snapshot-StripDpi($ui, [string]$directory, [string]$prefix) {
             }
         }
     } finally {
-        Set-TestDpi $ui $originalDpi $baseRect
+        Set-TestDpi $ui $originalDpi $baseRect $originalDpi
         foreach ($id in $visible.Keys) {
             $handle = [AppWindow]::GetDlgItem($ui.Window, [int]$id)
             if ($handle -ne [IntPtr]::Zero) {
@@ -378,7 +394,7 @@ function Rect-OfId($ui, [int]$id) {
     if ($handle -eq [IntPtr]::Zero -or -not [AppWindow]::GetWindowRect($handle, [ref]$r)) { throw "GetWindowRect failed for control id $id" }
     return $r
 }
-function Assert-StatusRow($ui, [string]$detail) {
+function Assert-StatusRow($ui, [int]$dpi) {
     $status = Rect-OfId $ui 100
     $detailRect = Rect-OfId $ui 101
     $live = Rect-OfId $ui 102
@@ -393,32 +409,33 @@ function Assert-StatusRow($ui, [string]$detail) {
     if ($status.Right -gt $detailRect.Left -or $detailRect.Right -gt $live.Left) {
         throw "status controls overlap or are out of order: status=$($status.Left)-$($status.Right), detail=$($detailRect.Left)-$($detailRect.Right), live=$($live.Left)-$($live.Right)"
     }
-    $fullDetail = 'This is a deliberately long status detail that must remain available in full to accessibility and the tooltip while the visible text truncates before the LIVE badge.'
-    [AppWindow]::SetText([AppWindow]::GetDlgItem($ui.Window, 101), $fullDetail)
-    if ((Text-Of $ui 101) -ne $fullDetail) { throw 'long status detail was not fully readable through MSAA' }
-    $detailRectLong = Rect-OfId $ui 101
-    $liveLong = Rect-OfId $ui 102
-    if ($detailRectLong.Right -gt $liveLong.Left) { throw 'long status detail overlaps the LIVE slot' }
-    if (($detailRectLong.Right - $detailRectLong.Left) -ge 300) { throw 'long status detail did not receive a truncating detail column' }
-    if (([AppWindow]::GetWindowLong([AppWindow]::GetDlgItem($ui.Window, 101), -16) -band 0x4000) -eq 0) {
-        throw 'status detail is missing the tail-ellipsis style'
+    if ($detailRect.Right -gt $live.Left) { throw 'status detail overlaps the LIVE slot' }
+    $minimumWidth = [int](290 * $dpi / 96)
+    if (($detailRect.Right - $detailRect.Left) -lt $minimumWidth) {
+        throw "idle status detail is narrower than $minimumWidth pixels at $dpi DPI: status=$($status.Right - $status.Left), detail=$($detailRect.Right - $detailRect.Left), live=$($live.Right - $live.Left)"
     }
-    [AppWindow]::SetText([AppWindow]::GetDlgItem($ui.Window, 101), $detail)
+}
+function Assert-StatusTooltip($ui) {
+    $handle = [AppWindow]::GetDlgItem($ui.Window, 101)
+    $fullDetail = Text-Of $ui 101
+    $detailRect = Rect-OfId $ui 101
+    $detailWidth = $detailRect.Right - $detailRect.Left
+    $textWidth = [AppWindow]::TextWidth($handle, $fullDetail)
+    if ($textWidth -le $detailWidth) { throw "the recording detail did not truncate: text=$textWidth, slot=$detailWidth" }
+    if (-not [AppWindow]::TooltipMatches($ui.Window, $handle)) { throw "the tooltip did not contain the full status detail '$fullDetail'" }
+    if ($detailRect.Right -gt (Rect-OfId $ui 102).Left) { throw 'truncated status detail overlaps the LIVE slot' }
 }
 function Assert-StatusDpi($ui) {
     $originalDpi = [int][AppWindow]::GetDpiForWindow($ui.Window)
     $baseRect = New-Object AppWindow+RECT
     if (-not [AppWindow]::GetWindowRect($ui.Window, [ref]$baseRect)) { throw 'GetWindowRect failed before status DPI checks' }
-    $detail = Text-Of $ui 101
     try {
         foreach ($dpi in @(96, 144, 192)) {
-            if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect }
-            Assert-StatusRow $ui $detail
+            if ($dpi -ne $originalDpi) { Set-TestDpi $ui $dpi $baseRect $originalDpi }
+            Assert-StatusRow $ui $dpi
         }
     } finally {
-        if ($originalDpi -ne [int][AppWindow]::GetDpiForWindow($ui.Window)) {
-            Set-TestDpi $ui $originalDpi $baseRect
-        }
+        Set-TestDpi $ui $originalDpi $baseRect $originalDpi
     }
 }
 function Assert-StripVisibility($ui, [int[]]$ids, [bool]$visible, [string]$name) {
@@ -579,7 +596,7 @@ try {
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
     Assert-StatusDpi $ui
-    Assert-StatusRow $ui (Text-Of $ui 101)
+    Assert-StatusRow $ui ([int][AppWindow]::GetDpiForWindow($ui.Window))
     $statusRowShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-row.png')
     $statusRowShot.Dispose()
     Write-Host "Status row snapshot: $(Join-Path $Artifacts 'app-status-row.png')"
@@ -705,7 +722,8 @@ try {
     $recordShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-recording.png')
     if ((Closest-Status-Color $recordShot $ui 225 40 40) -gt 100) { throw 'recording status text did not use palette accent #E12828' }
     $recordShot.Dispose()
-    Start-Sleep -Seconds 2
+    Wait-Recorded $ui 2
+    Assert-StatusTooltip $ui
     Press $ui 'Pause'
     Wait-Status $ui 'Paused' | Out-Null
     $pauseShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-paused.png')
@@ -767,6 +785,7 @@ try {
     }
     if ((Text-Of $ui 102) -notmatch 'LIVE') { throw 'live badge does not contain LIVE' }
     Start-Sleep -Seconds 3
+    Assert-StatusTooltip $ui
     # The badge shows the measured send rate, here over a second of a 3000 kb/s stream.
     $badge = Text-Of $ui 102
     if (-not ($badge -match 'LIVE 2/2\s+(\d+\.\d) Mb/s') -or [double]$Matches[1] -le 0) { throw "no stream rate for both servers in the LIVE badge: '$badge'" }

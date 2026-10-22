@@ -44,6 +44,8 @@ using rec::app::Status;
 
 constexpr UINT kSessionChanged = WM_APP + 1;
 constexpr UINT kTrayMessage = WM_APP + 2;
+// app-e2e reads tooltip contents through the app's test-pattern-only message.
+constexpr UINT kTestTooltipQuery = WM_APP + 3;
 constexpr UINT_PTR kPollTimer = 1, kPreviewTimer = 2;
 constexpr int kHotkey = 1, kReplayHotkey = 2;
 constexpr UINT kTrayId = 1;
@@ -760,6 +762,8 @@ private:
         case kSessionChanged:
             refresh();
             return 0;
+        case kTestTooltipQuery:
+            return test_pattern_ && detail_tooltip_matches();
         case WM_CLIPBOARDUPDATE:
             clipboard_changed();
             return 0;
@@ -848,6 +852,7 @@ private:
             const HFONT font = id == kStatus ? title_ : header || id == kLive ? bold_ : font_;
             SendMessageW(hwnd, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
         }
+        if (detail_tooltip_window_) SendMessageW(detail_tooltip_window_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
     }
 
     HWND add(int id, const wchar_t* type, const wchar_t* text, DWORD style, DWORD extended = 0) {
@@ -890,18 +895,10 @@ private:
         label(kStatus, L"Ready to record");
         label(kDetail, L"");
         label(kLive, L"");
-        detail_tooltip_ = L"";
+        detail_tooltip_.clear();
         detail_tooltip_window_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
             WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
             window_, nullptr, instance_, nullptr);
-        if (detail_tooltip_window_) {
-            TOOLINFOW tool{sizeof tool};
-            tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-            tool.hwnd = window_;
-            tool.uId = reinterpret_cast<UINT_PTR>(get(kDetail));
-            tool.lpszText = const_cast<wchar_t*>(detail_tooltip_.c_str());
-            SendMessageW(detail_tooltip_window_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
-        }
         // Each source: its level before volume, the volume, and mute.
         label(kSystemLabel, L"System audio");
         add(kSystemMeter, PROGRESS_CLASSW, L"", PBS_SMOOTH);
@@ -1190,11 +1187,32 @@ private:
         // Status, levels and the record buttons on the left, the preview on the right.
         width = column;
         {
-            const int status_width = px(180), live_width = px(112), status_height = px(34), text_height = px(20);
-            const int detail_width = width - status_width - live_width - 2 * gap;
+            int status_width = px(0);
+            // Extend into the 30-DIP gap before the preview, leaving 6 DIPs clear.
+            const int row_width = width + px(24);
+            HDC dc = GetDC(window_);
+            if (dc) {
+                HGDIOBJ previous = SelectObject(dc, title_);
+                for (const wchar_t* text : {L"\u25CF Recording", L"Paused", L"Starting...", L"Saving..."}) {
+                    SIZE extent{};
+                    if (GetTextExtentPoint32W(dc, text, static_cast<int>(wcslen(text)), &extent))
+                        status_width = std::max(status_width, static_cast<int>(extent.cx));
+                }
+                SelectObject(dc, font_);
+                SIZE ready_extent{};
+                if (GetTextExtentPoint32W(dc, L"Ready to record", 16, &ready_extent))
+                    status_width = std::max(status_width, static_cast<int>(ready_extent.cx));
+                SelectObject(dc, previous);
+                ReleaseDC(window_, dc);
+            }
+            const int live_width = live_slot_visible_ ? px(112) : 0;
+            const int status_height = px(34), text_height = px(20);
+            status_width += px(4);
+            const int status_gap = px(4);
+            const int detail_width = row_width - status_width - status_gap - (live_slot_visible_ ? live_width + gap : 0);
             place(kStatus, x, y, status_width, status_height);
-            place(kDetail, x + status_width + gap, y + (status_height - text_height) / 2, detail_width, text_height);
-            place(kLive, x + width - live_width, y + (status_height - text_height) / 2, live_width, text_height);
+            place(kDetail, x + status_width + status_gap, y + (status_height - text_height) / 2, detail_width, text_height);
+            place(kLive, x + row_width - live_width, y + (status_height - text_height) / 2, live_width, text_height);
             y += status_height + gap;
         }
         level(kSystemLabel, kSystemMeter, kSystemVolume, kSystemVolumeText, kSystemMute);
@@ -2421,6 +2439,17 @@ private:
     void set_text(int id, const std::wstring& text) {
         if (text_of(get(id)) != text) SetWindowTextW(get(id), text.c_str());
     }
+    bool detail_tooltip_matches() const {
+        if (!detail_tooltip_window_) return false;
+        wchar_t text[1024]{};
+        TOOLINFOW tool{sizeof tool};
+        tool.uFlags = TTF_IDISHWND;
+        tool.hwnd = window_;
+        tool.uId = reinterpret_cast<UINT_PTR>(get(kDetail));
+        tool.lpszText = text;
+        SendMessageW(detail_tooltip_window_, TTM_GETTEXTW, std::size(text), reinterpret_cast<LPARAM>(&tool));
+        return detail_tooltip_ == text;
+    }
 
     void refresh() {
         const Status s = session_.status();
@@ -2448,14 +2477,14 @@ private:
             else detail = hotkey_ ? L"Ctrl+Alt+R starts and stops recording from anywhere." : L"Ctrl+Alt+R is used by another app.";
             break;
         case State::starting: status = L"Starting..."; break;
-        case State::recording: status = L"\u25CF Recording  " + clock(s.seconds); break;
-        case State::paused: status = L"Paused  " + clock(s.seconds); break;
+        case State::recording: status = L"\u25CF Recording"; break;
+        case State::paused: status = L"Paused"; break;
         case State::finishing: status = L"Saving..."; break;
         }
         if (active) {
-            detail = std::to_wstring(s.frames) + L" frames";
-            if (s.dropped) { detail += L", " + std::to_wstring(s.dropped) + L" dropped"; attention_ = true; }
-            if (s.audio_dropped) { detail += L", audio drops " + std::to_wstring(s.audio_dropped); attention_ = true; }
+            detail = clock(s.seconds) + L" recorded, " + std::to_wstring(s.frames) + L" frames, " +
+                     std::to_wstring(s.dropped) + L" dropped, audio drops " + std::to_wstring(s.audio_dropped);
+            if (s.dropped || s.audio_dropped) attention_ = true;
             if (s.streaming && !s.stream_error.empty()) { detail += L". Stream lost: " + wide(s.stream_error); attention_ = true; }
             else if (s.stream_dropped) { detail += L", stream skipped " + std::to_wstring(s.stream_dropped); attention_ = true; }
             if (s.live && s.stream_queued_ms > 1000) {
@@ -2465,6 +2494,7 @@ private:
                 attention_ = true;
             }
             if (s.reconnects) detail += L", stream reconnected " + std::to_wstring(s.reconnects) + (s.reconnects == 1 ? L" time" : L" times");
+            if (s.reconnecting) detail += L", reconnecting";
             if (s.replay) detail += L", replay " + std::to_wstring(static_cast<int>(s.replay_seconds)) + L" s";
             if (const auto lost = rec::app::lost_sources_text(s); !lost.empty()) {
                 detail = wide(lost) + L" " + detail;
@@ -2476,17 +2506,41 @@ private:
             attention_ = note_attention_;
         }
         if (attention_ && !detail.empty()) detail = L"! " + detail;
+        if (live_slot_visible_ != s.live) {
+            live_slot_visible_ = s.live;
+            layout();
+        }
+        SendMessageW(get(kStatus), WM_SETFONT,
+                     reinterpret_cast<WPARAM>(active ? title_ : font_), TRUE);
         set_text(kStatus, status);
         set_text(kDetail, detail);
-        if (detail_tooltip_ != detail) {
-            detail_tooltip_ = detail;
+        std::wstring tooltip;
+        RECT detail_client{};
+        SIZE detail_extent{};
+        HDC detail_dc = GetDC(window_);
+        if (detail_dc) {
+            const HGDIOBJ previous = SelectObject(detail_dc, font_);
+            GetClientRect(get(kDetail), &detail_client);
+            if (GetTextExtentPoint32W(detail_dc, detail.c_str(), static_cast<int>(detail.size()), &detail_extent) &&
+                detail_extent.cx > detail_client.right - detail_client.left)
+                tooltip = detail;
+            SelectObject(detail_dc, previous);
+            ReleaseDC(window_, detail_dc);
+        }
+        if (detail_tooltip_ != tooltip) {
+            detail_tooltip_ = std::move(tooltip);
             if (detail_tooltip_window_) {
                 TOOLINFOW tool{sizeof tool};
                 tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
                 tool.hwnd = window_;
                 tool.uId = reinterpret_cast<UINT_PTR>(get(kDetail));
-                tool.lpszText = const_cast<wchar_t*>(detail_tooltip_.c_str());
-                SendMessageW(detail_tooltip_window_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&tool));
+                tool.lpszText = detail_tooltip_.empty() ? const_cast<wchar_t*>(L"")
+                                                        : const_cast<wchar_t*>(detail_tooltip_.c_str());
+                if (!detail_tool_added_ && !detail_tooltip_.empty())
+                    detail_tool_added_ = SendMessageW(detail_tooltip_window_, TTM_ADDTOOLW, 0,
+                                                       reinterpret_cast<LPARAM>(&tool)) != FALSE;
+                else if (detail_tool_added_)
+                    SendMessageW(detail_tooltip_window_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&tool));
             }
         }
         std::wstring live;
@@ -2497,8 +2551,6 @@ private:
             else
                 std::swprintf(rate, 48, L"\u25CF LIVE  %.1f Mb/s", s.stream_kbps / 1000.0);
             live = rate;
-        } else if (active && s.reconnecting) {
-            live = L"Reconnecting...";
         }
         set_text(kLive, live);
         // Hide the last level once recording ends; polling stops with it.
@@ -2767,6 +2819,7 @@ private:
     HWND window_ = nullptr;
     HWND detail_tooltip_window_ = nullptr;
     std::wstring detail_tooltip_;
+    bool detail_tool_added_ = false;
     UINT dpi_ = 96;
     UINT taskbar_created_ = 0;
     HFONT font_ = nullptr, bold_ = nullptr, title_ = nullptr;
@@ -2792,6 +2845,7 @@ private:
     ULONGLONG capture_until_ = 0;
     bool captured_server_ = false, captured_key_ = false;
     bool polling_ = false;
+    bool live_slot_visible_ = false;
     bool previewing_ = false;
     rec::app::AreaDrag drag_;
     rec::app::SourceRef dragged_;           // The source drag_ holds.
@@ -2860,7 +2914,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR command, int show) {
         return 0;
     }
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    INITCOMMONCONTROLSEX controls{sizeof controls, ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_BAR_CLASSES};
+    INITCOMMONCONTROLSEX controls{sizeof controls, ICC_STANDARD_CLASSES | ICC_PROGRESS_CLASS | ICC_BAR_CLASSES | ICC_WIN95_CLASSES};
     InitCommonControlsEx(&controls);
     const int code = App().run(instance, show);
     CoUninitialize();
