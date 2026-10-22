@@ -53,9 +53,14 @@ constexpr CGFloat kControlGap = 10;
 
 struct Palette {
     static NSColor* accent() { return [NSColor colorWithSRGBRed:225.0 / 255 green:40.0 / 255 blue:40.0 / 255 alpha:1]; }
-    static NSColor* pausedAccent() {
-        constexpr CGFloat dim = 0.90;
-        return [NSColor colorWithSRGBRed:(225.0 / 255) * dim green:(40.0 / 255) * dim blue:(40.0 / 255) * dim alpha:1];
+    static NSColor* pausedDot() {
+        constexpr CGFloat opacity = 0.55;
+        NSColor* surface = [[NSColor windowBackgroundColor] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+        NSColor* red = accent();
+        return [NSColor colorWithSRGBRed:surface.redComponent + (red.redComponent - surface.redComponent) * opacity
+                                   green:surface.greenComponent + (red.greenComponent - surface.greenComponent) * opacity
+                                    blue:surface.blueComponent + (red.blueComponent - surface.blueComponent) * opacity
+                                   alpha:1];
     }
     static NSColor* text() { return NSColor.labelColor; }
     static NSColor* secondaryText() { return NSColor.secondaryLabelColor; }
@@ -2660,7 +2665,7 @@ struct PreviewHit {
         break;
     case State::starting: status = @"Starting…"; break;
     case State::recording: status = [@"● Recording  " stringByAppendingString:clock_text(s.seconds)]; break;
-    case State::paused: status = [@"Paused  " stringByAppendingString:clock_text(s.seconds)]; break;
+    case State::paused: status = [@"● Paused  " stringByAppendingString:clock_text(s.seconds)]; break;
     case State::finishing: status = @"Saving…"; break;
     }
     if (active) {
@@ -2686,12 +2691,20 @@ struct PreviewHit {
         _attention = _noteAttention;
     }
     if (_attention && detail.length && ![detail hasPrefix:@"!"]) detail = [@"! " stringByAppendingString:detail];
-    if (![_status.stringValue isEqualToString:status]) _status.stringValue = status;
+    if (s.state == State::paused) {
+        NSMutableAttributedString* paused = [[NSMutableAttributedString alloc] initWithString:status];
+        [paused addAttribute:NSForegroundColorAttributeName value:Palette::pausedDot() range:NSMakeRange(0, 1)];
+        [paused addAttribute:NSForegroundColorAttributeName value:Palette::text() range:NSMakeRange(1, status.length - 1)];
+        _status.attributedStringValue = paused;
+    } else {
+        if (![_status.stringValue isEqualToString:status]) _status.stringValue = status;
+    }
+    _status.accessibilityValue = s.state == State::paused
+        ? [@"Paused  " stringByAppendingString:clock_text(s.seconds)] : status;
     if (![_detail.stringValue isEqualToString:detail]) _detail.stringValue = detail;
     if (![_detail.accessibilityValue isEqualToString:detail]) _detail.accessibilityValue = detail;
-    _status.textColor = s.state == State::recording ? Palette::accent()
-                      : s.state == State::paused    ? Palette::pausedAccent()
-                                                    : Palette::text();
+    if (s.state == State::recording) _status.textColor = Palette::accent();
+    else if (s.state != State::paused) _status.textColor = Palette::text();
     _detail.textColor = _attention ? Palette::text() : Palette::secondaryText();
     _live.textColor = (s.live || s.reconnecting) ? Palette::accent() : Palette::secondaryText();
     NSString* live = !active ? @""
@@ -2834,7 +2847,7 @@ struct PreviewHit {
         [image setTemplate:!active];
         button.image = image;
         button.contentTintColor = active && s.state == State::recording ? Palette::accent()
-                                : active && s.state == State::paused ? Palette::pausedAccent() : nil;
+                                : active && s.state == State::paused ? Palette::pausedDot() : nil;
         button.title = active ? [@" " stringByAppendingString:clock_text(s.seconds)] : @"";
     } else {
         button.title = active ? [@"● " stringByAppendingString:clock_text(s.seconds)] : @"○";
@@ -2960,7 +2973,8 @@ struct PreviewHit {
         CGFloat meanRed = 0, meanGreen = 0, meanBlue = 0;
         CGFloat maxRed = 0, maxGreen = 0, maxBlue = 0;
     };
-    const auto sample_window_pixels = [&](NSView* target, const auto& test) {
+    const auto sample_window_pixels = [&](NSView* target, const auto& test,
+                                          CGFloat minWidth = 0, CGFloat maxWidth = 0) {
         __block NSBitmapImageRep* rep = nil;
         __block NSRect rect;
         ui(^{
@@ -2972,8 +2986,9 @@ struct PreviewHit {
         NSBitmapImageRep* bitmap = rep;
         const CGFloat sx = static_cast<CGFloat>(rep.pixelsWide) / rect.size.width;
         const CGFloat sy = static_cast<CGFloat>(rep.pixelsHigh) / rect.size.height;
-        const NSInteger x0 = std::max<NSInteger>(0, floor(NSMinX(rect) * sx));
-        const NSInteger x1 = std::min<NSInteger>(rep.pixelsWide, ceil(NSMaxX(rect) * sx));
+        const NSInteger x0 = std::max<NSInteger>(0, floor((NSMinX(rect) + minWidth) * sx));
+        const NSInteger x1 = std::min<NSInteger>(rep.pixelsWide,
+            ceil((NSMinX(rect) + (maxWidth > 0 ? std::min(maxWidth, rect.size.width) : rect.size.width)) * sx));
         const NSInteger y0 = std::max<NSInteger>(0, floor(NSMinY(rect) * sy));
         const NSInteger y1 = std::min<NSInteger>(rep.pixelsHigh, ceil(NSMaxY(rect) * sy));
         const auto count = [&](NSInteger low, NSInteger high) {
@@ -3247,49 +3262,6 @@ struct PreviewHit {
     if (!attentionStronger) fail(@"attention detail did not use a brighter text color than secondary detail");
     ui(^{ [self refresh]; });
     note(@"attention-text=ok");
-    __block NSString* pausedContrastLine;
-    __block BOOL pausedAccentDistinct = NO;
-    ui(^{
-        NSColor* surfaceColor = [[NSColor windowBackgroundColor] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-        NSColor* fullColor = [Palette::accent() colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-        NSColor* pausedColor = [Palette::pausedAccent() colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-        const auto linear = [](CGFloat value) {
-            return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
-        };
-        const auto luminance = [&](CGFloat red, CGFloat green, CGFloat blue) {
-            return 0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue);
-        };
-        const CGFloat surfaceRed = surfaceColor.redComponent, surfaceGreen = surfaceColor.greenComponent,
-                      surfaceBlue = surfaceColor.blueComponent;
-        const CGFloat surface = luminance(surfaceRed, surfaceGreen, surfaceBlue);
-        const CGFloat full = luminance(fullColor.redComponent, fullColor.greenComponent, fullColor.blueComponent);
-        NSColor* compositedPaused = [NSColor colorWithSRGBRed:pausedColor.redComponent * pausedColor.alphaComponent + surfaceRed * (1 - pausedColor.alphaComponent)
-            green:pausedColor.greenComponent * pausedColor.alphaComponent + surfaceGreen * (1 - pausedColor.alphaComponent)
-             blue:pausedColor.blueComponent * pausedColor.alphaComponent + surfaceBlue * (1 - pausedColor.alphaComponent) alpha:1];
-        const CGFloat paused = luminance(compositedPaused.redComponent, compositedPaused.greenComponent, compositedPaused.blueComponent);
-        const auto contrast = [](CGFloat a, CGFloat b) {
-            const CGFloat high = std::max(a, b), low = std::min(a, b);
-            return (high + 0.05) / (low + 0.05);
-        };
-        const CGFloat toSurface = contrast(paused, surface);
-        const CGFloat fromFull = contrast(paused, full);
-        const CGFloat pausedRed = compositedPaused.redComponent;
-        const CGFloat pausedGreen = compositedPaused.greenComponent;
-        const CGFloat pausedBlue = compositedPaused.blueComponent;
-        const CGFloat surfaceDistance = std::sqrt(std::pow((pausedRed - surfaceColor.redComponent) * 255, 2) +
-            std::pow((pausedGreen - surfaceColor.greenComponent) * 255, 2) +
-            std::pow((pausedBlue - surfaceColor.blueComponent) * 255, 2));
-        const CGFloat redDistance = std::sqrt(std::pow((fullColor.redComponent - pausedRed) * 255, 2) +
-            std::pow((fullColor.greenComponent - pausedGreen) * 255, 2) +
-            std::pow((fullColor.blueComponent - pausedBlue) * 255, 2));
-        pausedAccentDistinct = toSurface >= 3.0 && fromFull >= 1.1 && surfaceDistance >= 40 && redDistance >= 15;
-        pausedContrastLine = [NSString stringWithFormat:@"paused-accent-contrast=surface %.3f paused %.3f full-red %.3f ratio-to-surface %.2f ratio-to-red %.2f choice=%@",
-            surface, paused, full, toSurface, fromFull,
-            pausedAccentDistinct ? [NSString stringWithFormat:@"keep-90-percent-intensity distances=%.1f,%.1f", surfaceDistance, redDistance]
-                                 : @"needs-adjustment"];
-    });
-    note(pausedContrastLine);
-    if (!pausedAccentDistinct) fail(@"90% paused red is not distinct and legible on Dark Aqua");
     set_check(_microphone, true);
     __block BOOL stripLayoutOK = NO;
     __block BOOL cameraInitiallyHidden = NO;
@@ -3417,37 +3389,35 @@ struct PreviewHit {
         return (std::max(foreground, back) + 0.05) / (std::min(foreground, back) + 0.05);
     };
     NSColor* statusSurface = [[NSColor windowBackgroundColor] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-    const PixelStats measuredRecording = sample_window_pixels(_status, [](CGFloat r, CGFloat g, CGFloat b) {
+    const auto redPixel = [](CGFloat r, CGFloat g, CGFloat b) {
         return r > 0.25 && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;
-    });
+    };
+    const PixelStats measuredRecording = sample_window_pixels(_status, redPixel);
+    const PixelStats recordingDot = sample_window_pixels(_status, redPixel, 0, 20);
     usleep(600000);
     press(_pause);
-    wait_for(@"Paused", 5);
+    wait_for(@"● Paused", 5);
     save_window_png(@"app-paused-status.png");
-    const auto pausedRed = red_pixels(0.25);
-    if (pausedRed.first < 8 || pausedRed.second < recordingRed.second * 0.8)
-        fail([NSString stringWithFormat:@"paused status pixel check failed (count %ld, saturation %.3f; recording count %ld, saturation %.3f)",
-              static_cast<long>(pausedRed.first), pausedRed.second, static_cast<long>(recordingRed.first), recordingRed.second]);
-    note(@"status-paused-color=ok");
-    const PixelStats measuredPaused = sample_window_pixels(_status, [](CGFloat r, CGFloat g, CGFloat b) {
-        return r > 0.25 && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;
-    });
-    PixelStats pausedCore = measuredPaused;
-    pausedCore.meanRed = measuredPaused.maxRed;
-    pausedCore.meanGreen = measuredPaused.maxGreen;
-    pausedCore.meanBlue = measuredPaused.maxBlue;
-    const CGFloat pausedSurfaceContrast = measured_contrast(pausedCore, statusSurface);
-    PixelStats fullCore = measuredRecording;
-    fullCore.meanRed = measuredRecording.maxRed;
-    fullCore.meanGreen = measuredRecording.maxGreen;
-    fullCore.meanBlue = measuredRecording.maxBlue;
-    const CGFloat pausedFullRedContrast = measured_contrast(pausedCore,
-        [NSColor colorWithSRGBRed:fullCore.meanRed green:fullCore.meanGreen blue:fullCore.meanBlue alpha:1]);
-    note([NSString stringWithFormat:@"status-accent-measured=paused-vs-surface:%.2f paused-vs-full-red:%.2f paused-pixels:%ld full-red-pixels:%ld",
-          pausedSurfaceContrast, pausedFullRedContrast, static_cast<long>(measuredPaused.count),
-          static_cast<long>(measuredRecording.count)]);
-    if (pausedSurfaceContrast < 3.0 || pausedFullRedContrast <= 1.0)
-        fail(@"measured paused status accent is not legible and dimmer than recording red");
+    const PixelStats pausedText = sample_window_pixels(_status, [](CGFloat r, CGFloat g, CGFloat b) {
+        return std::abs(r - g) < 0.08 && std::abs(r - b) < 0.08 && r > 0.35;
+    }, 20);
+    const PixelStats pausedDot = sample_window_pixels(_status, redPixel, 0, 20);
+    const CGFloat pausedTextContrast = measured_contrast(pausedText, statusSurface);
+    const bool neutralText = pausedText.count >= 20 &&
+        std::abs(pausedText.meanRed - pausedText.meanGreen) < 0.04 &&
+        std::abs(pausedText.meanRed - pausedText.meanBlue) < 0.04 &&
+        pausedTextContrast >= 4.5;
+    const bool dimRedDot = pausedDot.count >= 5 && recordingDot.count >= 5 &&
+        pausedDot.meanRed > pausedDot.meanGreen * 1.5 &&
+        pausedDot.meanRed > pausedDot.meanBlue * 1.5 &&
+        pausedDot.meanRed < recordingDot.meanRed * 0.8;
+    if (!neutralText || !dimRedDot)
+        fail([NSString stringWithFormat:@"paused status pixels failed (text contrast %.2f, neutral %d, paused dot %.2f/%.2f/%.2f, recording dot %.2f/%.2f/%.2f)",
+            pausedTextContrast, neutralText, pausedDot.meanRed, pausedDot.meanGreen, pausedDot.meanBlue,
+            recordingDot.meanRed, recordingDot.meanGreen, recordingDot.meanBlue]);
+    note([NSString stringWithFormat:@"paused-status=ok text=%.2f dot=%.2f,%.2f,%.2f recording-dot=%.2f,%.2f,%.2f",
+          pausedTextContrast, pausedDot.meanRed, pausedDot.meanGreen, pausedDot.meanBlue,
+          recordingDot.meanRed, recordingDot.meanGreen, recordingDot.meanBlue]);
     usleep(1500000);
     press(_pause);
     wait_for(recording, 5);
