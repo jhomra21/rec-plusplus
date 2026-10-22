@@ -22,6 +22,9 @@ constexpr auto kReconnectFor = std::chrono::minutes(2);
 constexpr auto kConsentEvery = std::chrono::seconds(2);
 constexpr auto kReportEvery = std::chrono::seconds(1);
 constexpr auto kSendMargin = milliseconds(40);
+// Arrival-anchored receivers see audio early by this much; SR-anchored receivers are
+// unaffected since RTP timestamps and SRs are unchanged.
+constexpr auto kOpeningAudioLead = milliseconds(20);
 constexpr std::uint32_t kQueueMs = 2000;
 constexpr std::size_t kMaxQueue = 4000;
 constexpr std::size_t kMaxPayload = 1200;
@@ -594,8 +597,7 @@ bool WhipPublisher::take_keyframe_request() {
 }
 
 bool WhipPublisher::audio(std::int64_t sample, Bytes packet) {
-    // Retain audio while the opening keyframe is sent. take_due() trims only samples
-    // captured before that keyframe and sends the keyframe first.
+    // Retain audio while take_due() chooses and sends the opening audio before the keyframe.
     std::lock_guard lock(mutex_);
     if (!live_.load() || closing_ || queue_.size() > kMaxQueue) return false;
     Media m;
@@ -687,13 +689,20 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
         std::uint32_t newest_audio = 0, newest_video = tk;
         const Media* best_before = nullptr;
         const Media* best_after = nullptr;
+        const Media* latest_before = nullptr;
+        const Media* nearest_after = nullptr;
         for (const auto& m : queue_) {
             if (m.video) { newest_video = std::max(newest_video, m.ms); continue; }
             newest_audio = std::max(newest_audio, m.ms);
-            if (m.sample <= key_sample && key_sample - m.sample < 20 * 48 &&
-                (!best_before || m.sample > best_before->sample)) best_before = &m;
-            if (m.sample > key_sample && m.sample - key_sample < 20 * 48 &&
-                (!best_after || m.sample - key_sample < best_after->sample - key_sample)) best_after = &m;
+            if (m.sample <= key_sample) {
+                if (!latest_before || m.sample > latest_before->sample) latest_before = &m;
+                if (key_sample - m.sample < 20 * 48 &&
+                    (!best_before || m.sample > best_before->sample)) best_before = &m;
+            } else {
+                if (!nearest_after || m.sample < nearest_after->sample) nearest_after = &m;
+                if (m.sample - key_sample < 20 * 48 &&
+                    (!best_after || m.sample - key_sample < best_after->sample - key_sample)) best_after = &m;
+            }
         }
         // Wait for the audio around the keyframe (it may still be encoding), but not for
         // audio that never comes.
@@ -703,6 +712,13 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
         // establish a later segment start before the opening IDR is written. Prefer the latest
         // Opus sample at or before the IDR; if none is queued, use the nearest later one.
         const Media* first_audio = best_before ? best_before : best_after;
+        // If no nearby packet exists, use the closest available audio. Avoid leading the
+        // IDR with stale audio: a later packet is preferable when the prior one is >200 ms old.
+        if (!first_audio) {
+            const bool stale_before = latest_before && key_sample - latest_before->sample > 200 * 48;
+            first_audio = stale_before && nearest_after ? nearest_after
+                                                        : (latest_before ? latest_before : nearest_after);
+        }
         const std::int64_t ref = first_audio ? first_audio->sample : key_sample;
         queue_.erase(std::remove_if(queue_.begin(), queue_.end(),
                                     [&](const Media& m) { return m.video ? m.ms < tk : m.sample < ref; }),
@@ -724,12 +740,11 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
                     return !m.video && m.sample == s.ref_sample;
                 });
                 if (audio != queue_.end()) {
-                    // Preserve the captured lead and add a small delivery margin. RTP from
-                    // separate SSRCs is read on separate receiver goroutines, so merely
-                    // sending the audio datagram a few instructions before the IDR does not
-                    // guarantee the receiver processes it first.
+                    // Preserve the captured lead and add a delivery margin. RTP from separate
+                    // SSRCs is read on separate receiver goroutines, so merely sending audio
+                    // just before the IDR does not guarantee the receiver processes it first.
                     const auto lead_ms = audio->ms < s.t0_ms ? s.t0_ms - audio->ms : 0;
-                    const auto audio_due = s.at - milliseconds(lead_ms + 5);
+                    const auto audio_due = s.at - milliseconds(lead_ms) - kOpeningAudioLead;
                     if (audio_due > now) {
                         next = audio_due;
                         return false;
@@ -740,6 +755,9 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
                     return true;
                 }
             }
+            // Residual race: if the receiver still decodes video first, MediaMTX's recorder
+            // can drop the opening IDR. Holding audio until video frame two would bound this,
+            // but would delay opening audio.
             const auto key = std::find_if(queue_.begin(), queue_.end(),
                                           [](const Media& m) { return m.video && m.key; });
             if (key != queue_.end()) pick = static_cast<std::size_t>(key - queue_.begin());
