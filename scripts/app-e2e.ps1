@@ -1517,16 +1517,20 @@ try {
     $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-muted-probe.png')
     $meterLitAfterMuteStart = Meter-LitPixels $ui $meterShot 104
     $meterShot.Dispose()
-    # Wait-Until runs the block in its own scope; keep the risen count in script scope for the log.
+    # Every beep has the same level, so a first sample taken at a peak can only be matched. The
+    # meter decays between beeps; pass when a later beep lifts it above the lowest sample seen.
+    # Wait-Until runs the block in its own scope, so the counts live in script scope.
     $script:meterLitAfterMute = $meterLitAfterMuteStart
+    $script:meterLitMutedLow = $meterLitAfterMuteStart
     Wait-Until {
         $probeShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-muted-probe.png')
         try {
             $script:meterLitAfterMute = Meter-LitPixels $ui $probeShot 104
-            $script:meterLitAfterMute -gt $meterLitAfterMuteStart
+            if ($script:meterLitAfterMute -lt $script:meterLitMutedLow) { $script:meterLitMutedLow = $script:meterLitAfterMute }
+            $script:meterLitAfterMute -gt $script:meterLitMutedLow
         } finally { $probeShot.Dispose() }
     } 'system meter did not rise on a later beep after post-meter mute' 2
-    Write-Host "7. meter post-mute probe: before=$meterLitAfterMuteStart after=$($script:meterLitAfterMute) lit pixels"
+    Write-Host "7. meter post-mute probe: first=$meterLitAfterMuteStart low=$($script:meterLitMutedLow) risen=$($script:meterLitAfterMute) lit pixels"
     $untilUnmute = 4500 - [int]((Get-Date) - $meterRecordingAt).TotalMilliseconds
     if ($untilUnmute -gt 0) { Start-Sleep -Milliseconds $untilUnmute }
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1006, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Mute System Audio"
