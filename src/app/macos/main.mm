@@ -3568,7 +3568,9 @@ struct PreviewHit {
         const NSRect minKnobInWindow = [self->_systemVolume convertRect:minKnob toView:self->_window.contentView];
         const NSRect systemTitle = [self->_systemTitle.superview convertRect:self->_systemTitle.frame toView:self->_window.contentView];
         const NSRect micTitle = [self->_micTitle.superview convertRect:self->_micTitle.frame toView:self->_window.contentView];
-        const NSRect muteRect = [self->_systemMute.superview convertRect:self->_systemMute.frame toView:self->_window.contentView];
+        // Auto Layout aligns alignment rects; a check box's frame inset differs between macOS releases.
+        const NSRect muteRect = [self->_systemMute.superview convertRect:[self->_systemMute alignmentRectForFrame:self->_systemMute.frame]
+                                                                  toView:self->_window.contentView];
         const CGFloat minCenter = NSMidY([self->_systemVolume.superview convertRect:minKnob fromView:self->_systemVolume]);
         const CGFloat maxCenter = NSMidY([self->_systemVolume.superview convertRect:maxKnob fromView:self->_systemVolume]);
         const CGFloat meterLowCenter = NSMinY(self->_systemMeter.frame);
