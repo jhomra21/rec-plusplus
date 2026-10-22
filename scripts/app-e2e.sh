@@ -132,6 +132,7 @@ run_app() {
 run_app "$report" "$artifacts/app.log"
 grep -qx 'accessibility=ok' "$report"
 grep '^margins=' "$report"
+grep -qx 'status-line=ok' "$report"
 grep -qx 'screen-strip=ok' "$report"
 grep -qx 'camera-strip-hidden=ok' "$report"
 grep -qx 'tab-strip-order=ok' "$report"
@@ -150,6 +151,7 @@ check_window_png() {
     || { echo "the app window snapshot is not a real image of its expected size ($expected, got $actual): $file" >&2; exit 1; }
 }
 check_window_png "$artifacts/app-strips.png"
+check_window_png "$artifacts/app-status-row.png"
 check_window_png "$artifacts/app-recording-status.png"
 check_window_png "$artifacts/app-paused-status.png"
 check_window_png "$artifacts/app-camera-strip.png"
