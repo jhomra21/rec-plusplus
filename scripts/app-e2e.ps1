@@ -1517,15 +1517,16 @@ try {
     $meterShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-muted-probe.png')
     $meterLitAfterMuteStart = Meter-LitPixels $ui $meterShot 104
     $meterShot.Dispose()
-    $meterLitAfterMute = $meterLitAfterMuteStart
+    # Wait-Until runs the block in its own scope; keep the risen count in script scope for the log.
+    $script:meterLitAfterMute = $meterLitAfterMuteStart
     Wait-Until {
         $probeShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-meter-muted-probe.png')
         try {
-            $meterLitAfterMute = Meter-LitPixels $ui $probeShot 104
-            $meterLitAfterMute -gt $meterLitAfterMuteStart
+            $script:meterLitAfterMute = Meter-LitPixels $ui $probeShot 104
+            $script:meterLitAfterMute -gt $meterLitAfterMuteStart
         } finally { $probeShot.Dispose() }
     } 'system meter did not rise on a later beep after post-meter mute' 2
-    Write-Host "7. meter post-mute probe: before=$meterLitAfterMuteStart after=$meterLitAfterMute lit pixels"
+    Write-Host "7. meter post-mute probe: before=$meterLitAfterMuteStart after=$($script:meterLitAfterMute) lit pixels"
     $untilUnmute = 4500 - [int]((Get-Date) - $meterRecordingAt).TotalMilliseconds
     if ($untilUnmute -gt 0) { Start-Sleep -Milliseconds $untilUnmute }
     [AppWindow]::PostMessage($ui.Window, 0x0111, [IntPtr]1006, [IntPtr]::Zero) | Out-Null  # WM_COMMAND, tray "Mute System Audio"

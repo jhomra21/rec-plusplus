@@ -605,11 +605,13 @@ else
     probe_received "$file" "$artifacts/stream-received-$key.probe" "$least" "$most"
   done
   # Same AVFoundation priming allowance as below.
-  # The second canvas (smokekey11) may skip frames on a slow CI GPU, as checked above.
+  # The second canvas (smokekey11) may skip frames on a slow CI GPU, as checked above. There the
+  # main canvas can skip one too (Streamed 119, skipped 1 seen), on top of MediaMTX's final frame.
   for key in smokekey10 smokekey11; do
     file="$(find "$received/live/$key" -name '*.mp4' -print -quit)"
     [[ -n "$file" ]] || { echo "MediaMTX recorded nothing for $key" >&2; exit 1; }
     least=119
+    [ "${GITHUB_ACTIONS:-}" = true ] && least=118
     if [[ "$key" == smokekey11 ]]; then least=114; [ "${GITHUB_ACTIONS:-}" = true ] && least=104; fi
     probe_received "$file" "$artifacts/stream-received-$key.probe" "$least" 120
     av_offset_max=55
