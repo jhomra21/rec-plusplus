@@ -364,6 +364,38 @@ enum class Pointer { down, dragged, up, moved, exited };
 - (id)accessibilityValue { return self.meterValue ?: @"silent"; }
 @end
 
+@interface AudioFaderLaneView : NSView
+@property(nonatomic, weak) RecMeterView* meter;
+@property(nonatomic, weak) NSSlider* slider;
+@end
+@implementation AudioFaderLaneView
+- (void)layout {
+    [super layout];
+    NSSlider* slider = self.slider;
+    RecMeterView* meter = self.meter;
+    if (!slider || !meter || !slider.cell) return;
+
+    slider.frame = NSMakeRect(kStripInset + kMeterWidth + kFaderMeterGap, 0,
+                              kFaderWidth, NSHeight(self.bounds));
+    const NSInteger value = slider.integerValue;
+    slider.integerValue = static_cast<NSInteger>(std::ceil(slider.minValue));
+    [slider layoutSubtreeIfNeeded];
+    const NSRect minKnob = [slider.cell knobRectFlipped:slider.isFlipped];
+    slider.integerValue = static_cast<NSInteger>(std::floor(slider.maxValue));
+    [slider layoutSubtreeIfNeeded];
+    const NSRect maxKnob = [slider.cell knobRectFlipped:slider.isFlipped];
+    slider.integerValue = value;
+    [slider layoutSubtreeIfNeeded];
+
+    const CGFloat minCenter = [slider convertPoint:NSMakePoint(NSMidX(minKnob), NSMidY(minKnob)) toView:self].y;
+    const CGFloat maxCenter = [slider convertPoint:NSMakePoint(NSMidX(maxKnob), NSMidY(maxKnob)) toView:self].y;
+    NSRect meterFrame = NSMakeRect(kStripInset, 0, kMeterWidth, 0);
+    meterFrame.origin.y = std::min(minCenter, maxCenter);
+    meterFrame.size.height = std::abs(maxCenter - minCenter);
+    [meter setFrame:meterFrame];
+}
+@end
+
 @interface ResettableSlider : NSSlider
 @property(nonatomic, weak) id resetTarget;
 @property(nonatomic) SEL resetAction;
@@ -1294,12 +1326,14 @@ struct PreviewHit {
         titleLabel.lineBreakMode = NSLineBreakByTruncatingTail;
         if ([title isEqualToString:@"System audio"]) _systemTitle = titleLabel;
         if ([title isEqualToString:@"Microphone"]) _micTitle = titleLabel;
-        NSView* lane = [[NSView alloc] init];
+        AudioFaderLaneView* lane = [[AudioFaderLaneView alloc] init];
+        lane.meter = meter;
+        lane.slider = slider;
         [lane addSubview:meter];
         [lane addSubview:slider];
         lane.translatesAutoresizingMaskIntoConstraints = NO;
-        meter.translatesAutoresizingMaskIntoConstraints = NO;
-        slider.translatesAutoresizingMaskIntoConstraints = NO;
+        meter.translatesAutoresizingMaskIntoConstraints = YES;
+        slider.translatesAutoresizingMaskIntoConstraints = YES;
         NSStackView* strip = [NSStackView stackViewWithViews:@[titleLabel, lane, value, mute]];
         strip.orientation = NSUserInterfaceLayoutOrientationVertical;
         strip.alignment = NSLayoutAttributeLeading;
@@ -1312,21 +1346,12 @@ struct PreviewHit {
         titleLabel.preferredMaxLayoutWidth = kStripWidth - kStripInset;
         [titleLabel.heightAnchor constraintEqualToConstant:14].active = YES;
         [lane.widthAnchor constraintEqualToAnchor:strip.widthAnchor].active = YES;
-        [slider.widthAnchor constraintEqualToConstant:kFaderWidth].active = YES;
-        [slider.heightAnchor constraintEqualToConstant:kFaderHeight].active = YES;
-        [meter.widthAnchor constraintEqualToConstant:kMeterWidth].active = YES;
-        [meter.heightAnchor constraintEqualToAnchor:slider.heightAnchor
-            constant:-2 * ((ResettableSlider*)slider).knobThickness].active = YES;
-        [slider.leadingAnchor constraintEqualToAnchor:meter.trailingAnchor constant:kFaderMeterGap].active = YES;
-        [slider.centerYAnchor constraintEqualToAnchor:lane.centerYAnchor].active = YES;
-        [meter.leadingAnchor constraintEqualToAnchor:lane.leadingAnchor constant:kStripInset].active = YES;
-        [meter.centerYAnchor constraintEqualToAnchor:slider.centerYAnchor].active = YES;
-        [lane.heightAnchor constraintEqualToAnchor:slider.heightAnchor].active = YES;
+        [lane.heightAnchor constraintEqualToConstant:kFaderHeight].active = YES;
         [value.widthAnchor constraintEqualToConstant:kStripWidth].active = YES;
         [value setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
         [mute setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
         [value.centerXAnchor constraintEqualToAnchor:slider.centerXAnchor].active = YES;
-        [mute.leadingAnchor constraintEqualToAnchor:strip.leadingAnchor constant:kStripInset].active = YES;
+        [mute.leadingAnchor constraintEqualToAnchor:meter.leadingAnchor].active = YES;
         return strip;
     };
     NSString* systemTitle = @"";
@@ -3513,17 +3538,30 @@ struct PreviewHit {
         const NSRect micFader = [self->_micVolume.superview convertRect:self->_micVolume.frame toView:self->_window.contentView];
         const NSRect meter = [self->_systemMeter convertRect:self->_systemMeter.bounds toView:self->_window.contentView];
         const NSRect localFader = [self->_systemVolume convertRect:self->_systemVolume.bounds toView:self->_systemVolume.superview];
-        const NSRect localMeter = [self->_systemMeter convertRect:self->_systemMeter.bounds toView:self->_systemVolume.superview];
         const NSRect value = [self->_systemVolumeText.superview convertRect:self->_systemVolumeText.frame toView:self->_window.contentView];
         const NSRect mute = [self->_systemMute.superview convertRect:self->_systemMute.frame toView:self->_window.contentView];
         self->_systemVolume.integerValue = rec::app::kVolumeMax;
         [self->_systemVolume layoutSubtreeIfNeeded];
+        [self->_systemVolume.superview layoutSubtreeIfNeeded];
+        [self->_systemVolume.superview setNeedsLayout:YES];
+        [self->_systemVolume.superview layoutSubtreeIfNeeded];
+        [(AudioFaderLaneView*)self->_systemVolume.superview layout];
         NSRect maxKnob = [self->_systemVolume.cell knobRectFlipped:self->_systemVolume.isFlipped];
         self->_systemVolume.integerValue = rec::app::kVolumeMin;
         [self->_systemVolume layoutSubtreeIfNeeded];
+        [self->_systemVolume.superview layoutSubtreeIfNeeded];
+        [self->_systemVolume.superview setNeedsLayout:YES];
+        [self->_systemVolume.superview layoutSubtreeIfNeeded];
+        [(AudioFaderLaneView*)self->_systemVolume.superview layout];
         NSRect minKnob = [self->_systemVolume.cell knobRectFlipped:self->_systemVolume.isFlipped];
         self->_systemVolume.integerValue = self->_settings.system_volume;
+        [self->_systemVolume layoutSubtreeIfNeeded];
+        [self->_systemVolume.superview layoutSubtreeIfNeeded];
+        [self->_systemVolume.superview setNeedsLayout:YES];
+        [self->_systemVolume.superview layoutSubtreeIfNeeded];
+        [(AudioFaderLaneView*)self->_systemVolume.superview layout];
         [self showDecibels:YES];
+        const NSRect localMeter = [self->_systemMeter convertRect:self->_systemMeter.bounds toView:self->_systemVolume.superview];
         const CGFloat visualMuteTop = self->_window.contentView.isFlipped ? NSMinY(mute) : -NSMaxY(mute);
         const CGFloat visualValueBottom = self->_window.contentView.isFlipped ? NSMaxY(value) : -NSMinY(value);
         const NSRect maxKnobInWindow = [self->_systemVolume convertRect:maxKnob toView:self->_window.contentView];
@@ -3531,7 +3569,12 @@ struct PreviewHit {
         const NSRect systemTitle = [self->_systemTitle.superview convertRect:self->_systemTitle.frame toView:self->_window.contentView];
         const NSRect micTitle = [self->_micTitle.superview convertRect:self->_micTitle.frame toView:self->_window.contentView];
         const NSRect muteRect = [self->_systemMute.superview convertRect:self->_systemMute.frame toView:self->_window.contentView];
-        const CGFloat knobThickness = self->_systemVolume.knobThickness;
+        const CGFloat minCenter = NSMidY([self->_systemVolume.superview convertRect:minKnob fromView:self->_systemVolume]);
+        const CGFloat maxCenter = NSMidY([self->_systemVolume.superview convertRect:maxKnob fromView:self->_systemVolume]);
+        const CGFloat meterLowCenter = NSMinY(self->_systemMeter.frame);
+        const CGFloat meterHighCenter = NSMaxY(self->_systemMeter.frame);
+        const CGFloat lowerKnobCenter = std::min(minCenter, maxCenter);
+        const CGFloat upperKnobCenter = std::max(minCenter, maxCenter);
         const BOOL titlesFit = self->_systemTitle.cell.cellSize.width <= self->_systemTitle.frame.size.width &&
                                self->_micTitle.cell.cellSize.width <= self->_micTitle.frame.size.width &&
                                self->_systemTitle.frame.size.width <= systemTitle.size.width &&
@@ -3541,22 +3584,29 @@ struct PreviewHit {
             std::abs(NSMinY(fader) - NSMinY(micFader)) < 1 &&
             std::abs(NSMaxX(localMeter) - (NSMinX(localFader) - kFaderMeterGap)) <= 2 &&
             std::abs(NSMidY(localMeter) - NSMidY(localFader)) <= 1 &&
-            std::abs(NSHeight(localMeter) - (NSHeight(localFader) - 2 * knobThickness)) <= 1 &&
+            std::abs(meterLowCenter - lowerKnobCenter) <= 2 &&
+            std::abs(meterHighCenter - upperKnobCenter) <= 2 &&
             std::abs(NSMinX(systemTitle) - NSMinX(meter)) < 1 &&
             std::abs(NSMinX(muteRect) - NSMinX(meter)) < 1 &&
             std::abs(NSMidX(value) - NSMidX(fader)) < 2 &&
             visualMuteTop >= visualValueBottom;
         maxTop = NSMidY(maxKnobInWindow) > NSMidY(fader) + NSHeight(fader) / 6;
         minBottom = NSMidY(minKnobInWindow) < NSMidY(fader) - NSHeight(fader) / 6;
-        audioGeometry = [NSString stringWithFormat:@"fader %.1f,%.1f %.1fx%.1f micY %.1f title widths %.1f/%.1f frames %.1f/%.1f edges title/meter/mute %.1f/%.1f/%.1f meter %.1f,%.1f %.1fx%.1f local meter/fader %.1f/%.1f %.1f/%.1f value %.1f center delta %.1f mute %.1f max knob y %.1f min knob y %.1f mute/value %.1f",
+        audioGeometry = [NSString stringWithFormat:@"fader %.1f,%.1f %.1fx%.1f micY %.1f title widths %.1f/%.1f frames %.1f/%.1f edges title/meter/mute %.1f/%.1f/%.1f meter %.1f,%.1f %.1fx%.1f local meter/fader %.1f/%.1f %.1f/%.1f centers meter %.1f..%.1f knob %.1f..%.1f value %.1f center delta %.1f mute %.1f max knob y %.1f min knob y %.1f mute/value %.1f",
             NSMinX(fader), NSMinY(fader),
             fader.size.width, fader.size.height, NSMinY(micFader), self->_systemTitle.cell.cellSize.width,
             self->_micTitle.cell.cellSize.width, systemTitle.size.width, micTitle.size.width,
             NSMinX(systemTitle), NSMinX(meter), NSMinX(muteRect),
             NSMinX(meter), NSMinY(meter), meter.size.width, meter.size.height,
             NSMaxX(localMeter), NSMinX(localFader), NSHeight(localMeter), NSHeight(localFader),
+            meterLowCenter, meterHighCenter, lowerKnobCenter, upperKnobCenter,
             value.size.height, NSMidX(value) - NSMidX(fader), NSMinY(mute), NSMidY(maxKnob), NSMidY(minKnob),
             visualMuteTop - visualValueBottom];
+        if (audioStripGeometry) {
+            note([NSString stringWithFormat:@"audio-strip-measurements=fader=%.0fx%.0f meter=%.0fx%.0f knob-centers=%.1f/%.1f",
+                NSWidth(localFader), NSHeight(localFader), NSWidth(localMeter), NSHeight(localMeter),
+                std::abs(meterLowCenter - lowerKnobCenter), std::abs(meterHighCenter - upperKnobCenter)]);
+        }
     });
     if (!audioStripGeometry) fail([@"audio strip geometry mismatch: " stringByAppendingString:audioGeometry]);
     if (!maxTop || !minBottom) fail([@"vertical fader direction mismatch: " stringByAppendingString:audioGeometry]);
