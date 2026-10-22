@@ -304,6 +304,7 @@ struct WhipPublisher::Session {
     // of each track as simultaneous, so the first audio packet is the one nearest the first
     // keyframe and that keyframe takes its RTP time.
     bool anchored = false, first_video = true;
+    bool video_keyframe_sent = false;
     std::uint32_t t0_ms = 0;
     std::int64_t ref_sample = 0;
     Clock::time_point at{};
@@ -593,6 +594,8 @@ bool WhipPublisher::take_keyframe_request() {
 }
 
 bool WhipPublisher::audio(std::int64_t sample, Bytes packet) {
+    // Retain audio while the opening keyframe is sent. take_due() trims only samples
+    // captured before that keyframe and sends the keyframe first.
     std::lock_guard lock(mutex_);
     if (!live_.load() || closing_ || queue_.size() > kMaxQueue) return false;
     Media m;
@@ -686,28 +689,41 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
             if (m.video) { newest_video = std::max(newest_video, m.ms); continue; }
             newest_audio = std::max(newest_audio, m.ms);
             const auto distance = m.ms > tk ? m.ms - tk : tk - m.ms;
-            if (distance < 20 && (!best || distance < (best->ms > tk ? best->ms - tk : tk - best->ms))) best = &m;
+            // Do not let audio before the opening keyframe anchor the receiver's
+            // recording timeline. Keep it queued until the keyframe has gone out.
+            if (m.ms >= tk && distance < 20 &&
+                (!best || distance < best->ms - tk)) best = &m;
         }
         // Wait for the audio around the keyframe (it may still be encoding), but not for
         // audio that never comes.
         if (newest_audio < tk + 20 && newest_video - tk < 500) return false;
-        const std::int64_t ref = best ? best->sample : static_cast<std::int64_t>(tk) * 48;
-        const std::uint32_t cut = best ? best->ms : tk;
+        const std::int64_t key_sample = static_cast<std::int64_t>(tk) * 48;
+        const std::int64_t ref = best ? best->sample : key_sample;
         queue_.erase(std::remove_if(queue_.begin(), queue_.end(),
-                                    [&](const Media& m) { return m.video ? m.ms < tk : m.sample < ref; }),
+                                    [&](const Media& m) { return m.video ? m.ms < tk : m.sample < key_sample; }),
                      queue_.end());
         s.ref_sample = ref;
-        s.t0_ms = std::min(cut, tk);
+        s.t0_ms = tk;
         s.at = now + kSendMargin;
         s.anchored = true;
         s.first_video = true;
     }
     for (;;) {
         if (queue_.empty()) return false;
-        const std::size_t span = std::min<std::size_t>(queue_.size(), 64);
-        std::size_t pick = 0;
-        for (std::size_t i = 1; i < span; ++i)
-            if (queue_[i].ms < queue_[pick].ms) pick = i;
+        std::size_t pick = queue_.size();
+        if (!s.video_keyframe_sent) {
+            // Establish the receiver's timeline with the opening keyframe before
+            // sending any audio, even if encoder callback order queued audio first.
+            const auto key = std::find_if(queue_.begin(), queue_.end(),
+                                          [](const Media& m) { return m.video && m.key; });
+            if (key != queue_.end()) pick = static_cast<std::size_t>(key - queue_.begin());
+        } else {
+            const std::size_t span = std::min<std::size_t>(queue_.size(), 64);
+            pick = 0;
+            for (std::size_t i = 1; i < span; ++i)
+                if (queue_[i].ms < queue_[pick].ms) pick = i;
+        }
+        if (pick == queue_.size()) return false;
         const auto& m = queue_[static_cast<std::ptrdiff_t>(pick)];
         if (m.ms < s.t0_ms) { queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(pick)); continue; }
         const auto due = s.at + milliseconds(m.ms - s.t0_ms);
@@ -732,6 +748,7 @@ Bytes rtp_header(std::uint8_t pt, bool marker, std::uint16_t seq, std::uint32_t 
 } // namespace
 
 void WhipPublisher::send_video(Session& s, const Media& item) {
+    const std::uint32_t packets_before = s.video_packets;
     Bytes sps, pps;
     {
         std::lock_guard lock(mutex_);
@@ -808,9 +825,13 @@ void WhipPublisher::send_video(Session& s, const Media& item) {
         // Ask the encoder for another keyframe instead of waiting for its regular 2 s interval.
         refresh_wanted_.store(true);
     }
+    if (item.key && sent_all && s.video_packets > packets_before) {
+        s.video_keyframe_sent = true;
+    }
 }
 
 void WhipPublisher::send_audio(Session& s, const Media& item) {
+    if (!s.video_keyframe_sent) return;
     Bytes p = rtp_header(s.audio_pt, false, s.audio_seq++, s.audio_rtp(item.sample), s.audio_ssrc);
     p.insert(p.end(), item.data.begin(), item.data.end());
     const std::size_t payload = item.data.size();
@@ -906,6 +927,7 @@ bool WhipPublisher::serve(Session& s) {
             const double media_ms = s.t0_ms + std::chrono::duration<double, std::milli>(now - s.at).count();
             Bytes report;
             for (const bool video : {true, false}) {
+                if (!video && s.audio_packets == 0) continue;
                 report.clear();
                 report.push_back(0x80);
                 report.push_back(200);
