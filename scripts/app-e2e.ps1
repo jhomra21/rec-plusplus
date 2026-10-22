@@ -534,6 +534,28 @@ function Post-TrackbarDoubleClick([IntPtr]$slider) {
         }
     }
 }
+function Drag-Readout([IntPtr]$readout, [IntPtr]$slider, [int]$dips) {
+    $rect = New-Object AppWindow+RECT
+    if (-not [AppWindow]::GetClientRect($readout, [ref]$rect)) { throw 'could not read value readout bounds' }
+    $x = [int]($rect.Right / 2); $y = [int]($rect.Bottom / 2)
+    $at = { param([int]$pointY) [IntPtr](($pointY -shl 16) -bor $x) }
+    [AppWindow]::SendMessage($readout, 0x0201, [IntPtr]1, (& $at $y)) | Out-Null
+    $pixels = [Math]::Max(1, [int][Math]::Round([AppWindow]::GetDpiForWindow($readout) * $dips / 96))
+    $direction = if ($dips -gt 0) { -1 } else { 1 }
+    $count = [Math]::Abs($dips)
+    for ($i = 1; $i -le $count; ++$i) {
+        $nextY = $y + $direction * [int][Math]::Round($pixels * $i / $count)
+        [AppWindow]::SendMessage($readout, 0x0200, [IntPtr]1, (& $at $nextY)) | Out-Null
+    }
+    [AppWindow]::SendMessage($readout, 0x0202, [IntPtr]::Zero, (& $at ($y + $direction * $pixels))) | Out-Null
+}
+function Click-Readout([IntPtr]$readout) {
+    $rect = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($readout, [ref]$rect) | Out-Null
+    $point = [IntPtr](([int]($rect.Bottom / 2) -shl 16) -bor [int]($rect.Right / 2))
+    [AppWindow]::SendMessage($readout, 0x0201, [IntPtr]1, $point) | Out-Null
+    [AppWindow]::SendMessage($readout, 0x0202, [IntPtr]::Zero, $point) | Out-Null
+}
 # Drags in the preview from one point to another, given as fractions of the 16:9 frame,
 # with the button messages and moves the mouse sends.
 function Drag-Preview($ui, [double[]]$from, [double[]]$to) {
@@ -957,7 +979,23 @@ try {
     Post-TrackbarDoubleClick $volumeSlider
     Wait-Until { (Find $ui 'System audio volume' $Slider).Item.accValue(0) -eq '0 dB' } 'double-click did not reset system volume to 0 dB'
     Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("system_volume=0`n") } 'volume double-click reset was not saved'
-    Write-Host "6a. slider resets: screen brightness -50 readout, double-click to 0 and white preview, Ctrl+0 to 0; system volume release saved -6 dB and double-click readout 0 dB"
+    $volumeReadout = [AppWindow]::GetDlgItem($ui.Window, 106)
+    $beforeDrag = [int][AppWindow]::SendMessage($volumeSlider, 0x0400, [IntPtr]::Zero, [IntPtr]::Zero)
+    Drag-Readout $volumeReadout $volumeSlider 8
+    $afterUp = [int][AppWindow]::SendMessage($volumeSlider, 0x0400, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($afterUp -ne $beforeDrag + 4) { throw "readout drag up changed volume from $beforeDrag to $afterUp, expected +4" }
+    if (-not (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("system_volume=0`n")) {
+        throw 'readout drag persisted before the release notification'
+    }
+    Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("system_volume=4`n") } 'readout drag up was not persisted on release'
+    Drag-Readout $volumeReadout $volumeSlider -8
+    $afterDown = [int][AppWindow]::SendMessage($volumeSlider, 0x0400, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($afterDown -ne $beforeDrag) { throw "readout drag down changed volume to $afterDown, expected $beforeDrag" }
+    Wait-Until { (Get-Content (Join-Path $appHome 'settings.conf') -Raw).Contains("system_volume=0`n") } 'readout drag down was not persisted on release'
+    Click-Readout $volumeReadout
+    $afterClick = [int][AppWindow]::SendMessage($volumeSlider, 0x0400, [IntPtr]::Zero, [IntPtr]::Zero)
+    if ($afterClick -ne $afterDown) { throw 'click without movement changed the slider value' }
+    Write-Host "6a. slider resets and readout drag: +4 and -4 dB per 8 DIPs, saved on release; click unchanged"
     Set-Check $ui 'Show preview' $false
     Wait-PreviewColor $ui (Join-Path $Artifacts 'app-preview-off.png') @(0.76, 0.75, 0.18, 0.18) 'green' -Not
     Set-Check $ui 'Show preview' $true
