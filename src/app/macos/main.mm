@@ -406,6 +406,35 @@ enum class Pointer { down, dragged, up, moved, exited };
 }
 @end
 
+@interface RecordDiscButton : NSButton
+@property(nonatomic) BOOL recording;
+@end
+@implementation RecordDiscButton
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    const CGFloat diameter = 24, dot = 10;
+    const NSRect disc = NSMakeRect((NSWidth(self.bounds) - diameter) / 2,
+                                   (NSHeight(self.bounds) - diameter) / 2, diameter, diameter);
+    [(self.recording ? Palette::accent() : Palette::control()) setFill];
+    [[NSBezierPath bezierPathWithOvalInRect:disc] fill];
+    const NSRect center = NSMakeRect(NSMidX(self.bounds) - dot / 2, NSMidY(self.bounds) - dot / 2, dot, dot);
+    [(self.recording ? NSColor.whiteColor : Palette::accent()) setFill];
+    [[NSBezierPath bezierPathWithOvalInRect:center] fill];
+}
+@end
+
+@interface ControlBarView : NSView
+@end
+@implementation ControlBarView
+- (void)drawRect:(NSRect)dirtyRect {
+    (void)dirtyRect;
+    [Palette::surface1() setFill];
+    NSRectFill(self.bounds);
+    [Palette::lineStrong() setFill];
+    NSRectFill(NSMakeRect(0, 0, NSWidth(self.bounds), 1));
+}
+@end
+
 @interface ResettableSlider : NSSlider
 @property(nonatomic, weak) id resetTarget;
 @property(nonatomic) SEL resetAction;
@@ -617,7 +646,8 @@ struct PreviewHit {
     bool _meterTick;
     EventHotKeyRef _hotkeyRef, _replayHotkeyRef;
     NSWindow* _window;
-    NSTextField *_status, *_detail, *_live, *_folder;
+    NSTextField *_status, *_detail, *_live, *_folder, *_clock, *_stats, *_hotkeyHint;
+    NSView *_statusDot, *_controlBar;
     NSTextField *_systemTitle, *_micTitle;
     RecMeterView *_systemMeter, *_micMeter;
     NSSlider *_systemVolume, *_micVolume;
@@ -1293,8 +1323,14 @@ struct PreviewHit {
     _window.releasedWhenClosed = NO;
 
     _status = label(@"Ready to record");
-    _status.font = [NSFont systemFontOfSize:15 weight:NSFontWeightSemibold];
+    _status.font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
     _status.accessibilityLabel = @"Status";
+    _statusDot = [[NSView alloc] init];
+    _statusDot.wantsLayer = YES;
+    _statusDot.layer.cornerRadius = 3;
+    _statusDot.layer.backgroundColor = Palette::accentDim().CGColor;
+    [_statusDot.widthAnchor constraintEqualToConstant:6].active = YES;
+    [_statusDot.heightAnchor constraintEqualToConstant:6].active = YES;
     _detail = label(@"");
     _detail.accessibilityLabel = @"Status detail";
     _detail.maximumNumberOfLines = 1;
@@ -1302,21 +1338,44 @@ struct PreviewHit {
     _detail.textColor = Palette::secondaryText();
     [_detail setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     _live = label(@"");
-    _live.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
-    _live.textColor = Palette::accent();
+    _live.font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
+    _live.textColor = Palette::secondaryText();
+    _live.wantsLayer = YES;
+    _live.layer.cornerRadius = 3;
+    _live.layer.backgroundColor = Palette::control().CGColor;
+    _live.textColor = Palette::secondaryText();
     _live.hidden = YES;
-    _statusLine = [NSStackView stackViewWithViews:@[_status, _detail, _live]];
+    _clock = label(@"00:00:00");
+    _clock.font = [NSFont monospacedDigitSystemFontOfSize:15 weight:NSFontWeightMedium];
+    _clock.alignment = NSTextAlignmentCenter;
+    _clock.wantsLayer = YES;
+    _clock.layer.backgroundColor = Palette::well().CGColor;
+    _clock.layer.cornerRadius = 4;
+    _clock.accessibilityLabel = @"Elapsed time";
+    _stats = label(@"");
+    _stats.font = [NSFont systemFontOfSize:11];
+    _stats.textColor = Palette::secondaryText();
+    _stats.accessibilityLabel = @"Recording statistics";
+    _hotkeyHint = label(@"⇧⌘R");
+    _hotkeyHint.font = [NSFont systemFontOfSize:11];
+    _hotkeyHint.textColor = Palette::secondaryText();
+    _hotkeyHint.accessibilityLabel = @"Global recording shortcut";
+    _statusLine = [NSStackView stackViewWithViews:@[_statusDot, _status]];
     _statusLine.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     _statusLine.alignment = NSLayoutAttributeCenterY;
     _statusLine.distribution = NSStackViewDistributionFill;
-    _statusLine.spacing = 6;
-    [_status.widthAnchor constraintLessThanOrEqualToConstant:160].active = YES;
-    [_detail.widthAnchor constraintGreaterThanOrEqualToConstant:120].active = YES;
+    _statusLine.spacing = 5;
+    [_detail.widthAnchor constraintGreaterThanOrEqualToConstant:80].active = YES;
     _detail.allowsExpansionToolTips = YES;
-    [_live.widthAnchor constraintLessThanOrEqualToConstant:150].active = YES;
     [_status setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     [_live setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     [_live setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
+    _live.translatesAutoresizingMaskIntoConstraints = NO;
+    [_live.widthAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
+    [_live.heightAnchor constraintEqualToConstant:24].active = YES;
+    _clock.translatesAutoresizingMaskIntoConstraints = NO;
+    [_clock.widthAnchor constraintEqualToConstant:108].active = YES;
+    [_clock.heightAnchor constraintEqualToConstant:28].active = YES;
     [_detail setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     // Each source: its level before volume, the volume, and mute.
@@ -1465,17 +1524,36 @@ struct PreviewHit {
         [_preview2.widthAnchor constraintEqualToConstant:440 * 9.0 / 16 * 9 / 16],
     ]];
 
-    _record = [self button:@"Start Recording" action:@selector(toggleRecord:)];
-    _record.controlSize = NSControlSizeLarge;
-    _record.keyEquivalent = @"\r";
+    _record = [[RecordDiscButton alloc] init];
+    _record.target = self;
+    _record.action = @selector(toggleRecord:);
+    _record.bezelStyle = NSBezelStyleRegularSquare;
+    _record.bordered = NO;
+    _record.title = @"";
+    _record.accessibilityLabel = @"Start Recording";
+    _record.toolTip = @"Start Recording (⇧⌘R)";
+    [_record.widthAnchor constraintEqualToConstant:32].active = YES;
+    [_record.heightAnchor constraintEqualToConstant:32].active = YES;
+    [_record setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     _pause = [self button:@"Pause" action:@selector(togglePause:)];
-    _pause.controlSize = NSControlSizeLarge;
-    [_pause.widthAnchor constraintEqualToConstant:110].active = YES;
+    _pause.bezelStyle = NSBezelStyleRegularSquare;
+    _pause.bordered = NO;
+    _pause.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    _pause.contentTintColor = Palette::secondaryText();
+    [_pause.widthAnchor constraintEqualToConstant:56].active = YES;
+    [_pause setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     _saveReplay = [self button:@"Save Replay" action:@selector(saveReplay:)];
-    _saveReplay.controlSize = NSControlSizeLarge;
-    [_saveReplay.widthAnchor constraintEqualToConstant:110].active = YES;
+    _saveReplay.bezelStyle = NSBezelStyleRegularSquare;
+    _saveReplay.bordered = NO;
+    _saveReplay.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    _saveReplay.contentTintColor = Palette::secondaryText();
+    [_saveReplay.widthAnchor constraintEqualToConstant:84].active = YES;
+    [_saveReplay setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     NSStackView* buttons = [NSStackView stackViewWithViews:@[_record, _pause, _saveReplay]];
     buttons.distribution = NSStackViewDistributionFill;
+    buttons.alignment = NSLayoutAttributeCenterY;
+    buttons.spacing = 8;
+    [buttons.widthAnchor constraintEqualToConstant:188].active = YES;
     [_record setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
     _permission = label(@"");
     _permission.textColor = Palette::text();
@@ -1627,10 +1705,40 @@ struct PreviewHit {
     folderButtons.distribution = NSStackViewDistributionFillEqually;
     _verticalMovie = [self check:@"Also save a vertical video (9:16, MP4)"];
 
-    // Status and preview side by side over two columns: what and how to record on the left,
-    // where it goes on the right, and the scenes in a narrower third column. One column would
-    // be taller than a 13-inch screen.
-    NSArray<NSView*>* status = @[_statusLine, mixerRow, buttons, _permissionRow];
+    // The control bar spans the window; the existing preview, mixer and settings remain below.
+    _controlBar = [[ControlBarView alloc] init];
+    _controlBar.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView* centerContents = [NSStackView stackViewWithViews:@[_clock, _statusLine, _stats, _detail]];
+    centerContents.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    centerContents.alignment = NSLayoutAttributeCenterY;
+    centerContents.distribution = NSStackViewDistributionFill;
+    centerContents.spacing = 8;
+    centerContents.translatesAutoresizingMaskIntoConstraints = NO;
+    NSStackView* rightContents = [NSStackView stackViewWithViews:@[_live, _hotkeyHint]];
+    rightContents.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    rightContents.alignment = NSLayoutAttributeCenterY;
+    rightContents.distribution = NSStackViewDistributionFill;
+    rightContents.spacing = 8;
+    rightContents.translatesAutoresizingMaskIntoConstraints = NO;
+    buttons.translatesAutoresizingMaskIntoConstraints = NO;
+    [_controlBar addSubview:buttons];
+    [_controlBar addSubview:centerContents];
+    [_controlBar addSubview:rightContents];
+    [_detail.widthAnchor constraintGreaterThanOrEqualToConstant:80].active = YES;
+    [_detail.widthAnchor constraintLessThanOrEqualToConstant:170].active = YES;
+    [_stats.widthAnchor constraintGreaterThanOrEqualToConstant:110].active = YES;
+    [_stats.widthAnchor constraintLessThanOrEqualToConstant:190].active = YES;
+    [_hotkeyHint.widthAnchor constraintEqualToConstant:40].active = YES;
+    [NSLayoutConstraint activateConstraints:@[
+        [_controlBar.heightAnchor constraintEqualToConstant:40],
+        [buttons.leadingAnchor constraintEqualToAnchor:_controlBar.leadingAnchor constant:12],
+        [buttons.centerYAnchor constraintEqualToAnchor:_controlBar.centerYAnchor],
+        [centerContents.centerXAnchor constraintEqualToAnchor:_controlBar.centerXAnchor],
+        [centerContents.centerYAnchor constraintEqualToAnchor:_controlBar.centerYAnchor],
+        [rightContents.trailingAnchor constraintEqualToAnchor:_controlBar.trailingAnchor constant:-16],
+        [rightContents.centerYAnchor constraintEqualToAnchor:_controlBar.centerYAnchor],
+    ]];
+    NSArray<NSView*>* status = @[mixerRow, _permissionRow];
     NSArray<NSView*>* left = @[header(@"Capture"), capture,
                                header(@"Quality"), quality, header(@"Recordings"), _folder, folderButtons,
                                _verticalMovie];
@@ -1681,6 +1789,7 @@ struct PreviewHit {
     stack.translatesAutoresizingMaskIntoConstraints = NO;
     NSView* content = _window.contentView;
     [content addSubview:stack];
+    [content addSubview:_controlBar];
     [_systemMute.centerYAnchor constraintEqualToAnchor:_micMute.centerYAnchor].active = YES;
     for (NSBox* panel in @[(NSBox*)_screenStrip, (NSBox*)_cameraStrip]) {
         if (panel) {
@@ -1693,10 +1802,15 @@ struct PreviewHit {
     [NSLayoutConstraint activateConstraints:@[
         [stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [stack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
-        [stack.topAnchor constraintEqualToAnchor:content.topAnchor],
+        [stack.topAnchor constraintEqualToAnchor:_controlBar.bottomAnchor constant:20],
         [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
+        [_controlBar.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+        [_controlBar.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        [_controlBar.topAnchor constraintEqualToAnchor:content.topAnchor],
     ]];
-    [_window setContentSize:stack.fittingSize];
+    NSSize contentSize = stack.fittingSize;
+    contentSize.height += 60;
+    [_window setContentSize:contentSize];
 }
 
 - (void)showCameraStrip:(BOOL)shown {
@@ -2845,11 +2959,13 @@ struct PreviewHit {
     }
 
     NSString* status = @"";
+    NSString* spokenStatus = @"";
     NSString* detail = @"";
     _attention = false;
     switch (s.state) {
     case State::idle:
-        status = @"Ready to record";
+        status = @"READY";
+        spokenStatus = @"Ready to record";
         if (!s.error.empty()) { detail = [@"Recording failed: " stringByAppendingString:ns(s.error)]; _attention = true; }
         else if (!s.stream_error.empty()) { detail = [@"Stream stopped early: " stringByAppendingString:ns(s.stream_error)]; _attention = true; }
         else if (!s.saved.empty())
@@ -2857,10 +2973,16 @@ struct PreviewHit {
                 stringByAppendingString:s.saved_vertical.empty() ? @"" : @" and its vertical video"];
         else detail = _hotkey ? @"⇧⌘R starts and stops recording from anywhere." : @"⇧⌘R is used by another app.";
         break;
-    case State::starting: status = @"Starting…"; break;
-    case State::recording: status = [@"● Recording  " stringByAppendingString:clock_text(s.seconds)]; break;
-    case State::paused: status = [@"● Paused  " stringByAppendingString:clock_text(s.seconds)]; break;
-    case State::finishing: status = @"Saving…"; break;
+    case State::starting: status = @"STARTING…"; spokenStatus = @"Starting…"; break;
+    case State::recording:
+        status = @"RECORDING";
+        spokenStatus = [@"● Recording  " stringByAppendingString:clock_text(s.seconds)];
+        break;
+    case State::paused:
+        status = @"PAUSED";
+        spokenStatus = [@"● Paused  " stringByAppendingString:clock_text(s.seconds)];
+        break;
+    case State::finishing: status = @"SAVING…"; spokenStatus = @"Saving…"; break;
     }
     if (active) {
         NSMutableString* text = [NSMutableString stringWithFormat:@"%llu frames", static_cast<unsigned long long>(s.frames)];
@@ -2885,28 +3007,31 @@ struct PreviewHit {
         _attention = _noteAttention;
     }
     if (_attention && detail.length && ![detail hasPrefix:@"!"]) detail = [@"! " stringByAppendingString:detail];
-    if (s.state == State::paused) {
-        NSMutableAttributedString* paused = [[NSMutableAttributedString alloc] initWithString:status];
-        [paused addAttribute:NSForegroundColorAttributeName value:Palette::pausedDot() range:NSMakeRange(0, 1)];
-        [paused addAttribute:NSForegroundColorAttributeName value:Palette::text() range:NSMakeRange(1, status.length - 1)];
-        _status.attributedStringValue = paused;
-    } else {
-        if (![_status.stringValue isEqualToString:status]) _status.stringValue = status;
-    }
-    _status.accessibilityValue = s.state == State::paused
-        ? [@"Paused  " stringByAppendingString:clock_text(s.seconds)] : status;
+    _status.attributedStringValue = [[NSAttributedString alloc] initWithString:status
+        attributes:@{NSFontAttributeName: _status.font,
+                     NSForegroundColorAttributeName: s.state == State::recording ? Palette::accent() : Palette::secondaryText(),
+                     NSKernAttributeName: @1.0}];
+    _status.accessibilityValue = spokenStatus;
+    _statusDot.hidden = s.state != State::paused;
+    _statusDot.layer.backgroundColor = Palette::accentDim().CGColor;
     if (![_detail.stringValue isEqualToString:detail]) _detail.stringValue = detail;
     if (![_detail.accessibilityValue isEqualToString:detail]) _detail.accessibilityValue = detail;
     if (s.state == State::recording) _status.textColor = Palette::accent();
-    else if (s.state != State::paused) _status.textColor = Palette::text();
+    else _status.textColor = Palette::secondaryText();
     _detail.textColor = _attention ? Palette::text() : Palette::secondaryText();
-    _live.textColor = (s.live || s.reconnecting) ? Palette::accent() : Palette::secondaryText();
-    NSString* live = !active ? @""
+    _live.textColor = s.live ? NSColor.whiteColor : Palette::secondaryText();
+    _live.layer.backgroundColor = (s.live ? Palette::accent() : Palette::control()).CGColor;
+    NSString* live = !active ? @"LIVE"
                    : s.live && s.servers > 1 ? [NSString stringWithFormat:@"● LIVE %u/%u  %.1f Mb/s", s.servers_live, s.servers, s.stream_kbps / 1000.0]
                    : s.live ? [NSString stringWithFormat:@"● LIVE  %.1f Mb/s", s.stream_kbps / 1000.0]
-                   : s.reconnecting ? @"Reconnecting…" : @"";
+                   : s.reconnecting ? @"Reconnecting…" : @"LIVE";
     if (![_live.stringValue isEqualToString:live]) _live.stringValue = live;
-    _live.hidden = live.length == 0;
+    _live.hidden = NO;
+    const long long elapsed = std::max<long long>(0, static_cast<long long>(s.seconds));
+    _clock.stringValue = [NSString stringWithFormat:@"%02lld:%02lld:%02lld", elapsed / 3600, elapsed / 60 % 60, elapsed % 60];
+    _clock.accessibilityValue = _clock.stringValue;
+    _stats.stringValue = [NSString stringWithFormat:@"%@ · %u fps · %llu dropped",
+        ns(_settings.resolution), _settings.fps, static_cast<unsigned long long>(s.dropped)];
     // Hide the last level once recording ends; polling stops with it.
     if (!active) {
         _systemMeterState.shown = _micMeterState.shown = 0;
@@ -2927,11 +3052,16 @@ struct PreviewHit {
         _pendingSystemPeak = _pendingMicPeak = 0;
     }
 
-    _record.title = active ? @"Stop Recording" : @"Start Recording";
+    _record.accessibilityLabel = active ? @"Stop Recording" : @"Start Recording";
+    _record.toolTip = active ? @"Stop Recording (⇧⌘R)" : @"Start Recording (⇧⌘R)";
+    ((RecordDiscButton*)_record).recording = s.state == State::recording;
+    [_record setNeedsDisplay:YES];
     _pause.title = s.state == State::paused ? @"Resume" : @"Pause";
     _record.enabled = s.state == State::idle || active;
     _pause.enabled = active;
     _saveReplay.enabled = active && s.replay;
+    _pause.contentTintColor = _pause.enabled ? Palette::secondaryText() : Palette::disabledText();
+    _saveReplay.contentTintColor = _saveReplay.enabled ? Palette::secondaryText() : Palette::disabledText();
     // Checked while idle only: a recording already holds its devices.
     if (s.state == State::idle) {
         _missing = [self missingPermission];
@@ -3177,12 +3307,12 @@ struct PreviewHit {
         __block NSBitmapImageRep* rep = nil;
         ui(^{
             [self->_window.effectiveAppearance performAsCurrentDrawingAppearance:^{
-                [self->_statusLine displayIfNeeded];
-                rep = [self->_statusLine bitmapImageRepForCachingDisplayInRect:self->_statusLine.bounds];
-                [self->_statusLine cacheDisplayInRect:self->_statusLine.bounds toBitmapImageRep:rep];
+                [self->_controlBar displayIfNeeded];
+                rep = [self->_controlBar bitmapImageRepForCachingDisplayInRect:self->_controlBar.bounds];
+                [self->_controlBar cacheDisplayInRect:self->_controlBar.bounds toBitmapImageRep:rep];
             }];
         });
-        if (!rep) fail(@"could not render the status row");
+    if (!rep) fail(@"could not render the control bar");
         save_window_png(@"app-status-row.png", rep);
     };
     struct PixelStats {
@@ -3247,7 +3377,11 @@ struct PreviewHit {
     };
     const auto wait_for = [&](NSString* prefix, double seconds) {
         for (double waited = 0; waited < seconds; waited += 0.1) {
-            if ([status() hasPrefix:prefix]) return;
+            __block NSString* accessibleStatus;
+            ui(^{ accessibleStatus = self->_status.accessibilityValue; });
+            const NSString* current = status();
+            if ([current hasPrefix:prefix] || [accessibleStatus hasPrefix:prefix] ||
+                ([prefix isEqualToString:@"Ready to record"] && [current isEqualToString:@"READY"])) return;
             usleep(100000);
         }
         fail([NSString stringWithFormat:@"status is '%@' (%@), expected '%@'", status(), detail(), prefix]);
@@ -3263,7 +3397,7 @@ struct PreviewHit {
         ui(^{ path = ns(self->_settings.last_recording); });
         note([NSString stringWithFormat:@"%@=%@", step, path]);
     };
-    NSString* const recording = @"● Recording";
+    NSString* const recording = @"RECORDING";
 
     // The keep-recording step spans launches (app-e2e.sh): "keep" starts a recording and quits
     // with Keep Recording After Quit on; "attach" finds it still running, its preview coming
@@ -3278,7 +3412,7 @@ struct PreviewHit {
             fail([NSString stringWithFormat:@"the recording did not reach %.1f s", at]);
         };
         if (phase == "keep") {
-            wait_for(@"Ready to record", 20);
+            wait_for(@"READY", 20);
             press(_record);
             wait_for(recording, 20);
             seconds(2);
@@ -3306,7 +3440,7 @@ struct PreviewHit {
             note(@"keep-preview=ok");
             seconds(6);
             press(_record);
-            wait_for(@"Ready to record", 30);
+            wait_for(@"READY", 30);
             saved(@"keep");
         }
         dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
@@ -3350,10 +3484,13 @@ struct PreviewHit {
     note(@"accessibility=ok");
     note(@"meter-accessibility=ok");
     note([NSString stringWithFormat:@"keyboard-access=%@", NSApp.fullKeyboardAccessEnabled ? @"full" : @"basic"]);
-    wait_for(@"Ready to record", 20);
+    wait_for(@"READY", 20);
+    save_window_png(@"app-idle.png");
     __block BOOL statusLineLayoutOK = NO;
     ui(^{
-        self->_status.stringValue = @"● Recording 00:00";
+        self->_status.stringValue = @"RECORDING";
+        self->_status.accessibilityValue = @"● Recording";
+        self->_statusDot.hidden = YES;
         self->_status.textColor = Palette::accent();
         self->_live.stringValue = @"● LIVE 2/2  8.0 Mb/s";
         self->_live.hidden = NO;
@@ -3363,16 +3500,20 @@ struct PreviewHit {
         self->_detail.accessibilityValue = longDetail;
         [self->_window.contentView layoutSubtreeIfNeeded];
         [self->_window displayIfNeeded];
-        const NSRect status = [self->_status.superview convertRect:self->_status.frame toView:self->_statusLine];
-        const NSRect detail = [self->_detail.superview convertRect:self->_detail.frame toView:self->_statusLine];
-        const NSRect live = [self->_live.superview convertRect:self->_live.frame toView:self->_statusLine];
+        const NSRect status = [self->_status.superview convertRect:self->_status.frame toView:self->_controlBar];
+        const NSRect detail = [self->_detail.superview convertRect:self->_detail.frame toView:self->_controlBar];
+        const NSRect live = [self->_live.superview convertRect:self->_live.frame toView:self->_controlBar];
+        const NSRect bar = [self->_controlBar.superview convertRect:self->_controlBar.frame toView:self->_window.contentView];
         const CGFloat statusCenter = NSMidY(status), detailCenter = NSMidY(detail), liveCenter = NSMidY(live);
         const CGFloat fullDetailWidth = [longDetail sizeWithAttributes:@{NSFontAttributeName: self->_detail.font}].width;
         statusLineLayoutOK = fabs(statusCenter - detailCenter) <= 3 && fabs(detailCenter - liveCenter) <= 3 &&
             NSMaxX(status) <= NSMinX(detail) + 1 && NSMaxX(detail) <= NSMinX(live) + 1 &&
-            NSMinX(status) >= -2 && NSMaxX(live) <= NSMaxX(self->_statusLine.bounds) + 2 && detail.size.width >= 120 &&
+            NSMinX(status) >= -2 && NSMaxX(live) <= NSMaxX(self->_controlBar.bounds) + 2 &&
+            detail.size.width >= 80 && fabs(NSMinX(bar)) <= 1 &&
+            fabs(NSMaxX(bar) - NSWidth(self->_window.contentView.bounds)) <= 1 &&
+            fabs(NSHeight(bar) - 40) <= 1 &&
             fullDetailWidth > detail.size.width &&
-            detail.size.height <= self->_statusLine.bounds.size.height &&
+            detail.size.height <= self->_controlBar.bounds.size.height &&
             self->_detail.lineBreakMode == NSLineBreakByTruncatingTail &&
             self->_detail.maximumNumberOfLines == 1 &&
             self->_detail.allowsExpansionToolTips &&
@@ -3381,18 +3522,41 @@ struct PreviewHit {
     if (!statusLineLayoutOK) {
         __block NSString* geometry;
         ui(^{
-            const NSRect status = [self->_status.superview convertRect:self->_status.frame toView:self->_statusLine];
-            const NSRect detail = [self->_detail.superview convertRect:self->_detail.frame toView:self->_statusLine];
-            const NSRect live = [self->_live.superview convertRect:self->_live.frame toView:self->_statusLine];
-            geometry = [NSString stringWithFormat:@"status %.1f,%.1f %.1fx%.1f detail %.1f,%.1f %.1fx%.1f live %.1f,%.1f %.1fx%.1f line %.1fx%.1f",
+            const NSRect status = [self->_status.superview convertRect:self->_status.frame toView:self->_controlBar];
+            const NSRect detail = [self->_detail.superview convertRect:self->_detail.frame toView:self->_controlBar];
+            const NSRect live = [self->_live.superview convertRect:self->_live.frame toView:self->_controlBar];
+            geometry = [NSString stringWithFormat:@"status %.1f,%.1f %.1fx%.1f detail %.1f,%.1f %.1fx%.1f live %.1f,%.1f %.1fx%.1f bar %.1fx%.1f",
                         status.origin.x, status.origin.y, status.size.width, status.size.height,
                         detail.origin.x, detail.origin.y, detail.size.width, detail.size.height,
                         live.origin.x, live.origin.y, live.size.width, live.size.height,
-                        self->_statusLine.bounds.size.width, self->_statusLine.bounds.size.height];
+                        self->_controlBar.bounds.size.width, self->_controlBar.bounds.size.height];
         });
-        fail([@"status, detail and LIVE do not share a non-overlapping row with full accessible detail: " stringByAppendingString:geometry]);
+        fail([@"control-bar status, detail and LIVE do not fit without overlap: " stringByAppendingString:geometry]);
     }
     note(@"status-line=ok");
+    note(@"control-bar-geometry=ok full-width=40");
+    const auto blue_pixels_in_bar = [&] {
+        return sample_window_pixels(_controlBar, [](CGFloat r, CGFloat g, CGFloat b) {
+            return b > r + 60.0 / 255 && b > g + 40.0 / 255;
+        }).count;
+    };
+    const auto assert_no_bar_blue = [&] {
+        const auto blue = blue_pixels_in_bar();
+        if (blue) fail([NSString stringWithFormat:@"system-blue pixels in control bar: %ld", static_cast<long>(blue)]);
+    };
+    const PixelStats idleDisc = sample_window_pixels(_record, [](CGFloat r, CGFloat g, CGFloat b) {
+        return std::abs(r - 58.0 / 255) < 0.08 && std::abs(g - 58.0 / 255) < 0.08 &&
+               std::abs(b - 64.0 / 255) < 0.08;
+    });
+    const PixelStats idleDot = sample_window_pixels(_record, [](CGFloat r, CGFloat g, CGFloat b) {
+        return r > 0.35 && g < 0.4 && b < 0.4 && r > g * 1.5 && r > b * 1.5;
+    });
+    if (idleDisc.count < 100 || idleDot.count < 12)
+        fail([NSString stringWithFormat:@"idle record disc pixels failed (control %ld, accent %ld)",
+              static_cast<long>(idleDisc.count), static_cast<long>(idleDot.count)]);
+    note(@"record-disc-idle=ok circle=24 control=ok dot=accent");
+    assert_no_bar_blue();
+    note(@"control-bar-no-blue=ok state=idle pixels=0");
     save_status_row_png();
     ui(^{ [self refresh]; });
     // The space between the controls and the window's edges, reported for the layout check.
@@ -3755,6 +3919,7 @@ struct PreviewHit {
     set_check(_microphone, true);
     press(_record);
     wait_for(recording, 20);
+    NSBitmapImageRep* recordingSnapshot = window_bitmap();
     __block BOOL meterBottomUp = NO;
     for (int attempt = 0; attempt < 40 && !meterBottomUp; ++attempt) {
         ui(^{
@@ -3784,8 +3949,22 @@ struct PreviewHit {
     };
     const auto recordingRed = red_pixels(0.80);
     if (recordingRed.first < 12) fail(@"recording status pixels did not render in accent red");
+    __block BOOL clockTextPresent = NO;
+    ui(^{ clockTextPresent = self->_clock.stringValue.length == 8; });
+    if (!clockTextPresent) fail(@"recording clock does not show elapsed time");
+    note(@"clock-text=ok format=HH:MM:SS");
     note(@"status-recording-color=ok");
-    save_window_png(@"app-recording-status.png");
+    const PixelStats recordingDisc = sample_window_pixels(_record, [](CGFloat r, CGFloat g, CGFloat b) {
+        return r > 0.35 && g < 0.4 && b < 0.4 && r > g * 1.5 && r > b * 1.5;
+    });
+    const PixelStats recordingCenter = sample_window_pixels(_record, [](CGFloat r, CGFloat g, CGFloat b) {
+        return r > 0.80 && g > 0.80 && b > 0.80;
+    });
+    if (recordingDisc.count < 100 || recordingCenter.count < 12)
+        fail(@"recording record disc is not accent red with its light center");
+    assert_no_bar_blue();
+    note(@"record-disc-recording=ok circle=24 accent=ok dot=light clock=present");
+    note(@"control-bar-no-blue=ok state=recording pixels=0");
     const auto measured_contrast = [&](const PixelStats& text, NSColor* background) {
         const auto linear = [](CGFloat value) {
             return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
@@ -3802,15 +3981,17 @@ struct PreviewHit {
         return r > 0.25 && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;
     };
     const PixelStats measuredRecording = sample_window_pixels(_status, redPixel);
-    const PixelStats recordingDot = sample_window_pixels(_status, redPixel, 0, 20);
+    const PixelStats recordingDot = sample_window_pixels(_record, redPixel);
     usleep(600000);
     press(_pause);
-    wait_for(@"● Paused", 5);
-    save_window_png(@"app-paused-status.png");
+    wait_for(@"PAUSED", 5);
+    NSBitmapImageRep* pausedSnapshot = window_bitmap();
+    assert_no_bar_blue();
+    note(@"control-bar-no-blue=ok state=paused pixels=0");
     const PixelStats pausedText = sample_window_pixels(_status, [](CGFloat r, CGFloat g, CGFloat b) {
         return std::abs(r - g) < 0.08 && std::abs(r - b) < 0.08 && r > 0.35;
     }, 20);
-    const PixelStats pausedDot = sample_window_pixels(_status, redPixel, 0, 20);
+    const PixelStats pausedDot = sample_window_pixels(_statusDot, redPixel);
     const CGFloat pausedTextContrast = measured_contrast(pausedText, statusSurface);
     const bool neutralText = pausedText.count >= 20 &&
         std::abs(pausedText.meanRed - pausedText.meanGreen) < 0.04 &&
@@ -3827,14 +4008,19 @@ struct PreviewHit {
     note([NSString stringWithFormat:@"paused-status=ok text=%.2f dot=%.2f,%.2f,%.2f recording-dot=%.2f,%.2f,%.2f",
           pausedTextContrast, pausedDot.meanRed, pausedDot.meanGreen, pausedDot.meanBlue,
           recordingDot.meanRed, recordingDot.meanGreen, recordingDot.meanBlue]);
+    note(@"status-paused-color=ok text-2=ok dot=accent-dim-vs-recording");
     usleep(1500000);
     press(_pause);
     wait_for(recording, 5);
     sleep(2);
     press(_record);
-    wait_for(@"Ready to record", 30);
+    wait_for(@"READY", 30);
     ui(^{ [self refresh]; });
     saved(@"pause");
+    save_window_png(@"app-recording-status.png", recordingSnapshot);
+    save_window_png(@"app-recording.png", recordingSnapshot);
+    save_window_png(@"app-paused-status.png", pausedSnapshot);
+    save_window_png(@"app-paused.png", pausedSnapshot);
 
     // 2. The global hotkey, delivered as the system delivers it to the registered handler.
     if (!_hotkey) fail(@"Shift-Command-R could not be registered");
