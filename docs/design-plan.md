@@ -132,3 +132,62 @@ Order: D1 → D2 → D3 → D4 → M1 → M2 → M3 → M4 → D5 (D5 last becau
 - **Step 4 (DarkAqua, drag on readouts)**: Implemented and passed the full macOS app E2E on 2026-10-22. `NSApp.appearance` is set to Dark Aqua before windows are created. Paired volume and Screen/Camera readouts remain accessible static text. Vertical drag changes one step per 2 pt (Shift: 8 pt); continuous slider actions update readout and applied preview/recording during movement, while release runs only the finish/save action once. Click is inert, double-click resets, and disabled source readouts ignore drag/reset; self-test confirms window-coordinate orientation, mid-drag applied state, persistence only after release, and no save for a disabled mic readout. Window PNGs are SourceOver-flattened onto dark and alpha-gated (0 transparent of every pixel); opaque-pixel mean luminance: `app-status-row.png` 51.8, `app-strips.png` 54.7, `app-recording-status.png` 53.3, `app-paused-status.png` 31.9, `app-camera-strip.png` 55.6. Paused status uses neutral gray text with at least 4.5:1 contrast against the surface and a 55%-alpha red dot; red text is reserved for recording. The self-test verifies text neutrality/contrast and measures the paused and recording dots from their snapshots. User decision 2026-10-22. Windows is also implemented: one `readout_procedure` handles all eight labels through their existing readout-to-slider pairing; dragging up/down changes the paired slider at one step per 2 DIPs, Shift uses 8 DIPs per step, and `IDC_SIZENS` indicates the gesture. It best-effort captures the pointer but tracks direct posted messages too; click-only leaves the value alone, double-click still resets, and release sends the trackbar end notification so the existing save-on-release path runs once. `SS_NOTIFY` is enabled on readouts; `PROPID_ACC_VALUE` remains on sliders and readouts remain plain static MSAA labels. The Windows app E2E checks both drag directions, release persistence and a click without movement without moving the real pointer; full local E2E passed on 2026-10-22.
 
 One thing to settle before D1: whether Windows should always be dark (my recommendation above) or follow the system setting. Everything else in the plan is independent of that choice.
+
+## 4. Redesign R1-R6: a Logic Pro / Ableton Live surface
+
+Review (Fable, 2026-10-23) of PR head `37167a5` and Windows `wip/mixer-m4`: the window reads as a preferences dialog with a mixer in one corner. Record is a system-blue default button (Mac) or an outlined stock button (Windows); the preview is a thumbnail between two forms; blue leaks through checkboxes, popup arrows, the Sources selection and focused edits; seven always-open groups (about 45 controls) fill three equal columns; the strips are smaller than the forms; six font sizes are in use. Owner decisions (2026-10-23): adopt the full new layout; muted sources light amber, as in Logic and Ableton; build both apps together, one step at a time; Windows M4 (`wip/mixer-m4`, `fc07dde`) is superseded and not landed. Mac M4 (in the PR) is the starting point the restyle replaces.
+
+### Target layout (one window, about 1040x720 pt; every existing control stays reachable)
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ ●Rec  ‖Pause  ⟲Replay   ┌ 00:12:34  RECORDING  30fps 0 drop ┐  LIVE  ⌘⇧R │ control bar, 40
+├──────────────────────────────────────────────────────────────┬───────────┤
+│                PREVIEW (16:9, full width of the main area)    │ ▾ SCENE   │
+│   [SCENE NAME ▾]                                   [9:16 ▢]   │ ▾ CAMERA  │ inspector,
+├──────────────────────────────────────────────────────────────┤ ▸ CAPTURE │ 280
+│ SYSTEM │ MIC    │ SCREEN  │ CAMERA  │   (later: layer strips) │ ▸ QUALITY │
+│ meter+fader      color sliders                               │ ▸ STREAM  │
+│ [0 dB] [M]       Reset                                       │ ▸ REPLAY & FILES │
+└──────────────────────────────────────────────────────────────┴───────────┘
+                     mixer, 220
+```
+
+Stream destinations are compact rows under STREAM. `Go live while recording` moves into the bar as the LIVE toggle (same control and accessible name). `Show preview` and `Also save a vertical video` become small toggles on the preview.
+
+### Tokens (both apps; Windows high contrast keeps system colors)
+
+| Token | Value | Use |
+|---|---|---|
+| surface-0 | `#141416` | Window background |
+| surface-1 | `#1C1C20` | Control bar, mixer background |
+| surface-2 | `#232327` | Strip panel, inspector |
+| surface-3 | `#2A2A2F` | Strip header, hover, row selection, flat buttons |
+| control | `#3A3A40` | Idle record disc, M button, checkbox box, slider track |
+| well | `#121214` | Clock display, readouts, fader channel, meter, preview frame, popups/edits |
+| line | `#0E0E10` strong, `#19191C`/`#2A2A2F` soft | Separators only; no panel borders |
+| text-1 / text-2 / text-3 | `#E6E6EA` / `#9A9AA2` / `#6F6F75` | Values and titles / labels, hints, paused / disabled |
+| accent | `#E12828` | Recording, live, clip. Nothing else is red |
+| accent-dim | `#7E2224` | Paused dot |
+| mute | `#E6AA37` | Lit M button (owner decision) |
+| meter | `#46BE69` / `#E6AA37` / `#E12828` | to -12 dB / to 0 dB / clip |
+| thumb | `#CDCDD2` | Fader caps, slider thumbs, checks |
+| radius | 3 panels and controls, 4 clock display, full circle record disc | |
+| type | 11 labels, caps headers (semibold, tracked), hints; 12 values; 15 medium monospaced digits for the clock | System font / Segoe UI |
+| grid | 4; padding 8; outer margin 12; inspector row 24; control 20 | |
+| heights | bar 40, clock display 28, fader 160, mixer 220 | |
+
+No system blue anywhere: no default button, no blue checkbox, popup arrow, list selection or focus border.
+
+### Steps (each lands on both apps, is reviewed, then goes into the PR)
+
+| Step | Change | Keep for the E2E contract |
+|---|---|---|
+| R1 | Tokens: one palette per app with the values above; window background surface-0; strip panels surface-2; remove the Mac `windowBackgroundColor`-derived strip surface. | Windows `Expect-Dark` (panel lighter than surface), strip coverage probes, Mac snapshot opacity/luminance checks. |
+| R2 | Control bar across the top: record disc (idle: control disc with a red dot; recording: red disc), flat Pause and Save Replay, clock display with elapsed time, state word (READY, RECORDING in red, PAUSED in text-2 with the accent-dim dot), stats, LIVE badge, hotkey hint. Mac drops `keyEquivalent "\r"` on Record (the blue). One status font size on Windows (no 11 to 16 pt jump). | Windows ids 100/101/102 and their texts read by `Wait-Status`/`Get-Key`/LIVE checks; Mac `_status`/`_detail`/`_live` and `wait_for(@"Ready to record")`; accessibility names of Record/Pause/Save Replay; paused-status and recording-status probes; status-row geometry probes move with the bar. |
+| R3 | Layout: preview as the hero under the bar, mixer row under the preview, one 280-wide inspector column on the right holding today's groups as sections (open for now). Window sized to content. | Preview names, `Drag-Preview` client-rect measurements, Mac 1440x900 Record-visible check, every control id/name, Tab order (Windows creation order). |
+| R4 | Strips: 96 wide audio strips, 160 fader, 1-px line between strips instead of 12 gaps, 20-high title band (surface-3), readout in a well, Mute as a 20x20 `M` toggle that lights amber (role stays CheckButton; names `Mute system`/`Mute mic`), flat color sliders with a center-out fill, Reset as a text button. Windows owner-draws the fader cap and channel. Replaces M4's sizes and gaps. | Fader direction/keyboard, meter alignment, readout drag/reset, mute timing probes, Reset accessible names. |
+| R5 | Inspector: collapsible sections (SCENE, CAMERA, CAPTURE, QUALITY, STREAM, REPLAY & FILES), caps headers, 24-high rows, custom-drawn checkboxes, Sources list and popups without blue (folds in D6). | Hidden controls stay findable by id/name; the Mac self-test's view-hierarchy walk; settings persistence. |
+| R6 | Windows dark drop-down lists (D5). | |
+
+M5 (reserve layer strip ids) is unchanged; layer strips later fill the empty end of the mixer row.
