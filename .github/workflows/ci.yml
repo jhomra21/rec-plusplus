@@ -1,0 +1,38 @@
+name: smoke
+on:
+  push:
+  pull_request:
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, encode, and decode real VideoToolbox output
+        env:
+          REC_E2E_ARTIFACT_DIR: ${{ github.workspace }}/artifacts
+        run: ./scripts/smoke.sh
+      - name: Preserve E2E recordings and probe reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rec-macos-e2e
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+  windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build with MSVC, encode, and decode real Media Foundation output
+        env:
+          REC_E2E_ARTIFACT_DIR: ${{ github.workspace }}\artifacts
+        shell: powershell
+        run: .\scripts\smoke.ps1
+      - name: Preserve E2E recordings and probe reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rec-windows-e2e
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7

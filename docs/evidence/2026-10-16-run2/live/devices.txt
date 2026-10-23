@@ -1,0 +1,5 @@
+Displays:
+  1: Display 1 (4112x2658, id 1)
+Microphones:
+  MacBook Pro Microphone (id BuiltInMicrophoneDevice)
+Default output latency: 28.0 ms

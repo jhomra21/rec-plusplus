@@ -1,0 +1,6 @@
+/build/
+/dist/
+.wrangler/
+*.mov
+*.mp4
+.DS_Store

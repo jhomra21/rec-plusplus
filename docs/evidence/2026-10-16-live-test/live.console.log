@@ -1,0 +1,53 @@
+-- The CXX compiler identification is AppleClang 21.0.0.21000099
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- The OBJCXX compiler identification is AppleClang 21.0.0.21000099
+-- Detecting OBJCXX compiler ABI info
+-- Detecting OBJCXX compiler ABI info - done
+-- Check for working OBJCXX compiler: /usr/bin/c++ - skipped
+-- Configuring done (0.6s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/juan/Documents/rec-plusplus/build
+[ 25%] Building OBJCXX object CMakeFiles/rec.dir/src/platform/macos/recorder.mm.o
+/Users/juan/Documents/rec-plusplus/src/platform/macos/recorder.mm:1124:39: warning: 'tracksWithMediaType:' is deprecated: first deprecated in macOS 15.0 - Use loadTracksWithMediaType:completionHandler: instead [-Wdeprecated-declarations]
+ 1124 |         AVAssetTrack* track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+      |                                       ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/AVFoundation.framework/Headers/AVAsset.h:186:1: note: 'tracksWithMediaType:' has been explicitly marked deprecated here
+  186 | - (NSArray<AVAssetTrack *> *)tracksWithMediaType:(AVMediaType)mediaType
+      | ^
+/Users/juan/Documents/rec-plusplus/src/platform/macos/recorder.mm:1163:55: warning: 'tracksWithMediaType:' is deprecated: first deprecated in macOS 15.0 - Use loadTracksWithMediaType:completionHandler: instead [-Wdeprecated-declarations]
+ 1163 |         NSArray<AVAssetTrack*>* audio_tracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+      |                                                       ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/AVFoundation.framework/Headers/AVAsset.h:186:1: note: 'tracksWithMediaType:' has been explicitly marked deprecated here
+  186 | - (NSArray<AVAssetTrack *> *)tracksWithMediaType:(AVMediaType)mediaType
+      | ^
+2 warnings generated.
+[ 50%] Linking OBJCXX static library librec.a
+[ 50%] Built target rec
+[ 75%] Building CXX object CMakeFiles/rec-cli.dir/src/main.cpp.o
+[100%] Linking CXX executable rec
+[100%] Built target rec-cli
+Saving recordings and evidence to: /Users/juan/Documents/rec-plusplus-evidence/live
+Displays:
+  1: Display 1 (4112x2658, id 1)
+Microphones:
+  Juan’s iPhone (2) Microphone (id 9D60E8E3-3699-48CB-A664-BBCB00000003)
+  MacBook Pro Microphone (id BuiltInMicrophoneDevice)
+Default output latency: 28.0 ms
+codec=h264
+width=1670
+height=1080
+frames=720
+duration=12
+audio_tracks=1
+audio_codec=aac
+audio_buffers=71
+audio_duration=12.0495
+av_sync_events=6
+av_offset_ms=25.6181
+av_offset_max_ms=31.8333
+Live A/V sync: 6 flash/beep pairs, mean offset 25.6181 ms (positive = audio late), worst 31.8333 ms.
+Evidence: /Users/juan/Documents/rec-plusplus-evidence/live

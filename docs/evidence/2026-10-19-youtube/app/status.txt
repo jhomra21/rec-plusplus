@@ -1,0 +1,16 @@
+Rec app (build\Release\rec-app.exe at 0de182b), REC_APP_TEST_PATTERN=1, a temporary home with
+settings: fps=30, microphone=0, system_audio=1, stream=1, destination=youtube.
+The Stream key field was left as loaded; the key came from Credential Manager
+(rec/stream/rtmps://a.rtmps.youtube.com:443/live2).
+
+server field: rtmps://a.rtmps.youtube.com:443/live2
+LIVE after 0 s
+at 10 s: ● Recording  00:10 | ● LIVE  0.2 Mb/s
+at 20 s: ● Recording  00:20 | ● LIVE  0.2 Mb/s
+at 30 s: ● Recording  00:30 | ● LIVE  0.2 Mb/s
+after stop: Saved rec-2026-10-19-102829.mp4
+frames=904
+duration=30.1333
+audio_tracks=1
+av_offset_max_ms=10.8333
+settings mention the key: False

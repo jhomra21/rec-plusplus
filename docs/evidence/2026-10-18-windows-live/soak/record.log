@@ -1,0 +1,9 @@
+exit 0
+Recording to C:\Users\jhonr\AppData\Local\Temp\rec-live-tests\soak.mp4 (Ctrl-C to stop)
+Streaming to rtmps://live.twitch.tv:443/app/**** at 6000 kb/s (hardware H.264)
+Captured 98309, written 108000, dropped 0
+System audio buffers written 179970, dropped 0 (offset 10.0 ms)
+Microphone buffers written 179972, dropped 0
+Mix buffers written 106452
+Streamed 108000 frames (594.6 MB), skipped 0
+Saved C:\Users\jhonr\AppData\Local\Temp\rec-live-tests\soak.mp4

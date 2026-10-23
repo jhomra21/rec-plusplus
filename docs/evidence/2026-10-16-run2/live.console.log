@@ -1,0 +1,42 @@
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/juan/Documents/rec-plusplus/build
+[ 25%] Building OBJCXX object CMakeFiles/rec.dir/src/platform/macos/recorder.mm.o
+/Users/juan/Documents/rec-plusplus/src/platform/macos/recorder.mm:1062:39: warning: 'tracksWithMediaType:' is deprecated: first deprecated in macOS 15.0 - Use loadTracksWithMediaType:completionHandler: instead [-Wdeprecated-declarations]
+ 1062 |         AVAssetTrack* track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+      |                                       ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/AVFoundation.framework/Headers/AVAsset.h:186:1: note: 'tracksWithMediaType:' has been explicitly marked deprecated here
+  186 | - (NSArray<AVAssetTrack *> *)tracksWithMediaType:(AVMediaType)mediaType
+      | ^
+/Users/juan/Documents/rec-plusplus/src/platform/macos/recorder.mm:1098:55: warning: 'tracksWithMediaType:' is deprecated: first deprecated in macOS 15.0 - Use loadTracksWithMediaType:completionHandler: instead [-Wdeprecated-declarations]
+ 1098 |         NSArray<AVAssetTrack*>* audio_tracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+      |                                                       ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/AVFoundation.framework/Headers/AVAsset.h:186:1: note: 'tracksWithMediaType:' has been explicitly marked deprecated here
+  186 | - (NSArray<AVAssetTrack *> *)tracksWithMediaType:(AVMediaType)mediaType
+      | ^
+2 warnings generated.
+[ 50%] Linking OBJCXX static library librec.a
+[ 50%] Built target rec
+[ 75%] Building CXX object CMakeFiles/rec-cli.dir/src/main.cpp.o
+[100%] Linking CXX executable rec
+[100%] Built target rec-cli
+Saving recordings and evidence to: /Users/juan/Documents/rec-plusplus-evidence/2026-10-16-run2/live
+Displays:
+  1: Display 1 (4112x2658, id 1)
+Microphones:
+  MacBook Pro Microphone (id BuiltInMicrophoneDevice)
+Default output latency: 28.0 ms
+codec=h264
+width=1670
+height=1080
+frames=720
+duration=12
+audio_tracks=1
+audio_codec=aac
+audio_buffers=73
+audio_duration=12.0236
+av_sync_events=6
+av_offset_ms=24.2917
+av_offset_max_ms=38.8542
+Live A/V sync: 6 flash/beep pairs, mean offset 24.2917 ms (positive = audio late), worst 38.8542 ms.
+Evidence: /Users/juan/Documents/rec-plusplus-evidence/2026-10-16-run2/live

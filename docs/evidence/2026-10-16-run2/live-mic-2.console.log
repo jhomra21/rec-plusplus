@@ -1,0 +1,25 @@
+-- Configuring done (0.1s)
+-- Generating done (0.0s)
+-- Build files have been written to: /Users/juan/Documents/rec-plusplus/build
+[ 50%] Built target rec
+[100%] Built target rec-cli
+Saving recordings and evidence to: /Users/juan/Documents/rec-plusplus-evidence/2026-10-16-run2/live-mic-2
+Displays:
+  1: Display 1 (4112x2658, id 1)
+Microphones:
+  MacBook Pro Microphone (id BuiltInMicrophoneDevice)
+Default output latency: 28.0 ms
+codec=h264
+width=1670
+height=1080
+frames=720
+duration=12
+audio_tracks=3
+audio_codec=aac
+audio_buffers=72
+audio_duration=12.0618
+av_sync_events=6
+av_offset_ms=31.2813
+av_offset_max_ms=36.6042
+Live A/V sync: 6 flash/beep pairs, mean offset 31.2813 ms (positive = audio late), worst 36.6042 ms.
+Evidence: /Users/juan/Documents/rec-plusplus-evidence/2026-10-16-run2/live-mic-2

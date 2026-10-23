@@ -1,0 +1,12 @@
+RECDBG t=256704.966 ring_overflow source=mic recording=0 depth=16 since_last_pop_ms=-1.0 pacer_state=0 blocked=0 counted=0
+RECDBG t=256704.977 ring_overflow source=mic recording=0 depth=16 since_last_pop_ms=-1.0 pacer_state=0 blocked=0 counted=0
+RECDBG t=256704.988 ring_overflow source=mic recording=0 depth=16 since_last_pop_ms=-1.0 pacer_state=0 blocked=0 counted=0
+RECDBG t=0.000 recording_started
+RECDBG t=0.065 video_backpressure slot=0 waited_ms=21.9 appended=1
+RECDBG t=0.065 pump_gap_ms=64.8 pacer_state=2
+Recording to /Users/juan/Documents/rec-plusplus-evidence/2026-10-16-run3/mic-2/recording.mov (Ctrl-C to stop)
+Captured 218, written 720, dropped 0
+System audio buffers written 613, dropped 0 (offset 28.0 ms)
+Microphone buffers written 1144, dropped 0
+Mix buffers written 617
+Saved /Users/juan/Documents/rec-plusplus-evidence/2026-10-16-run3/mic-2/recording.mov

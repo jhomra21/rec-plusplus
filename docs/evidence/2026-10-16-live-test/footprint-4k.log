@@ -1,0 +1,21 @@
+Recording to /Users/juan/Documents/rec-plusplus-evidence/footprint-4k.mov (Ctrl-C to stop)
+Captured 999, written 1800, dropped 0
+Saved /Users/juan/Documents/rec-plusplus-evidence/footprint-4k.mov
+       30.52 real         0.58 user         0.32 sys
+            34832384  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+                3447  page reclaims
+                   7  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                  15  voluntary context switches
+               20542  involuntary context switches
+          2406116490  instructions retired
+          2994651465  cycles elapsed
+            10339120  peak memory footprint

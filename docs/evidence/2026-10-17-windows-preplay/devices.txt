@@ -1,0 +1,7 @@
+Displays:
+  1: Display 1 (main) \\.\DISPLAY6 (3840x2160, id 1)
+Microphones:
+  IN 1 (2- BEHRINGER UMC 204HD 192k) (id {0.0.1.00000000}.{1071899c-596c-499d-a229-75e9e6a2fafc})
+  IN 1-2 (2- BEHRINGER UMC 204HD 192k) (id {0.0.1.00000000}.{6d76a111-f8a4-41f8-bf05-8046f50b7c8f})
+  IN 2 (2- BEHRINGER UMC 204HD 192k) (id {0.0.1.00000000}.{bac4b71a-8d4b-440b-8194-11c3b8f95624})
+Default output latency: 10.0 ms

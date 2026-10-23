@@ -1,0 +1,12 @@
+codec=h264
+width=1670
+height=1080
+frames=720
+duration=12
+audio_tracks=3
+audio_codec=aac
+audio_buffers=72
+audio_duration=12.0411
+av_sync_events=6
+av_offset_ms=24.3785
+av_offset_max_ms=36.6042

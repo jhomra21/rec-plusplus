@@ -1,0 +1,9 @@
+RECDBG t=0.000 recording_started
+RECDBG t=0.055 pump_gap_ms=55.4 pacer_state=2
+RECDBG t=12.091 pump_gap_ms=63.4 pacer_state=2
+Recording to /Users/juan/Documents/rec-plusplus-evidence/2026-10-16-run3/mic-3/recording.mov (Ctrl-C to stop)
+Captured 126, written 720, dropped 0
+System audio buffers written 612, dropped 0 (offset 28.0 ms)
+Microphone buffers written 1145, dropped 0
+Mix buffers written 615
+Saved /Users/juan/Documents/rec-plusplus-evidence/2026-10-16-run3/mic-3/recording.mov

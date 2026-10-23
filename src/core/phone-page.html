@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Rec camera</title>
+<style>
+body{margin:0;background:#111;color:#eee;font:17px -apple-system,system-ui,sans-serif;display:flex;flex-direction:column;height:100vh;height:100dvh}
+video{flex:1;min-height:0;width:100%;object-fit:contain;background:#000}
+#bar{display:flex;gap:10px;padding:12px 16px calc(12px + env(safe-area-inset-bottom));align-items:center}
+#status{flex:1}
+button{font:inherit;padding:10px 16px;border-radius:12px;border:0;background:#2c2c2e;color:#fff}
+</style></head>
+<body><video id="v" autoplay playsinline muted></video>
+<div id="bar"><span id="status" role="status">Starting</span><button id="flip">Switch camera</button></div>
+<script>
+// Rec serves this page itself on the local network (local becomes true), or a relay on the web
+// serves it and passes the offer to Rec and Rec's answer back. Both are signed with the token,
+// which stays in the address's fragment, so the relay can neither read nor change them.
+const local = /*local*/false;
+const token = location.hash.slice(1), v = document.getElementById('v'), status = document.getElementById('status');
+let facing = localStorage.getItem('rec-facing') || 'environment', stream = null, pc = null, sender = null, timer = null;
+const say = t => { status.textContent = t; };
+const bytes = t => new TextEncoder().encode(t);
+const hex = b => Array.from(new Uint8Array(b), x => x.toString(16).padStart(2, '0')).join('');
+async function mac(text) {
+  const key = await crypto.subtle.importKey('raw', bytes(token), {name: 'HMAC', hash: 'SHA-256'}, false, ['sign']);
+  return hex(await crypto.subtle.sign('HMAC', key, bytes(text)));
+}
+async function camera() {
+  const s = await navigator.mediaDevices.getUserMedia({audio: false, video: {facingMode: {ideal: facing},
+    width: {ideal: 1920}, height: {ideal: 1080}, frameRate: {ideal: 30}}});
+  if (stream) stream.getTracks().forEach(t => t.stop());
+  stream = s;
+  v.srcObject = s;
+  v.style.transform = facing === 'user' ? 'scaleX(-1)' : '';
+  return s.getVideoTracks()[0];
+}
+async function exchange(offer) {
+  if (local) {
+    const response = await fetch('/offer', {method: 'POST', cache: 'no-store',
+      headers: {'Content-Type': 'application/sdp', 'Authorization': 'Bearer ' + token}, body: offer});
+    if (!response.ok) throw new Error(response.status === 403 ? 'This link is old. Scan the code in Rec again.' : 'Rec answered ' + response.status + ': ' + await response.text());
+    return await response.text();
+  }
+  const room = hex(await crypto.subtle.digest('SHA-256', bytes('rec phone room\n' + token)));
+  const signature = await mac('offer\n' + offer);
+  const response = await fetch('/rooms/' + room + '/offer', {method: 'POST', cache: 'no-store',
+    headers: {'Content-Type': 'application/sdp', 'Rec-Mac': signature}, body: offer});
+  if (response.status === 409) throw new Error('Waiting for Rec: choose Phone over Wi-Fi as its camera.');
+  if (!response.ok) throw new Error(await response.text() || 'The relay answered ' + response.status);
+  const answer = await response.text();
+  if (response.headers.get('Rec-Mac') !== await mac('answer\n' + signature + '\n' + answer))
+    throw new Error('The answer did not come from your Rec.');
+  return answer;
+}
+async function connect() {
+  if (pc) { pc.onconnectionstatechange = null; pc.close(); }
+  pc = new RTCPeerConnection();
+  const transceiver = pc.addTransceiver(stream.getVideoTracks()[0], {direction: 'sendonly', streams: [stream]});
+  sender = transceiver.sender;
+  const caps = RTCRtpSender.getCapabilities && RTCRtpSender.getCapabilities('video');
+  if (caps && transceiver.setCodecPreferences) {
+    const h264 = caps.codecs.filter(c => c.mimeType.toLowerCase() === 'video/h264');
+    if (h264.length) transceiver.setCodecPreferences(h264);
+  }
+  const mine = pc;
+  const lost = () => { if (mine === pc) { say('Reconnecting'); retry(); } };
+  pc.onconnectionstatechange = () => {
+    if (mine !== pc) return;
+    if (pc.connectionState === 'connected') say('Live in Rec');
+    else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') lost();
+  };
+  await pc.setLocalDescription(await pc.createOffer());
+  await new Promise(done => {
+    if (pc.iceGatheringState === 'complete') return done();
+    pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') done(); };
+    setTimeout(done, 1500);
+  });
+  await pc.setRemoteDescription({type: 'answer', sdp: await exchange(pc.localDescription.sdp)});
+  // Rec ends the session with a DTLS close_notify when it closes the camera.
+  const transport = transceiver.sender.transport;
+  if (transport) transport.onstatechange = () => { if (transport.state === 'closed' || transport.state === 'failed') lost(); };
+  const p = sender.getParameters();
+  if (!p.encodings || !p.encodings.length) p.encodings = [{}];
+  p.encodings[0].maxBitrate = 8000000;
+  p.degradationPreference = 'maintain-resolution';
+  try { await sender.setParameters(p); } catch (e) {}
+}
+function retry() {
+  if (timer) return;
+  timer = setTimeout(async () => {
+    timer = null;
+    try { await connect(); } catch (e) { say(e.message); retry(); }
+  }, 2000);
+}
+document.getElementById('flip').onclick = async () => {
+  facing = facing === 'user' ? 'environment' : 'user';
+  localStorage.setItem('rec-facing', facing);
+  try { const track = await camera(); if (sender) await sender.replaceTrack(track); } catch (e) { say(e.message); }
+};
+async function awake() { try { await navigator.wakeLock.request('screen'); } catch (e) {} }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') awake(); });
+(async () => {
+  if (!token) { say('Open the link Rec shows.'); return; }
+  try { await camera(); } catch (e) { say('No camera: ' + e.message); return; }
+  say('Connecting');
+  awake();
+  try { await connect(); } catch (e) { say(e.message); retry(); }
+})();
+</script></body></html>

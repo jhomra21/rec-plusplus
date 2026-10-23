@@ -1,0 +1,182 @@
+diff --git a/src/platform/macos/recorder.mm b/src/platform/macos/recorder.mm
+index 199cdc5..3fb058e 100644
+--- a/src/platform/macos/recorder.mm
++++ b/src/platform/macos/recorder.mm
+@@ -19,6 +19,7 @@
+ #include <cmath>
+ #include <condition_variable>
+ #include <cstddef>
++#include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <mutex>
+@@ -399,6 +400,13 @@ void clear() {
+     std::int64_t next_mix = INT64_MIN;   // Keeps consecutive buffers contiguous in the mix.
+     std::atomic<std::uint64_t> written{0}, dropped{0};
+ };
++
++// TEMP DEBUG (revert): diagnostic helpers for RECDBG logging.
++const char* dbg_name(Source kind) { return kind == kMic ? "mic" : "system"; }
++std::int64_t dbg_now_ns() {
++    return std::chrono::duration_cast<std::chrono::nanoseconds>(
++        std::chrono::steady_clock::now().time_since_epoch()).count();
++}
+ } // namespace
+ 
+ std::vector<Display> list_displays(std::string& error) {
+@@ -481,6 +489,7 @@ Result start() {
+             host_origin_ = CMClockGetTime(CMClockGetHostTimeClock());
+             begin_ = std::chrono::steady_clock::now();
+             recording_.store(true);
++            std::fprintf(stderr, "RECDBG t=0.000 recording_started\n"); // TEMP DEBUG (revert)
+             pacer_ = std::thread([this] { run(); });
+             return {};
+         }
+@@ -562,8 +571,18 @@ void on_audio(CMSampleBufferRef sample, bool microphone) {
+         CFRetain(sample);
+         std::lock_guard lock(mutex_);
+         // Before the origin, overflow only discards pre-roll that would never be written.
+-        if (!source.queue.push(sample) && recording_.load(std::memory_order_relaxed))
+-            source.dropped.fetch_add(1, std::memory_order_relaxed);
++        const bool recording = recording_.load(std::memory_order_relaxed);
++        if (!source.queue.push(sample)) {
++            const bool counted = recording;
++            if (counted) source.dropped.fetch_add(1, std::memory_order_relaxed); // TEMP DEBUG: same as before
++            const auto last = dbg_last_pop_ns_[microphone ? kMic : kSystem].load();
++            const double since_ms = last == 0 ? -1.0 : static_cast<double>(dbg_now_ns() - last) / 1e6;
++            std::fprintf(stderr,
++                         "RECDBG t=%.3f ring_overflow source=%s recording=%d depth=16 since_last_pop_ms=%.1f pacer_state=%d blocked=%d counted=%d\n",
++                         dbg_t(), dbg_name(microphone ? kMic : kSystem), recording ? 1 : 0, since_ms,
++                         dbg_pacer_state_.load(), dbg_blocked_[microphone ? kMic : kSystem].load() ? 1 : 0,
++                         counted ? 1 : 0);
++        }
+     }
+ 
+     void on_failure(NSError* error) {
+@@ -807,6 +826,7 @@ bool process_audio(Source kind, CMSampleBufferRef sample) {
+         const CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
+         if (!CMTIME_IS_NUMERIC(pts)) {
+             source.dropped.fetch_add(1);
++            std::fprintf(stderr, "RECDBG t=%.3f drop reason=non_numeric_pts source=%s\n", dbg_t(), dbg_name(kind));
+             return true;
+         }
+         // Host clock to recording time, plus the source's sync offset.
+@@ -818,6 +838,8 @@ bool process_audio(Source kind, CMSampleBufferRef sample) {
+                 used = true;
+             } else {
+                 source.dropped.fetch_add(1);
++                std::fprintf(stderr, "RECDBG t=%.3f drop reason=stem_append_failed source=%s writer_status=%d buffer_start=%.3f\n",
++                             dbg_t(), dbg_name(kind), static_cast<int>(writer_.status), CMTimeGetSeconds(start));
+                 if (writer_.status == AVAssetWriterStatusFailed)
+                     fail(message(writer_.error, "audio encoding failed"));
+             }
+@@ -834,6 +856,7 @@ bool process_audio(Source kind, CMSampleBufferRef sample) {
+                 used = true;
+             } else if (!source.stem) {
+                 source.dropped.fetch_add(1);
++                std::fprintf(stderr, "RECDBG t=%.3f drop reason=pcm_convert_failed source=%s\n", dbg_t(), dbg_name(kind));
+             }
+         }
+         if (used) source.written.fetch_add(1);
+@@ -874,6 +897,15 @@ void emit_mix(bool flush) {
+ 
+     // Drains captured audio on the recording thread. Never encode or block in a callback.
+     void pump_audio(bool flush) {
++        // TEMP DEBUG (revert): detect gaps between pump calls on the recording thread.
++        const auto dbg_now = std::chrono::steady_clock::now();
++        if (dbg_last_pump_ != std::chrono::steady_clock::time_point{}) {
++            const double gap_ms = std::chrono::duration<double, std::milli>(dbg_now - dbg_last_pump_).count();
++            if (gap_ms > 40)
++                std::fprintf(stderr, "RECDBG t=%.3f pump_gap_ms=%.1f pacer_state=%d\n",
++                             dbg_t(), gap_ms, dbg_pacer_state_.load());
++        }
++        dbg_last_pump_ = dbg_now;
+         for (auto kind : {kSystem, kMic}) {
+             auto& source = audio_[kind];
+             if (!source.enabled) continue;
+@@ -881,6 +913,7 @@ void pump_audio(bool flush) {
+                 if (!source.held) {
+                     std::lock_guard lock(mutex_);
+                     source.held = source.queue.pop();
++                    if (source.held) dbg_last_pop_ns_[kind].store(dbg_now_ns());
+                 }
+                 if (!source.held) break;
+                 bool done = process_audio(kind, source.held);
+@@ -890,10 +923,26 @@ void pump_audio(bool flush) {
+                         std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                         done = process_audio(kind, source.held);
+                     }
+-                    if (!done) source.dropped.fetch_add(1);
++                    if (!done) {
++                        source.dropped.fetch_add(1);
++                        std::fprintf(stderr, "RECDBG t=%.3f drop reason=flush_timeout source=%s\n", dbg_t(), dbg_name(kind));
++                        dbg_blocked_[kind].store(false);
++                    }
+                 } else if (!done) {
++                    if (!dbg_blocked_[kind].load()) {
++                        dbg_blocked_[kind].store(true);
++                        dbg_block_start_[kind] = std::chrono::steady_clock::now();
++                    }
+                     break;
+                 }
++                if (done && dbg_blocked_[kind].load()) {
++                    dbg_blocked_[kind].store(false);
++                    const double blocked_ms = std::chrono::duration<double, std::milli>(
++                        std::chrono::steady_clock::now() - dbg_block_start_[kind]).count();
++                    if (blocked_ms > 20)
++                        std::fprintf(stderr, "RECDBG t=%.3f stem_unblocked source=%s blocked_ms=%.1f\n",
++                                     dbg_t(), dbg_name(kind), blocked_ms);
++                }
+                 CFRelease(source.held);
+                 source.held = nullptr;
+             }
+@@ -949,7 +998,9 @@ void run() {
+         const CMTimeScale scale = static_cast<CMTimeScale>(options_.fps);
+         for (std::uint64_t slot = 0; slot < limit && !stop_requested_.load() && !finished_; ++slot) {
+             const auto tick = begin_ + nanoseconds(slot * 1000000000ull / options_.fps) + delay;
++            dbg_pacer_state_.store(0); // TEMP DEBUG (revert)
+             std::this_thread::sleep_until(tick);
++            dbg_pacer_state_.store(2); // TEMP DEBUG (revert)
+             if (stop_requested_.load() || finished_) break;
+             @autoreleasepool {
+                 CVPixelBufferRef frame = select_frame(slot);
+@@ -957,6 +1008,8 @@ void run() {
+                 // Never hold a stream callback or create an unbounded frame queue.
+                 bool appended = false;
+                 const auto deadline = tick + milliseconds(500);
++                const auto wait_start = steady_clock::now(); // TEMP DEBUG (revert)
++                dbg_pacer_state_.store(1); // TEMP DEBUG (revert)
+                 while (frame && !stop_requested_.load() && !finished_.load() &&
+                        steady_clock::now() < deadline && writer_.status != AVAssetWriterStatusFailed) {
+                     if (input_.readyForMoreMediaData &&
+@@ -969,6 +1022,13 @@ void run() {
+                     pump_audio(false);
+                     std::this_thread::sleep_for(milliseconds(2));
+                 }
++                dbg_pacer_state_.store(2); // TEMP DEBUG (revert)
++                { // TEMP DEBUG (revert)
++                    const double waited_ms = duration<double, std::milli>(steady_clock::now() - wait_start).count();
++                    if (waited_ms > 20 || !appended)
++                        std::fprintf(stderr, "RECDBG t=%.3f video_backpressure slot=%llu waited_ms=%.1f appended=%d\n",
++                                     dbg_t(), static_cast<unsigned long long>(slot), waited_ms, appended ? 1 : 0);
++                }
+                 if (appended) {
+                     written_.fetch_add(1);
+                     if ((options_.test_tone || options_.test_mic) &&
+@@ -1029,6 +1089,16 @@ void cleanup_capture() {
+     std::atomic_bool recording_{false};
+     std::atomic_bool finished_{false};
+     std::atomic<std::uint64_t> captured_{0}, written_{0}, dropped_{0}, mix_written_{0};
++    // TEMP DEBUG (revert): RECDBG diagnostics.
++    std::array<std::atomic<std::int64_t>, 2> dbg_last_pop_ns_{};  // steady_clock ns of last successful pop per source, written by pump_audio
++    std::atomic<int> dbg_pacer_state_{0};                          // 0 = sleeping until next tick, 1 = video backpressure retry loop, 2 = other work
++    std::array<std::atomic<bool>, 2> dbg_blocked_{};               // source.held is waiting because its stem input is not ready
++    std::array<std::chrono::steady_clock::time_point, 2> dbg_block_start_{};  // recording thread only
++    std::chrono::steady_clock::time_point dbg_last_pump_{};        // recording thread only
++    // TEMP DEBUG (revert): seconds since recording start, for RECDBG lines.
++    double dbg_t() const {
++        return std::chrono::duration<double>(std::chrono::steady_clock::now() - begin_).count();
++    }
+ };
+ 
+ namespace {

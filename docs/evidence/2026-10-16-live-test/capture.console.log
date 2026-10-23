@@ -1,0 +1,163 @@
+-- The CXX compiler identification is AppleClang 21.0.0.21000099
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- The OBJCXX compiler identification is AppleClang 21.0.0.21000099
+-- Detecting OBJCXX compiler ABI info
+-- Detecting OBJCXX compiler ABI info - done
+-- Check for working OBJCXX compiler: /usr/bin/c++ - skipped
+-- Configuring done (0.9s)
+-- Generating done (0.0s)
+-- Build files have been written to: /var/folders/28/mq07hq557qj_f7ngqk6cwgp40000gn/T/tmp.7WDBDxjE0V/build
+[ 25%] Building OBJCXX object CMakeFiles/rec.dir/src/platform/macos/recorder.mm.o
+/Users/juan/Documents/rec-plusplus/src/platform/macos/recorder.mm:1124:39: warning: 'tracksWithMediaType:' is deprecated: first deprecated in macOS 15.0 - Use loadTracksWithMediaType:completionHandler: instead [-Wdeprecated-declarations]
+ 1124 |         AVAssetTrack* track = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+      |                                       ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/AVFoundation.framework/Headers/AVAsset.h:186:1: note: 'tracksWithMediaType:' has been explicitly marked deprecated here
+  186 | - (NSArray<AVAssetTrack *> *)tracksWithMediaType:(AVMediaType)mediaType
+      | ^
+/Users/juan/Documents/rec-plusplus/src/platform/macos/recorder.mm:1163:55: warning: 'tracksWithMediaType:' is deprecated: first deprecated in macOS 15.0 - Use loadTracksWithMediaType:completionHandler: instead [-Wdeprecated-declarations]
+ 1163 |         NSArray<AVAssetTrack*>* audio_tracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+      |                                                       ^
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/AVFoundation.framework/Headers/AVAsset.h:186:1: note: 'tracksWithMediaType:' has been explicitly marked deprecated here
+  186 | - (NSArray<AVAssetTrack *> *)tracksWithMediaType:(AVMediaType)mediaType
+      | ^
+2 warnings generated.
+[ 50%] Linking OBJCXX static library librec.a
+[ 50%] Built target rec
+[ 75%] Building CXX object CMakeFiles/rec-cli.dir/src/main.cpp.o
+[100%] Linking CXX executable rec
+[100%] Built target rec-cli
+Recording to /Users/juan/Documents/rec-plusplus-evidence/capture/h264.mov (Ctrl-C to stop)
+Captured 1, written 60, dropped 0
+Saved /Users/juan/Documents/rec-plusplus-evidence/capture/h264.mov
+codec=h264
+width=1920
+height=1080
+frames=60
+duration=2
+audio_tracks=0
+audio_codec=
+audio_buffers=0
+audio_duration=0
+av_sync_events=0
+av_offset_ms=0
+av_offset_max_ms=0
+Recording to /Users/juan/Documents/rec-plusplus-evidence/capture/av.mov (Ctrl-C to stop)
+Captured 1, written 60, dropped 0
+System audio buffers written 120, dropped 0 (offset 0.0 ms)
+Saved /Users/juan/Documents/rec-plusplus-evidence/capture/av.mov
+codec=h264
+width=1920
+height=1080
+frames=60
+duration=2
+audio_tracks=1
+audio_codec=aac
+audio_buffers=12
+audio_duration=2
+av_sync_events=2
+av_offset_ms=0.166667
+av_offset_max_ms=0.166667
+Recording to /Users/juan/Documents/rec-plusplus-evidence/capture/offset.mov (Ctrl-C to stop)
+Captured 1, written 60, dropped 0
+System audio buffers written 120, dropped 0 (offset 100.0 ms)
+Saved /Users/juan/Documents/rec-plusplus-evidence/capture/offset.mov
+codec=h264
+width=1920
+height=1080
+frames=60
+duration=2
+audio_tracks=1
+audio_codec=aac
+audio_buffers=13
+audio_duration=2.09998
+av_sync_events=2
+av_offset_ms=100.146
+av_offset_max_ms=100.146
+Recording to /Users/juan/Documents/rec-plusplus-evidence/capture/mix.mov (Ctrl-C to stop)
+Captured 1, written 60, dropped 0
+System audio buffers written 120, dropped 0 (offset 0.0 ms)
+Microphone buffers written 120, dropped 0
+Mix buffers written 60
+Saved /Users/juan/Documents/rec-plusplus-evidence/capture/mix.mov
+codec=h264
+width=1920
+height=1080
+frames=60
+duration=2
+audio_tracks=3
+audio_codec=aac
+audio_buffers=12
+audio_duration=2
+av_sync_events=2
+av_offset_ms=0.145833
+av_offset_max_ms=0.145833
+Recording to /Users/juan/Documents/rec-plusplus-evidence/capture/stems.mp4 (Ctrl-C to stop)
+Captured 1, written 30, dropped 0
+System audio buffers written 60, dropped 0 (offset 0.0 ms)
+Microphone buffers written 60, dropped 0
+Saved /Users/juan/Documents/rec-plusplus-evidence/capture/stems.mp4
+codec=h264
+width=1920
+height=1080
+frames=30
+duration=1
+audio_tracks=2
+audio_codec=aac
+audio_buffers=6
+audio_duration=1
+av_sync_events=1
+av_offset_ms=0.166667
+av_offset_max_ms=0.166667
+Recording to /Users/juan/Documents/rec-plusplus-evidence/capture/mixonly.mov (Ctrl-C to stop)
+Captured 1, written 30, dropped 0
+System audio buffers written 60, dropped 0 (offset 0.0 ms)
+Microphone buffers written 60, dropped 0
+Mix buffers written 30
+Saved /Users/juan/Documents/rec-plusplus-evidence/capture/mixonly.mov
+codec=h264
+width=1920
+height=1080
+frames=30
+duration=1
+audio_tracks=1
+audio_codec=aac
+audio_buffers=6
+audio_duration=1
+av_sync_events=1
+av_offset_ms=0.145833
+av_offset_max_ms=0.145833
+Recording to /Users/juan/Documents/rec-plusplus-evidence/capture/hevc.mp4 (Ctrl-C to stop)
+Captured 1, written 30, dropped 0
+Saved /Users/juan/Documents/rec-plusplus-evidence/capture/hevc.mp4
+codec=hevc
+width=1920
+height=1080
+frames=30
+duration=1
+audio_tracks=0
+audio_codec=
+audio_buffers=0
+audio_duration=0
+av_sync_events=0
+av_offset_ms=0
+av_offset_max_ms=0
+Recording to /Users/juan/Documents/rec-plusplus-evidence/capture/screen.mov (Ctrl-C to stop)
+Captured 81, written 90, dropped 0
+Saved /Users/juan/Documents/rec-plusplus-evidence/capture/screen.mov
+codec=h264
+width=1670
+height=1080
+frames=90
+duration=3
+audio_tracks=0
+audio_codec=
+audio_buffers=0
+audio_duration=0
+av_sync_events=0
+av_offset_ms=0
+av_offset_max_ms=0
+smoke passed

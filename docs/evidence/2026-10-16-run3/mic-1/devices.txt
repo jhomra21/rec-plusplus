@@ -1,0 +1,6 @@
+Displays:
+  1: Display 1 (4112x2658, id 1)
+Microphones:
+  Juan’s iPhone (2) Microphone (id 9D60E8E3-3699-48CB-A664-BBCB00000003)
+  MacBook Pro Microphone (id BuiltInMicrophoneDevice)
+Default output latency: 28.0 ms

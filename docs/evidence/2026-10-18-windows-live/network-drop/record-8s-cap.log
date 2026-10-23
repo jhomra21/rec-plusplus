@@ -1,0 +1,8 @@
+Recording to C:\Users\jhonr\AppData\Local\Temp\rec-live-tests\twitch-drop.mp4 (Ctrl-C to stop)
+Streaming to rtmps://live.twitch.tv:443/app/**** at 6000 kb/s (software H.264)
+Stream lost at 00:14.0, reconnecting
+Stream reconnected at 00:30.1
+Captured 1, written 1800, dropped 0
+System audio buffers written 3600, dropped 0 (offset 0.0 ms)
+Streamed 1261 frames (1.4 MB), skipped 539, reconnected 1
+Saved C:\Users\jhonr\AppData\Local\Temp\rec-live-tests\twitch-drop.mp4
