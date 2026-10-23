@@ -1091,7 +1091,9 @@ private:
         }
     }
     void paint_control_bar(HDC dc) const {
-        RECT bar{0, 0, content_width_, px(40)};
+        RECT client{};
+        GetClientRect(window_, &client);
+        RECT bar{0, 0, client.right, px(40)};
         FillRect(dc, &bar, bar_brush_);
         RECT separator{bar.left, bar.bottom - px(1), bar.right, bar.bottom};
         HBRUSH line = CreateSolidBrush(palette_.line);
@@ -1909,7 +1911,7 @@ private:
         place(kStatus, bar_status_left, (px(40) - bar_px(24)) / 2, status_width, bar_px(24));
         const int bar_live_width = bar_px(compact_bar ? 130 : 94);
         const int bar_hint_width = bar_px(compact_bar ? 104 : 104);
-        const int bar_right = full + margin;
+        const int bar_right = full + 2 * margin - px(16);
         const int bar_live_left = bar_right - bar_hint_width - bar_live_width - bar_px(compact_bar ? 6 : 12);
         const int detail_left = bar_status_left + (compact_bar ? 94 : 92);
         place(kDetail, detail_left, (px(40) - bar_px(24)) / 2,
