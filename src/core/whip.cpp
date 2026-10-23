@@ -25,6 +25,7 @@ constexpr auto kSendMargin = milliseconds(40);
 // Arrival-anchored receivers see audio early by this much; SR-anchored receivers are
 // unaffected since RTP timestamps and SRs are unchanged.
 constexpr auto kOpeningAudioLead = milliseconds(20);
+constexpr auto kOpeningAudioSafety = milliseconds(50);
 constexpr std::uint32_t kQueueMs = 2000;
 constexpr std::size_t kMaxQueue = 4000;
 constexpr std::size_t kMaxPayload = 1200;
@@ -307,7 +308,8 @@ struct WhipPublisher::Session {
     // keyframe first so receivers that establish their mux timeline from first-packet arrival
     // cannot place the keyframe after the recording start.
     bool anchored = false, opening_audio_sent = false;
-    bool video_keyframe_sent = false;
+    bool video_keyframe_sent = false, opening_video_following_sent = false;
+    Clock::time_point opening_video_following_due{};
     std::uint32_t t0_ms = 0;
     std::int64_t ref_sample = 0;
     Clock::time_point at{};
@@ -740,57 +742,33 @@ bool WhipPublisher::take_due(Session& s, Clock::time_point now, Media& item, Clo
                     return !m.video && m.sample == s.ref_sample;
                 });
                 if (audio != queue_.end()) {
-                    // Preserve the captured lead and add a delivery margin. RTP from separate
-                    // SSRCs is read on separate receiver goroutines, so merely sending audio
-                    // just before the IDR does not guarantee the receiver processes it first.
-                    const auto lead_ms = audio->ms < s.t0_ms ? s.t0_ms - audio->ms : 0;
-                    const auto audio_due = s.at - milliseconds(lead_ms) - kOpeningAudioLead;
-                    if (audio_due > now) {
+                    const auto offset_ms = static_cast<std::int64_t>(audio->ms) - static_cast<std::int64_t>(s.t0_ms);
+                    const auto audio_due = s.at + milliseconds(offset_ms) -
+                                           (audio->ms < s.t0_ms ? kOpeningAudioLead : milliseconds{});
+                    if (audio_due > now && audio_due < s.at) {
                         next = audio_due;
                         return false;
                     }
-                    item = std::move(*audio);
-                    queue_.erase(audio);
-                    s.opening_audio_sent = true;
-                    return true;
-                }
-            }
-            // Preserve audio between the opening packet and the IDR. These packets must retain
-            // their inter-track spacing in receivers that derive audio sample durations from
-            // packet arrival times rather than RTP timestamps alone.
-            if (s.opening_audio_sent) {
-                for (std::size_t i = 0; i < queue_.size(); ++i) {
-                    const auto& m = queue_[i];
-                    if (m.video || m.sample <= s.ref_sample || m.ms >= s.t0_ms) continue;
-                    if (pick == queue_.size() || m.sample < queue_[pick].sample) pick = i;
-                }
-                if (pick != queue_.size()) {
-                    const auto& audio = queue_[pick];
-                    const auto offset_ms = static_cast<std::int64_t>(audio.ms) -
-                                           static_cast<std::int64_t>(s.t0_ms);
-                    const auto audio_due = s.at + milliseconds(offset_ms) - kOpeningAudioLead;
-                    if (audio_due > now) {
-                        next = audio_due;
-                        return false;
+                    if (audio_due <= now) {
+                        item = std::move(*audio);
+                        queue_.erase(audio);
+                        s.opening_audio_sent = true;
+                        return true;
                     }
-                    item = std::move(queue_[pick]);
-                    queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(pick));
-                    return true;
                 }
             }
-            // Residual race: if the receiver still decodes video first, MediaMTX's recorder
-            // can drop the opening IDR. Holding audio until video frame two would bound this,
-            // but would delay opening audio.
-            if (!s.opening_audio_sent || pick == queue_.size()) {
-                const auto key = std::find_if(queue_.begin(), queue_.end(),
-                                              [](const Media& m) { return m.video && m.key; });
-                if (key != queue_.end()) pick = static_cast<std::size_t>(key - queue_.begin());
-            }
+            const auto key = std::find_if(queue_.begin(), queue_.end(),
+                                          [](const Media& m) { return m.video && m.key; });
+            if (key != queue_.end()) pick = static_cast<std::size_t>(key - queue_.begin());
         } else {
+            // Hold later audio until video has a second sample; MediaMTX commits tracks then.
             const std::size_t span = std::min<std::size_t>(queue_.size(), 64);
-            pick = 0;
-            for (std::size_t i = 1; i < span; ++i)
-                if (queue_[i].ms < queue_[pick].ms) pick = i;
+            for (std::size_t i = 0; i < span; ++i) {
+                const auto& candidate = queue_[i];
+                if (!candidate.video && candidate.sample != s.ref_sample &&
+                    (!s.opening_video_following_sent || now < s.opening_video_following_due)) continue;
+                if (pick == queue_.size() || candidate.ms < queue_[pick].ms) pick = i;
+            }
         }
         if (pick == queue_.size()) return false;
         const auto& m = queue_[static_cast<std::ptrdiff_t>(pick)];
@@ -896,6 +874,11 @@ void WhipPublisher::send_video(Session& s, const Media& item) {
         // A failed UDP send can leave an IDR incomplete even after the bounded ENOBUFS retry.
         // Ask the encoder for another keyframe instead of waiting for its regular 2 s interval.
         refresh_wanted_.store(true);
+    }
+    if (s.video_keyframe_sent && sent_all && item.ms > s.t0_ms &&
+        !s.opening_video_following_sent) {
+        s.opening_video_following_sent = true;
+        s.opening_video_following_due = Clock::now() + kOpeningAudioSafety;
     }
     if (item.key && sent_all && s.video_packets > packets_before) {
         s.video_keyframe_sent = true;
