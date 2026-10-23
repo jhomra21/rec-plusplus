@@ -58,21 +58,21 @@ struct Palette {
     COLORREF surface = RGB(20, 20, 22);       // surface-0: window background
     COLORREF bar = RGB(28, 28, 32);           // surface-1: control bar and mixer
     COLORREF panel = RGB(35, 35, 39);         // surface-2: strips and inspector
-    COLORREF raised = RGB(42, 42, 47);        // surface-3: headers, hover, flat buttons
+    COLORREF raised = RGB(42, 42, 47);        // surface-3: headers and hover (flat buttons use this on press)
     COLORREF control = RGB(58, 58, 64);       // idle controls and slider track
     COLORREF well = RGB(18, 18, 20);          // clock/readout wells and preview
     COLORREF line = RGB(14, 14, 16);          // strong separator
-    COLORREF soft_line = RGB(25, 25, 28);
+    COLORREF soft_line = RGB(25, 25, 28);     // reserved for later mixer separators
     COLORREF accent = RGB(225, 40, 40);
     COLORREF dim_accent = RGB(126, 34, 36);
     COLORREF text = RGB(230, 230, 234);       // text-1
     COLORREF dim_text = RGB(154, 154, 162);   // text-2
     COLORREF disabled_text = RGB(111, 111, 117); // text-3
-    COLORREF mute = RGB(230, 170, 55);
-    COLORREF channel = RGB(58, 58, 64);       // slider track uses control
-    COLORREF fader_channel = RGB(18, 18, 20); // fader channel uses well
+    COLORREF mute = RGB(230, 170, 55);        // reserved for the R4 mute toggle
+    COLORREF channel = control;              // slider track uses control
+    COLORREF fader_channel = well;           // fader channel uses well
     COLORREF fill = RGB(112, 112, 118);
-    COLORREF thumb = RGB(205, 205, 210);
+    COLORREF thumb = RGB(205, 205, 210);     // reserved for owner-drawn R4 faders
     COLORREF meter_green = RGB(70, 190, 105);
     COLORREF meter_amber = RGB(230, 170, 55);
     bool high_contrast = false;
@@ -89,7 +89,7 @@ struct Palette {
             p.bar = GetSysColor(COLOR_BTNFACE);
             p.panel = GetSysColor(COLOR_BTNFACE);
             p.raised = GetSysColor(COLOR_BTNFACE);
-            p.control = GetSysColor(COLOR_BTNFACE);
+            p.control = GetSysColor(COLOR_BTNSHADOW);
             p.well = GetSysColor(COLOR_WINDOW);
             p.line = GetSysColor(COLOR_WINDOWTEXT);
             p.soft_line = GetSysColor(COLOR_GRAYTEXT);
@@ -97,8 +97,8 @@ struct Palette {
             p.dim_text = GetSysColor(COLOR_GRAYTEXT);
             p.disabled_text = GetSysColor(COLOR_GRAYTEXT);
             p.mute = GetSysColor(COLOR_HOTLIGHT);
-            p.channel = GetSysColor(COLOR_BTNSHADOW);
-            p.fader_channel = GetSysColor(COLOR_WINDOW);
+            p.channel = p.control;
+            p.fader_channel = p.well;
             p.fill = GetSysColor(COLOR_HIGHLIGHT);
             p.thumb = GetSysColor(COLOR_BTNTEXT);
             p.meter_green = GetSysColor(COLOR_HIGHLIGHT);
@@ -1030,21 +1030,7 @@ private:
             SetBkColor(dc, palette_.bar);
             SetTextColor(dc, id == kDetail && attention_ ? palette_.text : palette_.dim_text);
             SelectObject(dc, title_);
-            std::wstring stats;
-            const wchar_t* visible = text;
-            const bool message = wcsncmp(text, L"Recording failed:", 17) == 0 ||
-                                 wcsncmp(text, L"Stream stopped early:", 21) == 0 ||
-                                 wcsncmp(text, L"Saved ", 6) == 0 ||
-                                 wcsncmp(text, L"The window closed.", 18) == 0;
-            const bool default_hint = wcscmp(text, L"Ctrl+Alt+R starts and stops recording from anywhere.") == 0;
-            const bool recording_detail = (status_snapshot_.state == State::recording ||
-                                           status_snapshot_.state == State::paused) && !attention_ && !message;
-            if (id == kDetail && !attention_ && !message && (default_hint || recording_detail)) {
-                stats = wide(settings_.resolution) + L" \u00B7 " + std::to_wstring(settings_.fps) +
-                        L" fps \u00B7 " + std::to_wstring(status_snapshot_.dropped) + L" dropped";
-                visible = stats.c_str();
-            }
-            DrawTextW(dc, visible, -1, &bounds,
+            DrawTextW(dc, text, -1, &bounds,
                       (id == kDetail ? DT_LEFT : DT_RIGHT) | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
             return;
         }
@@ -1058,7 +1044,8 @@ private:
             DeleteObject(badge);
             SetBkMode(dc, OPAQUE);
             SetBkColor(dc, live ? palette_.accent : palette_.control);
-            SetTextColor(dc, live ? RGB(255, 255, 255) : palette_.dim_text);
+            SetTextColor(dc, live ? (palette_.high_contrast ? GetSysColor(COLOR_HIGHLIGHTTEXT) : RGB(255, 255, 255))
+                                  : palette_.dim_text);
             SelectObject(dc, title_);
             DrawTextW(dc, caption, -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
             return;
@@ -1110,8 +1097,7 @@ private:
         HBRUSH line = CreateSolidBrush(palette_.line);
         FillRect(dc, &separator, line);
         DeleteObject(line);
-        RECT mixer{px(20), px(68), px(440), px(288)};
-        FillRect(dc, &mixer, bar_brush_);
+        FillRect(dc, &mixer_rect_, bar_brush_);
     }
     void paint_action_button(const DRAWITEMSTRUCT& item) const {
         const int id = static_cast<int>(item.CtlID);
@@ -1123,11 +1109,18 @@ private:
         SetBkMode(item.hDC, OPAQUE);
         SetBkColor(item.hDC, palette_.bar);
         SelectObject(item.hDC, title_);
-        SetTextColor(item.hDC, enabled ? palette_.dim_text : palette_.disabled_text);
+        SetTextColor(item.hDC, enabled
+            ? (palette_.high_contrast ? GetSysColor(COLOR_BTNTEXT) : palette_.dim_text)
+            : palette_.disabled_text);
+        HBRUSH button_brush = CreateSolidBrush((item.itemState & ODS_SELECTED) ? palette_.raised : palette_.bar);
+        FillRect(item.hDC, &bounds, button_brush);
+        DeleteObject(button_brush);
         if (id == kRecord) {
             const int diameter = px(24);
-            RECT disc{bounds.left + px(4), bounds.top + (bounds.bottom - bounds.top - diameter) / 2,
-                      bounds.left + px(4) + diameter, bounds.top + (bounds.bottom - bounds.top + diameter) / 2};
+            RECT disc{bounds.left + (bounds.right - bounds.left - diameter) / 2,
+                      bounds.top + (bounds.bottom - bounds.top - diameter) / 2,
+                      bounds.left + (bounds.right - bounds.left + diameter) / 2,
+                      bounds.top + (bounds.bottom - bounds.top + diameter) / 2};
             HBRUSH disc_brush = CreateSolidBrush(recording ? palette_.accent : palette_.control);
             HBRUSH dot_brush = CreateSolidBrush(recording ? palette_.text : palette_.accent);
             HGDIOBJ old_pen = SelectObject(item.hDC, GetStockObject(NULL_PEN));
@@ -1142,17 +1135,14 @@ private:
             SelectObject(item.hDC, old_pen);
             DeleteObject(disc_brush);
             DeleteObject(dot_brush);
-            RECT caption = bounds;
-            caption.left = disc.right + px(6);
-            DrawTextW(item.hDC, recording ? L"Stop" : L"Record", -1, &caption,
-                      DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
-            return;
+        } else {
+            wchar_t text[64]{};
+            GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
+            const wchar_t* caption = id == kPause && wcscmp(text, L"&Resume") == 0 ? L"Resume" :
+                                     id == kPause ? L"Pause" : L"Save Replay";
+            DrawTextW(item.hDC, caption, -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
-        wchar_t text[64]{};
-        GetWindowTextW(item.hwndItem, text, static_cast<int>(std::size(text)));
-        const wchar_t* caption = id == kPause && wcscmp(text, L"&Resume") == 0 ? L"Resume" :
-                                 id == kPause ? L"Pause" : L"Save Replay";
-        DrawTextW(item.hDC, caption, -1, &bounds, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        if (item.itemState & ODS_FOCUS) DrawFocusRect(item.hDC, &bounds);
     }
 
     LRESULT handle(UINT message, WPARAM w, LPARAM l) {
@@ -1481,6 +1471,7 @@ private:
         LOGFONTW clock = base;
         clock.lfHeight = -MulDiv(15, static_cast<int>(dpi_), 72);
         clock.lfWeight = FW_MEDIUM;
+        // Gray antialiasing avoids ClearType color fringes tripping the bar's blue-pixel probe.
         clock.lfQuality = ANTIALIASED_QUALITY;
         wcscpy_s(clock.lfFaceName, L"Consolas");
         clock_font_ = CreateFontIndirectW(&clock);
@@ -1566,6 +1557,12 @@ private:
         button(kRecord, L"&Start Recording", BS_OWNERDRAW);
         button(kPause, L"&Pause", BS_OWNERDRAW);
         button(kSaveReplay, L"Save Rep&lay", BS_OWNERDRAW);
+        TOOLINFOW record_tool{sizeof record_tool};
+        record_tool.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        record_tool.hwnd = window_;
+        record_tool.uId = reinterpret_cast<UINT_PTR>(get(kRecord));
+        record_tool.lpszText = const_cast<wchar_t*>(L"Start/Stop Recording (Ctrl+Alt+R)");
+        SendMessageW(detail_tooltip_window_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&record_tool));
         // Screen/Camera color controls remain in the settings columns; their tab stops follow
         // the audio strips and recording actions until the visual-strip step.
         label(kScreenColorLabel, wide(strip_name(rec::app::SourceRef::Kind::screen)).c_str());
@@ -1778,9 +1775,17 @@ private:
     // A full-width status area over two columns of settings: what and how to record on the
     // left, where it goes on the right. The mixer adds about 44 px at 96 DPI.
     void layout() {
-        const int margin = px(20), column = px(420), scenes_column = px(290), label_width = px(130), row = px(26),
+        const int margin = px(20), label_width = px(130), row = px(26),
                   gap = px(8);
+        MONITORINFO monitor{sizeof monitor};
+        const int work_width = GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor)
+            ? monitor.rcWork.right - monitor.rcWork.left : px(1280);
+        const int content_limit = std::max(px(680), work_width - px(40));
+        const int full_limit = content_limit - 2 * margin;
+        const int scenes_column = std::min(px(290), std::max(px(220), full_limit / 4));
+        const int column = std::max(px(280), (full_limit - scenes_column - px(60)) / 2);
         const int full = 2 * column + scenes_column + px(60);
+        mixer_rect_ = RECT{px(20), px(68), px(20) + column, px(288)};
         int x = margin, y = margin + px(40) + gap, width = full;
         const auto place = [&](int id, int left, int top, int w, int h) { MoveWindow(get(id), left, top, w, h, FALSE); };
         const auto line = [&](int id, int h) { place(id, x, y, width, h); y += h + gap; };
@@ -1883,9 +1888,9 @@ private:
         };
 
         // Status, clock, stats and actions share the full-width bar above the existing layout.
-        place(kRecord, margin + px(8), px(0), px(82), px(40));
-        place(kPause, margin + px(92), px(0), px(62), px(40));
-        place(kSaveReplay, margin + px(154), px(0), px(102), px(40));
+        place(kRecord, margin + px(8), px(0), px(40), px(40));
+        place(kPause, margin + px(50), px(0), px(62), px(40));
+        place(kSaveReplay, margin + px(112), px(0), px(102), px(40));
         const int bar_clock_left = margin + px(272);
         place(kClock, bar_clock_left, px(6), px(116), px(28));
         const int bar_status_left = bar_clock_left + px(124);
@@ -2056,8 +2061,17 @@ private:
     void fit() {
         RECT frame{0, 0, content_width_, content_height_};        AdjustWindowRectExForDpi(&frame, static_cast<DWORD>(GetWindowLongW(window_, GWL_STYLE)), FALSE,
                                  static_cast<DWORD>(GetWindowLongW(window_, GWL_EXSTYLE)), dpi_);
-        SetWindowPos(window_, nullptr, 0, 0, frame.right - frame.left, frame.bottom - frame.top,
-                     SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+        MONITORINFO monitor{sizeof monitor};
+        int x = 0, y = 0;
+        if (GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor)) {
+            const int width = frame.right - frame.left, height = frame.bottom - frame.top;
+            x = std::clamp(monitor.rcWork.left, monitor.rcWork.left,
+                           std::max(monitor.rcWork.left, monitor.rcWork.right - width));
+            y = std::clamp(monitor.rcWork.top, monitor.rcWork.top,
+                           std::max(monitor.rcWork.top, monitor.rcWork.bottom - height));
+        }
+        SetWindowPos(window_, nullptr, x, y, frame.right - frame.left, frame.bottom - frame.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
     }
 
     void select(int id, int index) { SendMessageW(get(id), CB_SETCURSEL, static_cast<WPARAM>(index), 0); }
@@ -3157,16 +3171,19 @@ private:
                          wide(s.saved.substr(s.saved.find_last_of("/\\") + 1)) +
                          (s.saved_vertical.empty() ? L"" : L" and its vertical video");
             }
-            else detail = hotkey_ ? L"Ctrl+Alt+R starts and stops recording from anywhere." : L"Ctrl+Alt+R is used by another app.";
+            else detail = hotkey_ ? L"" : L"Ctrl+Alt+R is used by another app.";
             break;
         case State::starting: status = L"Starting..."; break;
         case State::recording: status = L"\u25CF Recording"; break;
         case State::paused: status = L"Paused"; break;
         case State::finishing: status = L"Saving..."; break;
         }
+        const std::wstring stats = wide(settings_.resolution) + L" \u00B7 " + std::to_wstring(settings_.fps) + L" fps";
+        if (s.state == State::idle && detail.empty()) detail = stats;
         if (active) {
-            detail = clock(s.seconds) + L" recorded, " + std::to_wstring(s.frames) + L" frames, " +
-                     std::to_wstring(s.dropped) + L" dropped, audio drops " + std::to_wstring(s.audio_dropped);
+            detail = stats + L" \u00B7 " + std::to_wstring(s.frames) + L" frames \u00B7 " +
+                     std::to_wstring(s.dropped) + L" dropped";
+            if (s.audio_dropped) detail += L" \u00B7 " + std::to_wstring(s.audio_dropped) + L" audio drops";
             if (s.dropped || s.audio_dropped) attention_ = true;
             if (s.streaming && !s.stream_error.empty()) { detail += L". Stream lost: " + wide(s.stream_error); attention_ = true; }
             else if (s.stream_dropped) { detail += L", stream skipped " + std::to_wstring(s.stream_dropped); attention_ = true; }
@@ -3243,11 +3260,14 @@ private:
         meter(kSystemMeter, s.system_peak, system_meter_);
         meter(kMicMeter, s.mic_peak, mic_meter_);
         if (changed) InvalidateRect(get(kStatus), nullptr, TRUE);
-        InvalidateRect(get(kClock), nullptr, TRUE);
+        InvalidateRect(get(kClock), nullptr, FALSE);
         InvalidateRect(get(kDetail), nullptr, TRUE);
-        InvalidateRect(get(kLive), nullptr, TRUE);
+        InvalidateRect(get(kLive), nullptr, FALSE);
 
         set_text(kRecord, active ? L"&Stop Recording" : L"&Start Recording");
+        InvalidateRect(get(kRecord), nullptr, FALSE);
+        InvalidateRect(get(kPause), nullptr, FALSE);
+        InvalidateRect(get(kSaveReplay), nullptr, FALSE);
         set_text(kPause, s.state == State::paused ? L"&Resume" : L"&Pause");
         EnableWindow(get(kRecord), s.state == State::idle || active);
         EnableWindow(get(kPause), active);
@@ -3524,6 +3544,7 @@ private:
     std::array<ReadoutDrag, 500> readout_drags_{};
     std::array<SliderClick, 500> readout_last_click_{};
     int content_width_ = 0, content_height_ = 0;
+    RECT mixer_rect_{};
     std::wstring home_;
     bool test_pattern_ = false;
     bool hotkey_ = false, replay_hotkey_ = false;

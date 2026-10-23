@@ -573,7 +573,7 @@ function Assert-StatusRow($ui, [int]$dpi) {
         throw "idle status detail is narrower than $minimumWidth pixels at $dpi DPI: status=$($status.Right - $status.Left), detail=$($detailRect.Right - $detailRect.Left), live=$($live.Right - $live.Left)"
     }
 }
-function Assert-ControlBar($ui, $bitmap, [string]$state) {
+function Assert-ControlBar($ui, $bitmap, [string]$state, [string]$clockText) {
     $barBottom = [Math]::Min($bitmap.Height, [int](40 * [AppWindow]::GetDpiForWindow($ui.Window) / 96))
     $highContrast = High-Contrast
     if (-not $highContrast) {
@@ -594,15 +594,15 @@ function Assert-ControlBar($ui, $bitmap, [string]$state) {
         }
     }
     if ($blue) { throw "control bar contains $blue system-blue pixels" }
-    $clockText = Text-Of $ui 250
     if ($clockText -notmatch '^\d\d:\d\d:\d\d$') { throw "clock is missing or malformed: '$clockText'" }
+    if ($state -ne 'idle' -and $clockText -lt '00:00:02') { throw "$state clock did not advance: '$clockText'" }
     if ($highContrast) {
         Write-Host "R2 bar ${state}: clock '$clockText'; system palette retained in high-contrast mode"
         return
     }
     $scale = [AppWindow]::GetDpiForWindow($ui.Window) / 96.0
     $record = Control-Rect $ui 113
-    $cx = $record.Left + [int](16 * $scale)
+    $cx = $record.Left + [int](20 * $scale)
     $cy = [int](20 * $scale)
     $discColor = if ($state -eq 'idle') { @(58, 58, 64) } else { @(225, 40, 40) }
     $dotColor = if ($state -eq 'idle') { @(225, 40, 40) } else { @(230, 230, 234) }
@@ -674,9 +674,8 @@ function Assert-StatusDpi($ui) {
 function Save-RedesignBarShot($ui, [string]$name, [string]$state) {
     $path = Join-Path $Artifacts "app-$name.png"
     $bitmap = Snapshot-Window $ui $path
-    try { Assert-ControlBar $ui $bitmap $state }
-    finally { $bitmap.Dispose() }
     Write-Host "R2 full-window $state screenshot: $path"
+    return $bitmap
 }
 function Assert-AudioStripGeometry($ui) {
     foreach ($entry in @(@{Name='System audio'; Fader=105; Meter=104; Mute=107},
@@ -994,7 +993,9 @@ try {
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
     Expect-Dark $ui
-    Save-RedesignBarShot $ui 'idle' 'idle'
+    $idleBarShot = Save-RedesignBarShot $ui 'idle' 'idle'
+    Assert-ControlBar $ui $idleBarShot 'idle' (Text-Of $ui 250)
+    $idleBarShot.Dispose()
     Assert-StatusDpi $ui
     Assert-StatusRow $ui ([int][AppWindow]::GetDpiForWindow($ui.Window))
     Assert-FaderDirection $ui
@@ -1138,14 +1139,16 @@ try {
     $recordingStatusColors = if (-not (High-Contrast)) { Status-ColorStats $recordShot $ui }
     $recordShot.Dispose()
     Wait-Recorded $ui 2
-    Save-RedesignBarShot $ui 'recording' 'recording'
+    $recordBarShot = Save-RedesignBarShot $ui 'recording' 'recording'
+    $recordBarClock = Text-Of $ui 250
     Assert-StatusTooltip $ui
     Press $ui 'Pause'
     Wait-Status $ui 'Paused' | Out-Null
-    $pauseShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-paused.png')
-    Save-RedesignBarShot $ui 'paused' 'paused'
+    $pauseBarShot = Save-RedesignBarShot $ui 'paused' 'paused'
+    $pauseBarClock = Text-Of $ui 250
+    $pauseBarShot.Save((Join-Path $Artifacts 'app-status-paused.png'), [System.Drawing.Imaging.ImageFormat]::Png)
     if (-not (High-Contrast)) {
-        $pausedStatusColors = Status-ColorStats $pauseShot $ui
+        $pausedStatusColors = Status-ColorStats $pauseBarShot $ui
         if ($pausedStatusColors.contrast -lt 4.5) { throw "paused status text contrast is below 4.5:1: $($pausedStatusColors.contrast)" }
         if ([Math]::Abs($pausedStatusColors.text[0] - $pausedStatusColors.text[1]) -gt 12 -or
             [Math]::Abs($pausedStatusColors.text[0] - $pausedStatusColors.text[2]) -gt 12) {
@@ -1154,13 +1157,16 @@ try {
         if ($pausedStatusColors.dot[0] -ge $recordingStatusColors.dot[0]) { throw 'paused status dot is not dimmer than the recording dot' }
         Write-Host "D1. paused status: text $($pausedStatusColors.text -join ',') contrast $([Math]::Round($pausedStatusColors.contrast,2)), dot $($pausedStatusColors.dot -join ','), recording dot $($recordingStatusColors.dot -join ',')"
     } else { Write-Host 'D1. paused status color assertions skipped in high contrast' }
-    $pauseShot.Dispose()
     Start-Sleep -Milliseconds 1500
     Press $ui 'Resume'
     Wait-Status $ui "$([char]0x25CF) Recording" | Out-Null
     Start-Sleep -Seconds 2
     Press $ui 'Stop Recording'
     Wait-Status $ui 'Ready to record' | Out-Null
+    Assert-ControlBar $ui $recordBarShot 'recording' $recordBarClock
+    Assert-ControlBar $ui $pauseBarShot 'paused' $pauseBarClock
+    $recordBarShot.Dispose()
+    $pauseBarShot.Dispose()
     $detail = Text-Of $ui 101
     Expect-Text $detail 'Saved rec-'
     $movie = Newest-Movie
