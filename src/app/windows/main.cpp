@@ -1780,10 +1780,10 @@ private:
         MONITORINFO monitor{sizeof monitor};
         const int work_width = GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor)
             ? monitor.rcWork.right - monitor.rcWork.left : px(1280);
-        const int content_limit = std::max(px(680), work_width - px(40));
+        const int content_limit = std::max(px(480), work_width - px(40));
         const int full_limit = content_limit - 2 * margin;
-        const int scenes_column = std::min(px(290), std::max(px(220), full_limit / 4));
-        const int column = std::max(px(280), (full_limit - scenes_column - px(60)) / 2);
+        const int scenes_column = std::min(px(290), full_limit / 4);
+        const int column = (full_limit - scenes_column - px(60)) / 2;
         const int full = 2 * column + scenes_column + px(60);
         mixer_rect_ = RECT{px(20), px(68), px(20) + column, px(288)};
         int x = margin, y = margin + px(40) + gap, width = full;
