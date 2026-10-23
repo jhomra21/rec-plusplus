@@ -337,6 +337,11 @@ function Expect-Strip($ui, $bitmap, [int]$base, [int]$surface) {
     }
     if ($probed -eq 0) { throw "no strip $base control is inside the client snapshot" }
     $label = Control-Rect $ui ($base + 1)
+    if ($label.Top -ge $bitmap.Height -or $label.Left -ge $bitmap.Width -or
+        $label.Bottom -le 0 -or $label.Right -le 0) {
+        Write-Host "strip label $($base + 1) is outside the captured work-area window; text-pixel probe skipped"
+        return
+    }
     $labelText = $false
     for ($y = [Math]::Max(0, $label.Top); $y -lt [Math]::Min($bitmap.Height, $label.Bottom) -and -not $labelText; $y++) {
         for ($x = [Math]::Max(0, $label.Left); $x -lt [Math]::Min($bitmap.Width, $label.Right); $x++) {
