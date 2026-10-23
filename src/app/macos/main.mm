@@ -65,18 +65,25 @@ constexpr CGFloat kRecordViewportHeight = 900;
 constexpr CGFloat kNotchMenuBarHeight = 37;
 
 struct Palette {
+    static NSColor* surface0() { return [NSColor colorWithSRGBRed:20.0 / 255 green:20.0 / 255 blue:22.0 / 255 alpha:1]; }
+    static NSColor* surface1() { return [NSColor colorWithSRGBRed:28.0 / 255 green:28.0 / 255 blue:32.0 / 255 alpha:1]; }
+    static NSColor* surface2() { return [NSColor colorWithSRGBRed:35.0 / 255 green:35.0 / 255 blue:39.0 / 255 alpha:1]; }
+    static NSColor* surface3() { return [NSColor colorWithSRGBRed:42.0 / 255 green:42.0 / 255 blue:47.0 / 255 alpha:1]; }
+    static NSColor* control() { return [NSColor colorWithSRGBRed:58.0 / 255 green:58.0 / 255 blue:64.0 / 255 alpha:1]; }
+    static NSColor* well() { return [NSColor colorWithSRGBRed:18.0 / 255 green:18.0 / 255 blue:20.0 / 255 alpha:1]; }
+    static NSColor* lineStrong() { return [NSColor colorWithSRGBRed:14.0 / 255 green:14.0 / 255 blue:16.0 / 255 alpha:1]; }
+    static NSColor* lineSoft() { return [NSColor colorWithSRGBRed:25.0 / 255 green:25.0 / 255 blue:28.0 / 255 alpha:1]; }
+    static NSColor* text() { return [NSColor colorWithSRGBRed:230.0 / 255 green:230.0 / 255 blue:234.0 / 255 alpha:1]; }
+    static NSColor* secondaryText() { return [NSColor colorWithSRGBRed:154.0 / 255 green:154.0 / 255 blue:162.0 / 255 alpha:1]; }
+    static NSColor* disabledText() { return [NSColor colorWithSRGBRed:111.0 / 255 green:111.0 / 255 blue:117.0 / 255 alpha:1]; }
     static NSColor* accent() { return [NSColor colorWithSRGBRed:225.0 / 255 green:40.0 / 255 blue:40.0 / 255 alpha:1]; }
-    static NSColor* pausedDot() {
-        constexpr CGFloat opacity = 0.55;
-        NSColor* surface = [[NSColor windowBackgroundColor] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-        NSColor* red = accent();
-        return [NSColor colorWithSRGBRed:surface.redComponent + (red.redComponent - surface.redComponent) * opacity
-                                   green:surface.greenComponent + (red.greenComponent - surface.greenComponent) * opacity
-                                    blue:surface.blueComponent + (red.blueComponent - surface.blueComponent) * opacity
-                                   alpha:1];
-    }
-    static NSColor* text() { return NSColor.labelColor; }
-    static NSColor* secondaryText() { return NSColor.secondaryLabelColor; }
+    static NSColor* accentDim() { return [NSColor colorWithSRGBRed:126.0 / 255 green:34.0 / 255 blue:36.0 / 255 alpha:1]; }
+    static NSColor* mute() { return [NSColor colorWithSRGBRed:230.0 / 255 green:170.0 / 255 blue:55.0 / 255 alpha:1]; }
+    static NSColor* meterGreen() { return [NSColor colorWithSRGBRed:70.0 / 255 green:190.0 / 255 blue:105.0 / 255 alpha:1]; }
+    static NSColor* meterAmber() { return mute(); }
+    static NSColor* meterRed() { return accent(); }
+    static NSColor* thumb() { return [NSColor colorWithSRGBRed:205.0 / 255 green:205.0 / 255 blue:210.0 / 255 alpha:1]; }
+    static NSColor* pausedDot() { return accentDim(); }
 };
 
 NSString* ns(const std::string& text) { return [NSString stringWithUTF8String:text.c_str()] ?: @""; }
@@ -194,12 +201,14 @@ void delete_key(const std::string& server) {
 NSTextField* label(NSString* text) {
     NSTextField* field = [NSTextField labelWithString:text];
     field.lineBreakMode = NSLineBreakByTruncatingTail;
+    field.textColor = Palette::text();
     return field;
 }
 
 NSTextField* header(NSString* text) {
     NSTextField* field = label(text);
     field.font = [NSFont boldSystemFontOfSize:NSFont.systemFontSize];
+    field.textColor = Palette::secondaryText();
     return field;
 }
 
@@ -341,22 +350,22 @@ enum class Pointer { down, dragged, up, moved, exited };
 - (BOOL)isFlipped { return YES; }
 - (void)drawRect:(NSRect)dirtyRect {
     (void)dirtyRect;
-    [[NSColor colorWithWhite:0.16 alpha:1] setFill];
+    [Palette::well() setFill];
     NSRectFill(self.bounds);
     const CGFloat height = NSHeight(self.bounds) * std::clamp(self.level, 0.0, 1.0);
     if (height <= 0) return;
     const CGFloat greenHeight = NSHeight(self.bounds) * kMeterGreenBoundary;
     NSRect green = NSMakeRect(0, NSHeight(self.bounds) - std::min(height, greenHeight),
                               NSWidth(self.bounds), std::min(height, greenHeight));
-    [[NSColor colorWithSRGBRed:0.20 green:0.72 blue:0.38 alpha:1] setFill];
+    [Palette::meterGreen() setFill];
     NSRectFill(green);
     if (height > greenHeight) {
         const CGFloat amberHeight = std::min(height - greenHeight, NSHeight(self.bounds) - greenHeight);
-        [[NSColor colorWithSRGBRed:0.92 green:0.62 blue:0.18 alpha:1] setFill];
+        [Palette::meterAmber() setFill];
         NSRectFill(NSMakeRect(0, NSHeight(self.bounds) - greenHeight - amberHeight, NSWidth(self.bounds), amberHeight));
     }
     if (self.clipped) {
-        [[NSColor colorWithSRGBRed:0.88 green:0.20 blue:0.20 alpha:1] setFill];
+        [Palette::meterRed() setFill];
         NSRectFill(NSMakeRect(0, 0, NSWidth(self.bounds), NSHeight(self.bounds) * 0.035));
     }
 }
@@ -1171,17 +1180,7 @@ struct PreviewHit {
     panel.title = @"";
     panel.transparent = NO;
     panel.borderWidth = 0;
-    panel.fillColor = [NSColor colorWithName:@"RecStripSurface" dynamicProvider:^NSColor*(NSAppearance* appearance) {
-        __block CGFloat background = 0;
-        [appearance performAsCurrentDrawingAppearance:^{
-            NSColor* color = [NSColor.windowBackgroundColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-            if (color)
-                background = 0.2126 * color.redComponent + 0.7152 * color.greenComponent + 0.0722 * color.blueComponent;
-        }];
-        const CGFloat surface = background > 0.5 ? std::max<CGFloat>(0, background - 0.05)
-                                                 : std::min<CGFloat>(1, background + 0.05);
-        return [NSColor colorWithWhite:surface alpha:1];
-    }];
+    panel.fillColor = Palette::surface2();
     panel.contentView = content;
     panel.contentViewMargins = NSMakeSize(kStripInset, kStripInset);
     [panel.widthAnchor constraintEqualToConstant:width].active = YES;
@@ -1203,7 +1202,7 @@ struct PreviewHit {
         ResettableSlider* slider = [ResettableSlider sliderWithValue:0 minValue:-100 maxValue:100
             target:self action:@selector(colorChanged:)];
         slider.continuous = YES;
-        slider.trackFillColor = [NSColor colorWithWhite:kStripTrackFill alpha:1];
+        slider.trackFillColor = Palette::control();
         slider.numberOfTickMarks = 3;
         slider.allowsTickMarkValuesOnly = NO;
         slider.accessibilityLabel = names[i];
@@ -1270,7 +1269,7 @@ struct PreviewHit {
                                                           target:self action:@selector(volumeChanged:)];
     slider.continuous = YES;
     slider.vertical = YES;
-    slider.trackFillColor = [NSColor colorWithWhite:kStripTrackFill alpha:1];
+    slider.trackFillColor = Palette::control();
     slider.accessibilityLabel = name;
     slider.resetTarget = self;
     slider.resetAction = @selector(resetSlider:);
@@ -1287,6 +1286,9 @@ struct PreviewHit {
                                             backing:NSBackingStoreBuffered
                                               defer:NO];
     _window.title = @"Rec";
+    _window.backgroundColor = Palette::surface0();
+    _window.contentView.wantsLayer = YES;
+    _window.contentView.layer.backgroundColor = Palette::surface0().CGColor;
     // Closing the window keeps Rec, and any recording, running in the menu bar.
     _window.releasedWhenClosed = NO;
 
@@ -1431,7 +1433,7 @@ struct PreviewHit {
     _preview = [[PreviewView alloc] init];
     _preview.delegate = self;
     _preview.wantsLayer = YES;
-    _preview.layer.backgroundColor = [NSColor colorWithWhite:0.11 alpha:1].CGColor;
+    _preview.layer.backgroundColor = Palette::well().CGColor;
     _preview.layer.contentsGravity = kCAGravityResizeAspect;
     _outline = [CALayer layer];
     _outline.borderColor = NSColor.whiteColor.CGColor;
@@ -1452,7 +1454,7 @@ struct PreviewHit {
     ]];
     _preview2 = [[NSView alloc] init];
     _preview2.wantsLayer = YES;
-    _preview2.layer.backgroundColor = [NSColor colorWithWhite:0.11 alpha:1].CGColor;
+    _preview2.layer.backgroundColor = Palette::well().CGColor;
     _preview2.layer.contentsGravity = kCAGravityResizeAspect;
     _preview2.accessibilityElement = YES;
     _preview2.accessibilityRole = NSAccessibilityImageRole;
@@ -3120,7 +3122,7 @@ struct PreviewHit {
             [NSGraphicsContext setCurrentContext:context];
             const NSAppearanceName appearance = [self->_window.effectiveAppearance
                 bestMatchFromAppearancesWithNames:@[NSAppearanceNameDarkAqua, NSAppearanceNameAqua]];
-            [[NSColor colorWithWhite:[appearance isEqualToString:NSAppearanceNameDarkAqua] ? 0.10 : 0.94 alpha:1] setFill];
+            [(appearance == NSAppearanceNameDarkAqua ? Palette::surface0() : NSColor.whiteColor) setFill];
             NSRectFill(NSMakeRect(0, 0, rep.pixelsWide, rep.pixelsHigh));
             [rep drawInRect:NSMakeRect(0, 0, rep.pixelsWide, rep.pixelsHigh)
                    fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1
@@ -3471,7 +3473,7 @@ struct PreviewHit {
         self->_detail.textColor = Palette::text();
         NSColor* attention = [self->_detail.textColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
         NSColor* secondary = [Palette::secondaryText() colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-        NSColor* background = [NSColor.windowBackgroundColor colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+        NSColor* background = [Palette::surface0() colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
         const CGFloat backgroundLuma = 0.2126 * background.redComponent + 0.7152 * background.greenComponent + 0.0722 * background.blueComponent;
         const CGFloat attentionLuma = 0.2126 * attention.redComponent + 0.7152 * attention.greenComponent + 0.0722 * attention.blueComponent;
         const CGFloat secondaryLuma = 0.2126 * secondary.redComponent + 0.7152 * secondary.greenComponent + 0.0722 * secondary.blueComponent;
@@ -3795,7 +3797,7 @@ struct PreviewHit {
         const CGFloat back = luminance(background.redComponent, background.greenComponent, background.blueComponent);
         return (std::max(foreground, back) + 0.05) / (std::min(foreground, back) + 0.05);
     };
-    NSColor* statusSurface = [[NSColor windowBackgroundColor] colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
+    NSColor* statusSurface = [Palette::surface0() colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
     const auto redPixel = [](CGFloat r, CGFloat g, CGFloat b) {
         return r > 0.25 && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;
     };
