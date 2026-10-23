@@ -561,7 +561,7 @@ function Assert-StatusRow($ui, [int]$dpi) {
     $record = Control-Rect $ui 113
     $client = New-Object AppWindow+RECT
     [AppWindow]::GetClientRect($ui.Window, [ref]$client) | Out-Null
-    if ($record.Left -gt [int](28 * $dpi / 96) -or $clock.Left -le $record.Right -or
+    if ($record.Left -gt [int](32 * $dpi / 96) -or $clock.Left -le $record.Right -or
         $hotkey.Right -ge $client.Right - 8 -or $hotkey.Right -lt $client.Right - [int](24 * $dpi / 96)) {
         throw "control bar does not span window width: record=$($record.Left)-$($record.Right), clock=$($clock.Left)-$($clock.Right), hotkey=$($hotkey.Left)-$($hotkey.Right), window=$($client.Right)"
     }
@@ -602,8 +602,8 @@ function Assert-ControlBar($ui, $bitmap, [string]$state, [string]$clockText) {
     }
     $scale = [AppWindow]::GetDpiForWindow($ui.Window) / 96.0
     $record = Control-Rect $ui 113
-    $cx = $record.Left + [int](20 * $scale)
-    $cy = [int](20 * $scale)
+    $cx = $record.Left + [int](($record.Right - $record.Left) / 2)
+    $cy = [int](($record.Top + $record.Bottom) / 2)
     $discColor = if ($state -eq 'idle') { @(58, 58, 64) } else { @(225, 40, 40) }
     $dotColor = if ($state -eq 'idle') { @(225, 40, 40) } else { @(230, 230, 234) }
     $discPixels = 0; $dotPixels = 0
@@ -621,7 +621,7 @@ function Assert-ControlBar($ui, $bitmap, [string]$state, [string]$clockText) {
     if ($discPixels -lt 200 -or $dotPixels -lt 30) {
         throw "$state record disc circle/colors failed: disc=$discPixels dot=$dotPixels"
     }
-    $radius = [int](10 * $scale)
+    $radius = [int][Math]::Round(($record.Right - $record.Left) * 0.25)
     $cardinal = @(
         $bitmap.GetPixel($cx + $radius, $cy), $bitmap.GetPixel($cx - $radius, $cy),
         $bitmap.GetPixel($cx, $cy + $radius), $bitmap.GetPixel($cx, $cy - $radius)

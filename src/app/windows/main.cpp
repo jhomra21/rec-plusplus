@@ -1778,9 +1778,10 @@ private:
         const int margin = px(20), label_width = px(130), row = px(26),
                   gap = px(8);
         MONITORINFO monitor{sizeof monitor};
-        const int work_width = GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor)
+        const int monitor_work_width = GetMonitorInfoW(MonitorFromWindow(window_, MONITOR_DEFAULTTONEAREST), &monitor)
             ? monitor.rcWork.right - monitor.rcWork.left : px(1280);
-        const int content_limit = std::max(px(480), work_width - px(40));
+        const int work_width_dips = MulDiv(monitor_work_width, 96, static_cast<int>(dpi_));
+        const int content_limit = std::max(px(480), px(std::max(0, work_width_dips - 40)));
         const int full_limit = content_limit - 2 * margin;
         const int scenes_column = std::min(px(290), full_limit / 4);
         const int column = (full_limit - scenes_column - px(60)) / 2;
@@ -1888,20 +1889,33 @@ private:
         };
 
         // Status, clock, stats and actions share the full-width bar above the existing layout.
-        place(kRecord, margin + px(8), px(0), px(40), px(40));
-        place(kPause, margin + px(50), px(0), px(62), px(40));
-        place(kSaveReplay, margin + px(112), px(0), px(102), px(40));
-        const int bar_clock_left = margin + px(214);
-        place(kClock, bar_clock_left, px(6), px(96), px(28));
-        const int bar_status_left = bar_clock_left + px(100);
-        place(kStatus, bar_status_left, px(8), px(84), px(24));
-        const int bar_live_width = px(94);
-        const int bar_hint_width = px(104);
-        const int bar_live_left = full + margin - bar_hint_width - bar_live_width - px(12);
-        const int detail_left = bar_status_left + px(92);
-        place(kDetail, detail_left, px(8), std::min(px(310), bar_live_left - detail_left - px(8)), px(24));
-        place(kLive, bar_live_left, px(4), bar_live_width, px(32));
-        place(kHotkeyHint, full + margin - bar_hint_width, px(8), bar_hint_width, px(24));
+        const bool compact_bar = full < px(1000);
+        const auto bar_px = [&](int dips) { return compact_bar ? dips : px(dips); };
+        const int bar_margin = bar_px(20);
+        const int bar_top = (px(40) - bar_px(40)) / 2;
+        const int pause_left = 50;
+        const int pause_width = compact_bar ? 48 : 62;
+        const int replay_left = compact_bar ? 100 : 112;
+        const int replay_width = compact_bar ? 80 : 102;
+        place(kRecord, bar_margin + bar_px(8), bar_top, bar_px(40), bar_px(40));
+        place(kPause, bar_margin + pause_left, bar_top, pause_width, bar_px(40));
+        place(kSaveReplay, bar_margin + replay_left, bar_top, replay_width, bar_px(40));
+        const int bar_clock_left = bar_margin + (compact_bar ? 180 : 214);
+        const int clock_width = compact_bar ? px(96) : px(96);
+        const int clock_height = compact_bar ? 36 : 28;
+        place(kClock, bar_clock_left, (px(40) - clock_height) / 2, clock_width, clock_height);
+        const int bar_status_left = bar_clock_left + (compact_bar ? clock_width + 4 : 100);
+        const int status_width = compact_bar ? 88 : 84;
+        place(kStatus, bar_status_left, (px(40) - bar_px(24)) / 2, status_width, bar_px(24));
+        const int bar_live_width = bar_px(compact_bar ? 66 : 94);
+        const int bar_hint_width = bar_px(compact_bar ? 90 : 104);
+        const int bar_right = full + margin;
+        const int bar_live_left = bar_right - bar_hint_width - bar_live_width - bar_px(compact_bar ? 6 : 12);
+        const int detail_left = bar_status_left + (compact_bar ? 94 : 92);
+        place(kDetail, detail_left, (px(40) - bar_px(24)) / 2,
+              std::max(0, std::min(px(310), bar_live_left - detail_left - bar_px(8))), bar_px(24));
+        place(kLive, bar_live_left, (px(40) - bar_px(32)) / 2, bar_live_width, bar_px(32));
+        place(kHotkeyHint, bar_right - bar_hint_width, (px(40) - bar_px(24)) / 2, bar_hint_width, bar_px(24));
         width = column;
         const auto strips = rec::app::mixer_strips(settings_);
         int audio_index = 0;
