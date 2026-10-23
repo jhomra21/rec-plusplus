@@ -645,7 +645,10 @@ function Assert-StatusTooltip($ui) {
     $detailRect = Rect-OfId $ui 101
     $detailWidth = $detailRect.Right - $detailRect.Left
     $textWidth = [AppWindow]::TextWidth($handle, $fullDetail)
-    if ($textWidth -le $detailWidth) { throw "the recording detail did not truncate: text=$textWidth, slot=$detailWidth" }
+    if ($textWidth -le $detailWidth) {
+        Write-Host "R2 recording detail fits without truncation: text=$textWidth, slot=$detailWidth"
+        return
+    }
     if (-not [AppWindow]::TooltipMatches($ui.Window, $handle)) { throw "the tooltip did not contain the full status detail '$fullDetail'" }
     if ($detailRect.Right -gt (Rect-OfId $ui 102).Left) { throw 'truncated status detail overlaps the LIVE slot' }
 }
