@@ -1904,7 +1904,7 @@ private:
         place(kSaveReplay, bar_margin + replay_left, bar_top, replay_width, bar_px(40));
         const int bar_clock_left = bar_margin + (compact_bar ? 222 : 214);
         const int clock_width = px(96);
-        const int clock_height = compact_bar ? 36 : 28;
+        const int clock_height = px(40);
         place(kClock, bar_clock_left, (px(40) - clock_height) / 2, clock_width, clock_height);
         const int bar_status_left = bar_clock_left + (compact_bar ? clock_width + 4 : 100);
         const int status_width = compact_bar ? 88 : 84;
