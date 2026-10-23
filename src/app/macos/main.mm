@@ -1270,7 +1270,7 @@ struct PreviewHit {
                                                           target:self action:@selector(volumeChanged:)];
     slider.continuous = YES;
     slider.vertical = YES;
-        slider.trackFillColor = [NSColor colorWithWhite:kStripTrackFill alpha:1];
+    slider.trackFillColor = [NSColor colorWithWhite:kStripTrackFill alpha:1];
     slider.accessibilityLabel = name;
     slider.resetTarget = self;
     slider.resetAction = @selector(resetSlider:);
@@ -4073,7 +4073,7 @@ struct PreviewHit {
     set_check(_camera, true);
     __block BOOL cameraVisible = NO;
     __block BOOL cameraHeaderOnRow = NO;
-    __block CGFloat cameraGap = 0;
+    __block CGFloat cameraGap = 0, screenGapOn = 0, audioGapOn = 0;
     ui(^{
         NSView* content = self->_window.contentView;
         [content layoutSubtreeIfNeeded];
@@ -4092,7 +4092,11 @@ struct PreviewHit {
         const NSRect mute = [self->_micMute.superview convertRect:
             [self->_micMute alignmentRectForFrame:self->_micMute.frame] toView:content];
         const NSRect statusColumn = [self->_statusColumn.superview convertRect:self->_statusColumn.frame toView:content];
+        const NSRect system = [((NSBox*)self->_systemMute.superview.superview).superview
+            convertRect:((NSBox*)self->_systemMute.superview.superview).frame toView:content];
         cameraGap = NSMinX(strip) - NSMaxX(screen);
+        screenGapOn = NSMinX(screen) - NSMaxX(mic);
+        audioGapOn = NSMinX(mic) - NSMaxX(system);
         const CGFloat resetTrailingEdge = NSMaxX(strip) - kStripInset;
         cameraHeaderOnRow = std::abs(NSMinY(strip) - NSMinY(mic)) <= 1 &&
                             std::abs(NSMaxY(strip) - NSMaxY(mic)) <= 1 &&
@@ -4101,6 +4105,8 @@ struct PreviewHit {
                             std::abs(NSMidY(reset) - NSMidY(mute)) <= 1 &&
                             NSMaxX(strip) <= NSMaxX(statusColumn) + 1 &&
                             std::abs(cameraGap - kStripGap) <= 1 &&
+                            std::abs(screenGapOn - kStripGap) <= 1 &&
+                            std::abs(audioGapOn - kStripGap) <= 1 &&
                             std::abs(NSMaxX(reset) - resetTrailingEdge) <= 1 &&
                             [self->_cameraColorReset.title isEqualToString:@"Reset"] &&
                             [self->_cameraColorReset.accessibilityLabel isEqualToString:@"Reset camera color"];
@@ -4156,7 +4162,7 @@ struct PreviewHit {
               NSMaxX([self->_statusColumn.superview convertRect:self->_statusColumn.frame toView:self->_window.contentView])]);
     });
     note([NSString stringWithFormat:@"strip-panels=ok top-bottom=shared gaps=%.1f/%.1f/%.1f reset-mute=baseline camera=visible",
-          kStripGap, kStripGap, cameraGap]);
+          audioGapOn, screenGapOn, cameraGap]);
     ui(^{ note([NSString stringWithFormat:@"mixer-content-height=%.1f",
                 NSHeight(self->_window.contentView.frame)]); });
     set_check(_image, true);
