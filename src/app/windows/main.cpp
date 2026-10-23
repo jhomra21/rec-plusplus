@@ -1116,7 +1116,8 @@ private:
         FillRect(item.hDC, &bounds, button_brush);
         DeleteObject(button_brush);
         if (id == kRecord) {
-            const int diameter = px(24);
+            const int diameter = std::min({px(24), static_cast<int>(bounds.right - bounds.left),
+                                           static_cast<int>(bounds.bottom - bounds.top)});
             RECT disc{bounds.left + (bounds.right - bounds.left - diameter) / 2,
                       bounds.top + (bounds.bottom - bounds.top - diameter) / 2,
                       bounds.left + (bounds.right - bounds.left + diameter) / 2,
@@ -1126,7 +1127,7 @@ private:
             HGDIOBJ old_pen = SelectObject(item.hDC, GetStockObject(NULL_PEN));
             HGDIOBJ old_brush = SelectObject(item.hDC, disc_brush);
             Ellipse(item.hDC, disc.left, disc.top, disc.right, disc.bottom);
-            const int dot = px(10);
+            const int dot = std::min(px(10), diameter / 2);
             const int center_x = disc.left + (diameter - dot) / 2;
             const int center_y = disc.top + (diameter - dot) / 2;
             SelectObject(item.hDC, dot_brush);
@@ -1893,22 +1894,21 @@ private:
         const auto bar_px = [&](int dips) { return compact_bar ? dips : px(dips); };
         const int bar_margin = bar_px(20);
         const int bar_top = (px(40) - bar_px(40)) / 2;
-        const int pause_left = 50;
-        const int pause_width = compact_bar ? 48 : 62;
-        const int replay_left = compact_bar ? 100 : 112;
-        const int replay_width = compact_bar ? 80 : 102;
+        const int pause_width = compact_bar ? 60 : 62;
+        const int replay_left = 132;
+        const int replay_width = compact_bar ? 90 : 102;
         place(kRecord, bar_margin + bar_px(8), bar_top, bar_px(40), bar_px(40));
-        place(kPause, bar_margin + pause_left, bar_top, pause_width, bar_px(40));
+        place(kPause, bar_margin + 50, bar_top, pause_width, bar_px(40));
         place(kSaveReplay, bar_margin + replay_left, bar_top, replay_width, bar_px(40));
-        const int bar_clock_left = bar_margin + (compact_bar ? 180 : 214);
-        const int clock_width = compact_bar ? px(96) : px(96);
+        const int bar_clock_left = bar_margin + (compact_bar ? 222 : 214);
+        const int clock_width = px(96);
         const int clock_height = compact_bar ? 36 : 28;
         place(kClock, bar_clock_left, (px(40) - clock_height) / 2, clock_width, clock_height);
         const int bar_status_left = bar_clock_left + (compact_bar ? clock_width + 4 : 100);
         const int status_width = compact_bar ? 88 : 84;
         place(kStatus, bar_status_left, (px(40) - bar_px(24)) / 2, status_width, bar_px(24));
-        const int bar_live_width = bar_px(compact_bar ? 66 : 94);
-        const int bar_hint_width = bar_px(compact_bar ? 90 : 104);
+        const int bar_live_width = bar_px(compact_bar ? 130 : 94);
+        const int bar_hint_width = bar_px(compact_bar ? 104 : 104);
         const int bar_right = full + margin;
         const int bar_live_left = bar_right - bar_hint_width - bar_live_width - bar_px(compact_bar ? 6 : 12);
         const int detail_left = bar_status_left + (compact_bar ? 94 : 92);

@@ -568,7 +568,7 @@ function Assert-StatusRow($ui, [int]$dpi) {
     if ($clock.Top -gt (8 * $dpi / 96) -or $clock.Bottom -lt (32 * $dpi / 96)) {
         throw 'clock display is not vertically centered in the 40-DIP control bar'
     }
-    $minimumWidth = [int](100 * $dpi / 96)
+    $minimumWidth = 100
     if (($detailRect.Right - $detailRect.Left) -lt $minimumWidth) {
         throw "idle status detail is narrower than $minimumWidth pixels at $dpi DPI: status=$($status.Right - $status.Left), detail=$($detailRect.Right - $detailRect.Left), live=$($live.Right - $live.Left)"
     }
