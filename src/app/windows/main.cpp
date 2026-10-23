@@ -1914,9 +1914,10 @@ private:
         const int bar_right = full + 2 * margin - px(16);
         const int bar_live_left = bar_right - bar_hint_width - bar_live_width - bar_px(compact_bar ? 6 : 12);
         const int detail_left = bar_status_left + (compact_bar ? 94 : 92);
+        const int live_height = compact_bar ? 28 : px(28);
         place(kDetail, detail_left, (px(40) - bar_px(24)) / 2,
               std::max(0, std::min(px(310), bar_live_left - detail_left - bar_px(8))), bar_px(24));
-        place(kLive, bar_live_left, (px(40) - bar_px(32)) / 2, bar_live_width, bar_px(32));
+        place(kLive, bar_live_left, (px(40) - live_height) / 2, bar_live_width, live_height);
         place(kHotkeyHint, bar_right - bar_hint_width, (px(40) - bar_px(24)) / 2, bar_hint_width, bar_px(24));
         width = column;
         const auto strips = rec::app::mixer_strips(settings_);
