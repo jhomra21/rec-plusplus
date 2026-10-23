@@ -55,14 +55,22 @@ constexpr UINT kTrayId = 1;
 constexpr int kPickRegion = 0x7001;
 
 struct Palette {
+    COLORREF surface = RGB(20, 20, 22);       // surface-0: window background
+    COLORREF bar = RGB(28, 28, 32);           // surface-1: control bar and mixer
+    COLORREF panel = RGB(35, 35, 39);         // surface-2: strips and inspector
+    COLORREF raised = RGB(42, 42, 47);        // surface-3: headers, hover, flat buttons
+    COLORREF control = RGB(58, 58, 64);       // idle controls and slider track
+    COLORREF well = RGB(18, 18, 20);          // clock/readout wells and preview
+    COLORREF line = RGB(14, 14, 16);          // strong separator
+    COLORREF soft_line = RGB(25, 25, 28);
     COLORREF accent = RGB(225, 40, 40);
     COLORREF dim_accent = RGB(126, 34, 36);
-    COLORREF surface = RGB(28, 28, 32);
-    COLORREF panel = RGB(40, 40, 45);
-    COLORREF text = RGB(230, 230, 234);
-    COLORREF dim_text = RGB(150, 150, 158);
-    COLORREF channel = RGB(72, 72, 76);
-    COLORREF fill = RGB(112, 112, 118);
+    COLORREF text = RGB(230, 230, 234);       // text-1
+    COLORREF dim_text = RGB(154, 154, 162);   // text-2
+    COLORREF disabled_text = RGB(111, 111, 117); // text-3
+    COLORREF mute = RGB(230, 170, 55);
+    COLORREF channel = RGB(18, 18, 20);       // fader channel uses well
+    COLORREF fill = RGB(58, 58, 64);
     COLORREF thumb = RGB(205, 205, 210);
     COLORREF meter_green = RGB(70, 190, 105);
     COLORREF meter_amber = RGB(230, 170, 55);
@@ -77,9 +85,17 @@ struct Palette {
             p.accent = GetSysColor(COLOR_HIGHLIGHT);
             p.dim_accent = GetSysColor(COLOR_GRAYTEXT);
             p.surface = GetSysColor(COLOR_WINDOW);
+            p.bar = GetSysColor(COLOR_BTNFACE);
             p.panel = GetSysColor(COLOR_BTNFACE);
+            p.raised = GetSysColor(COLOR_BTNFACE);
+            p.control = GetSysColor(COLOR_BTNFACE);
+            p.well = GetSysColor(COLOR_WINDOW);
+            p.line = GetSysColor(COLOR_WINDOWTEXT);
+            p.soft_line = GetSysColor(COLOR_GRAYTEXT);
             p.text = GetSysColor(COLOR_WINDOWTEXT);
             p.dim_text = GetSysColor(COLOR_GRAYTEXT);
+            p.disabled_text = GetSysColor(COLOR_GRAYTEXT);
+            p.mute = GetSysColor(COLOR_HOTLIGHT);
             p.channel = GetSysColor(COLOR_BTNSHADOW);
             p.fill = GetSysColor(COLOR_HIGHLIGHT);
             p.thumb = GetSysColor(COLOR_BTNTEXT);
@@ -484,6 +500,7 @@ public:
 private:
     void rebuild_brushes() {
         if (surface_brush_) DeleteObject(surface_brush_);
+        if (preview_brush_) DeleteObject(preview_brush_);
         if (panel_brush_) DeleteObject(panel_brush_);
         if (channel_brush_) DeleteObject(channel_brush_);
         if (fill_brush_) DeleteObject(fill_brush_);
@@ -492,7 +509,7 @@ private:
         if (meter_amber_brush_) DeleteObject(meter_amber_brush_);
         if (meter_clip_brush_) DeleteObject(meter_clip_brush_);
         surface_brush_ = CreateSolidBrush(palette_.surface);
-        preview_brush_ = surface_brush_;
+        preview_brush_ = CreateSolidBrush(palette_.well);
         panel_brush_ = CreateSolidBrush(palette_.panel);
         channel_brush_ = CreateSolidBrush(palette_.channel);
         fill_brush_ = CreateSolidBrush(palette_.fill);
@@ -1166,6 +1183,7 @@ private:
             UnregisterHotKey(window_, kReplayHotkey);
             Shell_NotifyIconW(NIM_DELETE, &tray_);
             if (surface_brush_) DeleteObject(surface_brush_);
+            if (preview_brush_) DeleteObject(preview_brush_);
             if (panel_brush_) DeleteObject(panel_brush_);
             if (channel_brush_) DeleteObject(channel_brush_);
             if (fill_brush_) DeleteObject(fill_brush_);
