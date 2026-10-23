@@ -229,15 +229,16 @@ function Wait-Recorded($ui, [int]$seconds, [int]$timeout = 60) {
     $deadline = $start.AddSeconds($timeout)
     $report = $start.AddSeconds(5)
     while ((Get-Date) -lt $deadline) {
-        if ((Text-Of $ui 101) -match '(\d+):(\d\d) recorded' -and [int]$Matches[1] * 60 + [int]$Matches[2] -ge $seconds) { return }
+        if ((Text-Of $ui 250) -match '^(\d\d):(\d\d):(\d\d)$' -and
+            [int]$Matches[1] * 3600 + [int]$Matches[2] * 60 + [int]$Matches[3] -ge $seconds) { return }
         # A slow wait shows whether the engine still writes, drops, or stopped.
         if ((Get-Date) -gt $report) {
-            Write-Host "  waiting for $seconds s, $([int]((Get-Date) - $start).TotalSeconds) s in: $(Text-Of $ui 100); $(Text-Of $ui 101)"
+            Write-Host "  waiting for $seconds s, $([int]((Get-Date) - $start).TotalSeconds) s in: $(Text-Of $ui 100); clock $(Text-Of $ui 250)"
             $report = $report.AddSeconds(5)
         }
         Start-Sleep -Milliseconds 100
     }
-    throw "the recording did not reach $seconds s: '$(Text-Of $ui 100)' ($(Text-Of $ui 101))"
+    throw "the recording did not reach $seconds s: '$(Text-Of $ui 100)' (clock $(Text-Of $ui 250); $(Text-Of $ui 101))"
 }
 # The preview as the window shows it (the window's composed picture, cropped), saved as a PNG.
 function Snapshot-Preview($ui, [string]$path) {
@@ -352,13 +353,14 @@ function Expect-CustomTrackbar($ui, [int]$id, [string]$path) {
     try {
         $rect = Control-Rect $ui $id
         $red = 0; $channel = 0; $thumb = 0
+        $track = if ($id -in @(105, 110)) { @(18, 18, 20) } else { @(58, 58, 64) }
         for ($y = [Math]::Max(0, $rect.Top); $y -lt [Math]::Min($bitmap.Height, $rect.Bottom); $y++) {
             for ($x = [Math]::Max(0, $rect.Left); $x -lt [Math]::Min($bitmap.Width, $rect.Right); $x++) {
                 $pixel = $bitmap.GetPixel($x, $y)
                 if ($pixel.R -gt 150 -and $pixel.R -gt ($pixel.G * 1.7) -and $pixel.R -gt ($pixel.B * 1.7)) { $red++ }
-                if ($pixel.R -ge 55 -and $pixel.R -le 90 -and
-                    $pixel.G -ge 55 -and $pixel.G -le 90 -and
-                    $pixel.B -ge 60 -and $pixel.B -le 96) { $channel++ }
+                if ([Math]::Abs([int]$pixel.R - $track[0]) -le 2 -and
+                    [Math]::Abs([int]$pixel.G - $track[1]) -le 2 -and
+                    [Math]::Abs([int]$pixel.B - $track[2]) -le 2) { $channel++ }
                 if ($pixel.R -ge 195 -and $pixel.G -ge 195 -and $pixel.B -ge 195 -and
                     ($pixel.B - $pixel.R) -le 12) { $thumb++ }
             }
@@ -378,7 +380,7 @@ function Expect-Dark($ui) {
             return
         }
         $r = 0; $g = 0; $b = 0
-        for ($y = 0; $y -lt 10; $y++) {
+        for ($y = [Math]::Min(50, $bitmap.Height - 10); $y -lt [Math]::Min(60, $bitmap.Height); $y++) {
             for ($x = 0; $x -lt 10; $x++) {
                 $pixel = $bitmap.GetPixel($x, $y)
                 $r += $pixel.R; $g += $pixel.G; $b += $pixel.B
@@ -402,7 +404,7 @@ function Expect-Dark($ui) {
             }
         }
         if (-not $micText) { throw 'Microphone check-box text has no light pixels in its control rect' }
-        Write-Host "D1. dark surface: margin mean $r,$g,$b; strip probes passed; saved $path"
+        Write-Host "R1. dark surface below control bar: mean $r,$g,$b; strip probes passed; saved $path"
     } finally { $bitmap.Dispose() }
 }
 function Set-TestDpi($ui, [int]$dpi, $baseRect, [int]$baseDpi) {
@@ -540,9 +542,9 @@ function Rect-OfId($ui, [int]$id) {
     return $r
 }
 function Assert-StatusRow($ui, [int]$dpi) {
-    $status = Rect-OfId $ui 100
-    $detailRect = Rect-OfId $ui 101
-    $live = Rect-OfId $ui 102
+    $status = Control-Rect $ui 100
+    $detailRect = Control-Rect $ui 101
+    $live = Control-Rect $ui 102
     $centers = @(
         [int](($status.Top + $status.Bottom) / 2),
         [int](($detailRect.Top + $detailRect.Bottom) / 2),
@@ -554,11 +556,83 @@ function Assert-StatusRow($ui, [int]$dpi) {
     if ($status.Right -gt $detailRect.Left -or $detailRect.Right -gt $live.Left) {
         throw "status controls overlap or are out of order: status=$($status.Left)-$($status.Right), detail=$($detailRect.Left)-$($detailRect.Right), live=$($live.Left)-$($live.Right)"
     }
-    if ($detailRect.Right -gt $live.Left) { throw 'status detail overlaps the LIVE slot' }
+    $clock = Control-Rect $ui 250
+    $hotkey = Control-Rect $ui 251
+    $record = Control-Rect $ui 113
+    $client = New-Object AppWindow+RECT
+    [AppWindow]::GetClientRect($ui.Window, [ref]$client) | Out-Null
+    if ($record.Left -gt [int](28 * $dpi / 96) -or $clock.Left -le $record.Right -or
+        $hotkey.Right -ge $client.Right - 8 -or $hotkey.Right -lt $client.Right - [int](24 * $dpi / 96)) {
+        throw "control bar does not span window width: record=$($record.Left)-$($record.Right), clock=$($clock.Left)-$($clock.Right), hotkey=$($hotkey.Left)-$($hotkey.Right), window=$($client.Right)"
+    }
+    if ($clock.Top -gt (8 * $dpi / 96) -or $clock.Bottom -lt (32 * $dpi / 96)) {
+        throw 'clock display is not vertically centered in the 40-DIP control bar'
+    }
     $minimumWidth = [int](290 * $dpi / 96)
     if (($detailRect.Right - $detailRect.Left) -lt $minimumWidth) {
         throw "idle status detail is narrower than $minimumWidth pixels at $dpi DPI: status=$($status.Right - $status.Left), detail=$($detailRect.Right - $detailRect.Left), live=$($live.Right - $live.Left)"
     }
+}
+function Assert-ControlBar($ui, $bitmap, [string]$state) {
+    $barBottom = [Math]::Min($bitmap.Height, [int](40 * [AppWindow]::GetDpiForWindow($ui.Window) / 96))
+    $highContrast = High-Contrast
+    if (-not $highContrast) {
+        $lastPixel = [int]$bitmap.Width - 1
+        foreach ($x in @(0, $lastPixel)) {
+            $edge = $bitmap.GetPixel($x, [int](10 * [AppWindow]::GetDpiForWindow($ui.Window) / 96))
+            if ([Math]::Abs([int]$edge.R - 28) -gt 2 -or [Math]::Abs([int]$edge.G - 28) -gt 2 -or
+                [Math]::Abs([int]$edge.B - 32) -gt 2) { throw "control bar does not paint across the window edge x=$x" }
+        }
+    }
+    $blue = 0
+    if (-not $highContrast) {
+        for ($y = 0; $y -lt $barBottom; $y++) {
+            for ($x = 0; $x -lt $bitmap.Width; $x++) {
+                $pixel = $bitmap.GetPixel($x, $y)
+                if ($pixel.B -gt $pixel.R + 60 -and $pixel.B -gt $pixel.G + 40) { $blue++ }
+            }
+        }
+    }
+    if ($blue) { throw "control bar contains $blue system-blue pixels" }
+    $clockText = Text-Of $ui 250
+    if ($clockText -notmatch '^\d\d:\d\d:\d\d$') { throw "clock is missing or malformed: '$clockText'" }
+    if ($highContrast) {
+        Write-Host "R2 bar ${state}: clock '$clockText'; system palette retained in high-contrast mode"
+        return
+    }
+    $scale = [AppWindow]::GetDpiForWindow($ui.Window) / 96.0
+    $record = Control-Rect $ui 113
+    $cx = $record.Left + [int](16 * $scale)
+    $cy = [int](20 * $scale)
+    $discColor = if ($state -eq 'idle') { @(58, 58, 64) } else { @(225, 40, 40) }
+    $dotColor = if ($state -eq 'idle') { @(225, 40, 40) } else { @(230, 230, 234) }
+    $discPixels = 0; $dotPixels = 0
+    for ($y = [Math]::Max(0, $cy - [int](13 * $scale)); $y -lt [Math]::Min($bitmap.Height, $cy + [int](13 * $scale)); $y++) {
+        for ($x = [Math]::Max(0, $cx - [int](13 * $scale)); $x -lt [Math]::Min($bitmap.Width, $cx + [int](13 * $scale)); $x++) {
+            $pixel = $bitmap.GetPixel($x, $y)
+            if ([Math]::Abs([int]$pixel.R - $discColor[0]) -le 2 -and
+                [Math]::Abs([int]$pixel.G - $discColor[1]) -le 2 -and
+                [Math]::Abs([int]$pixel.B - $discColor[2]) -le 2) { $discPixels++ }
+            if ([Math]::Abs([int]$pixel.R - $dotColor[0]) -le 2 -and
+                [Math]::Abs([int]$pixel.G - $dotColor[1]) -le 2 -and
+                [Math]::Abs([int]$pixel.B - $dotColor[2]) -le 2) { $dotPixels++ }
+        }
+    }
+    if ($discPixels -lt 200 -or $dotPixels -lt 30) {
+        throw "$state record disc circle/colors failed: disc=$discPixels dot=$dotPixels"
+    }
+    $radius = [int](10 * $scale)
+    $cardinal = @(
+        $bitmap.GetPixel($cx + $radius, $cy), $bitmap.GetPixel($cx - $radius, $cy),
+        $bitmap.GetPixel($cx, $cy + $radius), $bitmap.GetPixel($cx, $cy - $radius)
+    )
+    $cardinalMatches = @($cardinal | Where-Object {
+        [Math]::Abs([int]$_.R - $discColor[0]) -le 2 -and
+        [Math]::Abs([int]$_.G - $discColor[1]) -le 2 -and
+        [Math]::Abs([int]$_.B - $discColor[2]) -le 2
+    }).Count
+    if ($cardinalMatches -lt 4) { throw "$state record disc is not circular at its four cardinal points ($cardinalMatches/4)" }
+    Write-Host "R2 bar ${state}: clock '$clockText'; circular disc colors $discPixels/$dotPixels pixels; system-blue pixels=$blue"
 }
 function Assert-StatusTooltip($ui) {
     $handle = [AppWindow]::GetDlgItem($ui.Window, 101)
@@ -596,6 +670,13 @@ function Assert-StatusDpi($ui) {
     } finally {
         Set-TestDpi $ui $originalDpi $baseRect $originalDpi
     }
+}
+function Save-RedesignBarShot($ui, [string]$name, [string]$state) {
+    $path = Join-Path $Artifacts "app-$name.png"
+    $bitmap = Snapshot-Window $ui $path
+    try { Assert-ControlBar $ui $bitmap $state }
+    finally { $bitmap.Dispose() }
+    Write-Host "R2 full-window $state screenshot: $path"
 }
 function Assert-AudioStripGeometry($ui) {
     foreach ($entry in @(@{Name='System audio'; Fader=105; Meter=104; Mute=107},
@@ -913,6 +994,7 @@ try {
     $ui = Start-App
     Wait-Status $ui 'Ready to record' | Out-Null
     Expect-Dark $ui
+    Save-RedesignBarShot $ui 'idle' 'idle'
     Assert-StatusDpi $ui
     Assert-StatusRow $ui ([int][AppWindow]::GetDpiForWindow($ui.Window))
     Assert-FaderDirection $ui
@@ -1056,10 +1138,12 @@ try {
     $recordingStatusColors = if (-not (High-Contrast)) { Status-ColorStats $recordShot $ui }
     $recordShot.Dispose()
     Wait-Recorded $ui 2
+    Save-RedesignBarShot $ui 'recording' 'recording'
     Assert-StatusTooltip $ui
     Press $ui 'Pause'
     Wait-Status $ui 'Paused' | Out-Null
     $pauseShot = Snapshot-Window $ui (Join-Path $Artifacts 'app-status-paused.png')
+    Save-RedesignBarShot $ui 'paused' 'paused'
     if (-not (High-Contrast)) {
         $pausedStatusColors = Status-ColorStats $pauseShot $ui
         if ($pausedStatusColors.contrast -lt 4.5) { throw "paused status text contrast is below 4.5:1: $($pausedStatusColors.contrast)" }
@@ -1795,6 +1879,7 @@ try {
     Write-Host "10. log off while recording: $($ended['frames']) frames"
     Write-Host 'app e2e passed'
 } catch {
+    Write-Host "app e2e failed: $($_.Exception.Message)"
     Save-Stacks $ui.Process
     throw
 } finally {
