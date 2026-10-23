@@ -26,6 +26,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <string>
 #include <unordered_map>
 #include <unistd.h>
@@ -49,6 +50,8 @@ using rec::app::Status;
 constexpr CGFloat kMinimumStripWidth = 84;
 constexpr CGFloat kStatusColumnWidth = 440;
 constexpr CGFloat kStripGap = 12;
+constexpr CGFloat kControlBarHeight = 40;
+constexpr CGFloat kControlBarStackGap = 20;
 constexpr CGFloat kStripInset = 4;
 constexpr CGFloat kTitleInsetAdjustment = 2;
 constexpr CGFloat kStripTitleHeight = 14;
@@ -95,9 +98,9 @@ std::string environment(const char* name) {
     return value ? value : "";
 }
 
-NSString* clock_text(double seconds) {
+NSString* clock_text(double seconds, bool forceHours = false) {
     const auto whole = static_cast<long long>(seconds);
-    if (whole >= 3600) return [NSString stringWithFormat:@"%lld:%02lld:%02lld", whole / 3600, whole / 60 % 60, whole % 60];
+    if (forceHours || whole >= 3600) return [NSString stringWithFormat:@"%02lld:%02lld:%02lld", whole / 3600, whole / 60 % 60, whole % 60];
     return [NSString stringWithFormat:@"%02lld:%02lld", whole / 60, whole % 60];
 }
 
@@ -647,7 +650,7 @@ struct PreviewHit {
     EventHotKeyRef _hotkeyRef, _replayHotkeyRef;
     NSWindow* _window;
     NSTextField *_status, *_detail, *_live, *_folder, *_clock, *_stats, *_hotkeyHint;
-    NSView *_statusDot, *_controlBar;
+    NSView *_statusDot, *_controlBar, *_liveBadge;
     NSTextField *_systemTitle, *_micTitle;
     RecMeterView *_systemMeter, *_micMeter;
     NSSlider *_systemVolume, *_micVolume;
@@ -1340,11 +1343,21 @@ struct PreviewHit {
     _live = label(@"");
     _live.font = [NSFont systemFontOfSize:11 weight:NSFontWeightSemibold];
     _live.textColor = Palette::secondaryText();
-    _live.wantsLayer = YES;
-    _live.layer.cornerRadius = 3;
-    _live.layer.backgroundColor = Palette::control().CGColor;
-    _live.textColor = Palette::secondaryText();
     _live.hidden = YES;
+    NSView* liveBadge = [[NSView alloc] init];
+    _liveBadge = liveBadge;
+    liveBadge.wantsLayer = YES;
+    liveBadge.layer.cornerRadius = 3;
+    liveBadge.layer.backgroundColor = Palette::control().CGColor;
+    _live.translatesAutoresizingMaskIntoConstraints = NO;
+    [liveBadge addSubview:_live];
+    [NSLayoutConstraint activateConstraints:@[
+        [_live.leadingAnchor constraintEqualToAnchor:liveBadge.leadingAnchor constant:8],
+        [_live.trailingAnchor constraintEqualToAnchor:liveBadge.trailingAnchor constant:-8],
+        [_live.centerYAnchor constraintEqualToAnchor:liveBadge.centerYAnchor],
+        [liveBadge.widthAnchor constraintGreaterThanOrEqualToConstant:48],
+        [liveBadge.heightAnchor constraintEqualToConstant:24],
+    ]];
     _clock = label(@"00:00:00");
     _clock.font = [NSFont monospacedDigitSystemFontOfSize:15 weight:NSFontWeightMedium];
     _clock.alignment = NSTextAlignmentCenter;
@@ -1371,8 +1384,6 @@ struct PreviewHit {
     [_live setContentHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     [_live setContentCompressionResistancePriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationHorizontal];
     _live.translatesAutoresizingMaskIntoConstraints = NO;
-    [_live.widthAnchor constraintGreaterThanOrEqualToConstant:48].active = YES;
-    [_live.heightAnchor constraintEqualToConstant:24].active = YES;
     _clock.translatesAutoresizingMaskIntoConstraints = NO;
     [_clock.widthAnchor constraintEqualToConstant:108].active = YES;
     [_clock.heightAnchor constraintEqualToConstant:28].active = YES;
@@ -1714,7 +1725,7 @@ struct PreviewHit {
     centerContents.distribution = NSStackViewDistributionFill;
     centerContents.spacing = 8;
     centerContents.translatesAutoresizingMaskIntoConstraints = NO;
-    NSStackView* rightContents = [NSStackView stackViewWithViews:@[_live, _hotkeyHint]];
+    NSStackView* rightContents = [NSStackView stackViewWithViews:@[liveBadge, _hotkeyHint]];
     rightContents.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     rightContents.alignment = NSLayoutAttributeCenterY;
     rightContents.distribution = NSStackViewDistributionFill;
@@ -1730,7 +1741,7 @@ struct PreviewHit {
     [_stats.widthAnchor constraintLessThanOrEqualToConstant:190].active = YES;
     [_hotkeyHint.widthAnchor constraintEqualToConstant:40].active = YES;
     [NSLayoutConstraint activateConstraints:@[
-        [_controlBar.heightAnchor constraintEqualToConstant:40],
+        [_controlBar.heightAnchor constraintEqualToConstant:kControlBarHeight],
         [buttons.leadingAnchor constraintEqualToAnchor:_controlBar.leadingAnchor constant:12],
         [buttons.centerYAnchor constraintEqualToAnchor:_controlBar.centerYAnchor],
         [centerContents.centerXAnchor constraintEqualToAnchor:_controlBar.centerXAnchor],
@@ -1802,14 +1813,14 @@ struct PreviewHit {
     [NSLayoutConstraint activateConstraints:@[
         [stack.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [stack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
-        [stack.topAnchor constraintEqualToAnchor:_controlBar.bottomAnchor constant:20],
+        [stack.topAnchor constraintEqualToAnchor:_controlBar.bottomAnchor constant:kControlBarStackGap],
         [stack.bottomAnchor constraintEqualToAnchor:content.bottomAnchor],
         [_controlBar.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [_controlBar.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
         [_controlBar.topAnchor constraintEqualToAnchor:content.topAnchor],
     ]];
     NSSize contentSize = stack.fittingSize;
-    contentSize.height += 60;
+    contentSize.height += kControlBarHeight + kControlBarStackGap;
     [_window setContentSize:contentSize];
 }
 
@@ -2971,7 +2982,7 @@ struct PreviewHit {
         else if (!s.saved.empty())
             detail = [[(s.window_closed ? @"The window closed. Saved " : @"Saved ") stringByAppendingString:ns(s.saved).lastPathComponent]
                 stringByAppendingString:s.saved_vertical.empty() ? @"" : @" and its vertical video"];
-        else detail = _hotkey ? @"⇧⌘R starts and stops recording from anywhere." : @"⇧⌘R is used by another app.";
+        else if (!_hotkey) detail = @"⇧⌘R is used by another app.";
         break;
     case State::starting: status = @"STARTING…"; spokenStatus = @"Starting…"; break;
     case State::recording:
@@ -2985,8 +2996,9 @@ struct PreviewHit {
     case State::finishing: status = @"SAVING…"; spokenStatus = @"Saving…"; break;
     }
     if (active) {
-        NSMutableString* text = [NSMutableString stringWithFormat:@"%llu frames", static_cast<unsigned long long>(s.frames)];
-        if (s.dropped) { [text appendFormat:@", %llu dropped", static_cast<unsigned long long>(s.dropped)]; _attention = true; }
+        NSMutableString* text = [NSMutableString stringWithFormat:@"%llu frames · %llu dropped",
+            static_cast<unsigned long long>(s.frames), static_cast<unsigned long long>(s.dropped)];
+        if (s.dropped) _attention = true;
         if (s.audio_dropped) { [text appendFormat:@", audio drops %llu", static_cast<unsigned long long>(s.audio_dropped)]; _attention = true; }
         if (s.streaming && !s.stream_error.empty()) { [text appendFormat:@". Stream lost: %@", ns(s.stream_error)]; _attention = true; }
         else if (s.stream_dropped) { [text appendFormat:@", stream skipped %llu", static_cast<unsigned long long>(s.stream_dropped)]; _attention = true; }
@@ -3013,14 +3025,11 @@ struct PreviewHit {
                      NSKernAttributeName: @1.0}];
     _status.accessibilityValue = spokenStatus;
     _statusDot.hidden = s.state != State::paused;
-    _statusDot.layer.backgroundColor = Palette::accentDim().CGColor;
     if (![_detail.stringValue isEqualToString:detail]) _detail.stringValue = detail;
     if (![_detail.accessibilityValue isEqualToString:detail]) _detail.accessibilityValue = detail;
-    if (s.state == State::recording) _status.textColor = Palette::accent();
-    else _status.textColor = Palette::secondaryText();
     _detail.textColor = _attention ? Palette::text() : Palette::secondaryText();
+    _liveBadge.layer.backgroundColor = (s.live ? Palette::accent() : Palette::control()).CGColor;
     _live.textColor = s.live ? NSColor.whiteColor : Palette::secondaryText();
-    _live.layer.backgroundColor = (s.live ? Palette::accent() : Palette::control()).CGColor;
     NSString* live = !active ? @"LIVE"
                    : s.live && s.servers > 1 ? [NSString stringWithFormat:@"● LIVE %u/%u  %.1f Mb/s", s.servers_live, s.servers, s.stream_kbps / 1000.0]
                    : s.live ? [NSString stringWithFormat:@"● LIVE  %.1f Mb/s", s.stream_kbps / 1000.0]
@@ -3028,10 +3037,10 @@ struct PreviewHit {
     if (![_live.stringValue isEqualToString:live]) _live.stringValue = live;
     _live.hidden = NO;
     const long long elapsed = std::max<long long>(0, static_cast<long long>(s.seconds));
-    _clock.stringValue = [NSString stringWithFormat:@"%02lld:%02lld:%02lld", elapsed / 3600, elapsed / 60 % 60, elapsed % 60];
+    _clock.stringValue = clock_text(static_cast<double>(elapsed), true);
     _clock.accessibilityValue = _clock.stringValue;
-    _stats.stringValue = [NSString stringWithFormat:@"%@ · %u fps · %llu dropped",
-        ns(_settings.resolution), _settings.fps, static_cast<unsigned long long>(s.dropped)];
+    _stats.stringValue = [NSString stringWithFormat:@"%@ · %u fps",
+        ns(_settings.resolution), _settings.fps];
     // Hide the last level once recording ends; polling stops with it.
     if (!active) {
         _systemMeterState.shown = _micMeterState.shown = 0;
@@ -3054,7 +3063,7 @@ struct PreviewHit {
 
     _record.accessibilityLabel = active ? @"Stop Recording" : @"Start Recording";
     _record.toolTip = active ? @"Stop Recording (⇧⌘R)" : @"Start Recording (⇧⌘R)";
-    ((RecordDiscButton*)_record).recording = s.state == State::recording;
+    ((RecordDiscButton*)_record).recording = active;
     [_record setNeedsDisplay:YES];
     _pause.title = s.state == State::paused ? @"Resume" : @"Pause";
     _record.enabled = s.state == State::idle || active;
@@ -3252,7 +3261,7 @@ struct PreviewHit {
             [NSGraphicsContext setCurrentContext:context];
             const NSAppearanceName appearance = [self->_window.effectiveAppearance
                 bestMatchFromAppearancesWithNames:@[NSAppearanceNameDarkAqua, NSAppearanceNameAqua]];
-            [(appearance == NSAppearanceNameDarkAqua ? Palette::surface0() : NSColor.whiteColor) setFill];
+            [([appearance isEqualToString:NSAppearanceNameDarkAqua] ? Palette::surface0() : NSColor.whiteColor) setFill];
             NSRectFill(NSMakeRect(0, 0, rep.pixelsWide, rep.pixelsHigh));
             [rep drawInRect:NSMakeRect(0, 0, rep.pixelsWide, rep.pixelsHigh)
                    fromRect:NSZeroRect operation:NSCompositingOperationSourceOver fraction:1
@@ -3312,7 +3321,7 @@ struct PreviewHit {
                 [self->_controlBar cacheDisplayInRect:self->_controlBar.bounds toBitmapImageRep:rep];
             }];
         });
-    if (!rep) fail(@"could not render the control bar");
+        if (!rep) fail(@"could not render the control bar");
         save_window_png(@"app-status-row.png", rep);
     };
     struct PixelStats {
@@ -3320,24 +3329,19 @@ struct PreviewHit {
         CGFloat meanRed = 0, meanGreen = 0, meanBlue = 0;
         CGFloat maxRed = 0, maxGreen = 0, maxBlue = 0;
     };
-    const auto sample_window_pixels = [&](NSView* target, const auto& test,
+    const auto sample_bitmap_pixels = [&](NSBitmapImageRep* rep, NSRect imageBounds, NSRect rect, const auto& test,
                                           CGFloat minWidth = 0, CGFloat maxWidth = 0) {
-        __block NSBitmapImageRep* rep = nil;
-        __block NSRect rect;
-        ui(^{
-            rect = target.bounds;
-            rep = [target bitmapImageRepForCachingDisplayInRect:rect];
-            [target cacheDisplayInRect:rect toBitmapImageRep:rep];
-        });
-        if (!rep) fail(@"could not render the target control");
+        if (!rep) fail(@"could not render the target snapshot");
         NSBitmapImageRep* bitmap = rep;
-        const CGFloat sx = static_cast<CGFloat>(rep.pixelsWide) / rect.size.width;
-        const CGFloat sy = static_cast<CGFloat>(rep.pixelsHigh) / rect.size.height;
-        const NSInteger x0 = std::max<NSInteger>(0, floor((NSMinX(rect) + minWidth) * sx));
+        const CGFloat sx = static_cast<CGFloat>(rep.pixelsWide) / imageBounds.size.width;
+        const CGFloat sy = static_cast<CGFloat>(rep.pixelsHigh) / imageBounds.size.height;
+        const NSInteger x0 = std::max<NSInteger>(0, floor((NSMinX(rect) + minWidth - NSMinX(imageBounds)) * sx));
         const NSInteger x1 = std::min<NSInteger>(rep.pixelsWide,
-            ceil((NSMinX(rect) + (maxWidth > 0 ? std::min(maxWidth, rect.size.width) : rect.size.width)) * sx));
-        const NSInteger y0 = std::max<NSInteger>(0, floor(NSMinY(rect) * sy));
-        const NSInteger y1 = std::min<NSInteger>(rep.pixelsHigh, ceil(NSMaxY(rect) * sy));
+            ceil((NSMinX(rect) + (maxWidth > 0 ? std::min(maxWidth, rect.size.width) : rect.size.width) -
+                  NSMinX(imageBounds)) * sx));
+        const NSInteger y0 = std::max<NSInteger>(0, floor((NSMinY(rect) - NSMinY(imageBounds)) * sy));
+        const NSInteger y1 = std::min<NSInteger>(rep.pixelsHigh,
+            ceil((NSMaxY(rect) - NSMinY(imageBounds)) * sy));
         const auto count = [&](NSInteger low, NSInteger high) {
             PixelStats stats;
             CGFloat redTotal = 0, greenTotal = 0, blueTotal = 0;
@@ -3364,6 +3368,31 @@ struct PreviewHit {
             return stats;
         };
         return count(y0, y1);
+    };
+    const auto sample_window_pixels = [&](NSView* target, const auto& test,
+                                          CGFloat minWidth = 0, CGFloat maxWidth = 0) {
+        __block NSRect rect;
+        ui(^{ rect = target.bounds; });
+        __block NSBitmapImageRep* rep = nil;
+        ui(^{
+            rep = [target bitmapImageRepForCachingDisplayInRect:rect];
+            [target cacheDisplayInRect:rect toBitmapImageRep:rep];
+        });
+        return sample_bitmap_pixels(rep, rect, rect, test, minWidth, maxWidth);
+    };
+    const auto sample_snapshot_view = [&](NSBitmapImageRep* snapshot, NSView* target, const auto& test,
+                                          CGFloat minWidth = 0, CGFloat maxWidth = 0) {
+        __block NSRect rect, imageBounds;
+        ui(^{
+            NSView* content = self->_window.contentView;
+            imageBounds = content.bounds;
+            rect = [target convertRect:target.bounds toView:content];
+            if (!content.isFlipped) rect.origin.y = content.bounds.size.height - NSMaxY(rect);
+        });
+        rect.origin.x += minWidth;
+        if (maxWidth > 0) rect.size.width = std::min(maxWidth, rect.size.width);
+        else rect.size.width -= minWidth;
+        return sample_bitmap_pixels(snapshot, imageBounds, rect, test);
     };
     const auto status = [&] {
         __block NSString* text;
@@ -3502,7 +3531,8 @@ struct PreviewHit {
         [self->_window displayIfNeeded];
         const NSRect status = [self->_status.superview convertRect:self->_status.frame toView:self->_controlBar];
         const NSRect detail = [self->_detail.superview convertRect:self->_detail.frame toView:self->_controlBar];
-        const NSRect live = [self->_live.superview convertRect:self->_live.frame toView:self->_controlBar];
+        const NSRect live = [self->_liveBadge.superview convertRect:self->_liveBadge.frame toView:self->_controlBar];
+        const NSRect liveLabel = [self->_live convertRect:self->_live.bounds toView:self->_liveBadge];
         const NSRect bar = [self->_controlBar.superview convertRect:self->_controlBar.frame toView:self->_window.contentView];
         const CGFloat statusCenter = NSMidY(status), detailCenter = NSMidY(detail), liveCenter = NSMidY(live);
         const CGFloat fullDetailWidth = [longDetail sizeWithAttributes:@{NSFontAttributeName: self->_detail.font}].width;
@@ -3517,6 +3547,7 @@ struct PreviewHit {
             self->_detail.lineBreakMode == NSLineBreakByTruncatingTail &&
             self->_detail.maximumNumberOfLines == 1 &&
             self->_detail.allowsExpansionToolTips &&
+            std::abs(NSMidY(liveLabel) - NSMidY(self->_liveBadge.bounds)) <= 1 &&
             [self->_detail.accessibilityValue isEqualToString:longDetail];
     });
     if (!statusLineLayoutOK) {
@@ -3524,7 +3555,7 @@ struct PreviewHit {
         ui(^{
             const NSRect status = [self->_status.superview convertRect:self->_status.frame toView:self->_controlBar];
             const NSRect detail = [self->_detail.superview convertRect:self->_detail.frame toView:self->_controlBar];
-            const NSRect live = [self->_live.superview convertRect:self->_live.frame toView:self->_controlBar];
+            const NSRect live = [self->_liveBadge.superview convertRect:self->_liveBadge.frame toView:self->_controlBar];
             geometry = [NSString stringWithFormat:@"status %.1f,%.1f %.1fx%.1f detail %.1f,%.1f %.1fx%.1f live %.1f,%.1f %.1fx%.1f bar %.1fx%.1f",
                         status.origin.x, status.origin.y, status.size.width, status.size.height,
                         detail.origin.x, detail.origin.y, detail.size.width, detail.size.height,
@@ -3534,7 +3565,7 @@ struct PreviewHit {
         fail([@"control-bar status, detail and LIVE do not fit without overlap: " stringByAppendingString:geometry]);
     }
     note(@"status-line=ok");
-    note(@"control-bar-geometry=ok full-width=40");
+    note(@"control-bar-geometry=ok bar=measured");
     const auto blue_pixels_in_bar = [&] {
         return sample_window_pixels(_controlBar, [](CGFloat r, CGFloat g, CGFloat b) {
             return b > r + 60.0 / 255 && b > g + 40.0 / 255;
@@ -3554,7 +3585,7 @@ struct PreviewHit {
     if (idleDisc.count < 100 || idleDot.count < 12)
         fail([NSString stringWithFormat:@"idle record disc pixels failed (control %ld, accent %ld)",
               static_cast<long>(idleDisc.count), static_cast<long>(idleDot.count)]);
-    note(@"record-disc-idle=ok circle=24 control=ok dot=accent");
+    note(@"record-disc-idle=ok control=ok dot=accent");
     assert_no_bar_blue();
     note(@"control-bar-no-blue=ok state=idle pixels=0");
     save_status_row_png();
@@ -3919,7 +3950,7 @@ struct PreviewHit {
     set_check(_microphone, true);
     press(_record);
     wait_for(recording, 20);
-    NSBitmapImageRep* recordingSnapshot = window_bitmap();
+    const double pauseRecordStart = CACurrentMediaTime();
     __block BOOL meterBottomUp = NO;
     for (int attempt = 0; attempt < 40 && !meterBottomUp; ++attempt) {
         ui(^{
@@ -3940,31 +3971,24 @@ struct PreviewHit {
     }
     if (!meterBottomUp) fail(@"meter did not fill from the bottom during the test tone");
     note(@"meter-bottom-up=ok");
-    const auto red_pixels = [&](CGFloat threshold) {
-        const PixelStats stats = sample_window_pixels(_status, [=](CGFloat r, CGFloat g, CGFloat b) {
-            const bool red = r > threshold && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;
-            return red;
-        });
-        return std::pair<NSInteger, CGFloat>{stats.count, stats.meanRed};
-    };
-    const auto recordingRed = red_pixels(0.80);
-    if (recordingRed.first < 12) fail(@"recording status pixels did not render in accent red");
-    __block BOOL clockTextPresent = NO;
-    ui(^{ clockTextPresent = self->_clock.stringValue.length == 8; });
-    if (!clockTextPresent) fail(@"recording clock does not show elapsed time");
-    note(@"clock-text=ok format=HH:MM:SS");
+    usleep(600000);
+    __block NSString* clockSample = nil;
+    bool clockAdvancing = false;
+    for (int attempt = 0; attempt < 30 && !clockAdvancing; ++attempt) {
+        ui(^{ clockSample = self->_clock.stringValue; });
+        const std::string clockPattern = utf8(clockSample);
+        clockAdvancing = std::regex_match(clockPattern, std::regex(R"(^\d\d:\d\d:\d\d$)")) &&
+                         ![clockSample isEqualToString:@"00:00:00"];
+        if (!clockAdvancing) usleep(100000);
+    }
+    if (!clockAdvancing)
+        fail(@"recording clock does not show advancing elapsed time");
+    NSBitmapImageRep* recordingSnapshot = window_bitmap();
+    note(@"clock-text=ok advancing=HH:MM:SS");
     note(@"status-recording-color=ok");
-    const PixelStats recordingDisc = sample_window_pixels(_record, [](CGFloat r, CGFloat g, CGFloat b) {
-        return r > 0.35 && g < 0.4 && b < 0.4 && r > g * 1.5 && r > b * 1.5;
-    });
-    const PixelStats recordingCenter = sample_window_pixels(_record, [](CGFloat r, CGFloat g, CGFloat b) {
-        return r > 0.80 && g > 0.80 && b > 0.80;
-    });
-    if (recordingDisc.count < 100 || recordingCenter.count < 12)
-        fail(@"recording record disc is not accent red with its light center");
-    assert_no_bar_blue();
-    note(@"record-disc-recording=ok circle=24 accent=ok dot=light clock=present");
-    note(@"control-bar-no-blue=ok state=recording pixels=0");
+    const auto redPixel = [](CGFloat r, CGFloat g, CGFloat b) {
+        return r > 0.25 && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;
+    };
     const auto measured_contrast = [&](const PixelStats& text, NSColor* background) {
         const auto linear = [](CGFloat value) {
             return value <= 0.04045 ? value / 12.92 : std::pow((value + 0.055) / 1.055, 2.4);
@@ -3977,43 +4001,17 @@ struct PreviewHit {
         return (std::max(foreground, back) + 0.05) / (std::min(foreground, back) + 0.05);
     };
     NSColor* statusSurface = [Palette::surface0() colorUsingColorSpace:NSColorSpace.sRGBColorSpace];
-    const auto redPixel = [](CGFloat r, CGFloat g, CGFloat b) {
-        return r > 0.25 && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;
-    };
-    const PixelStats measuredRecording = sample_window_pixels(_status, redPixel);
-    const PixelStats recordingDot = sample_window_pixels(_record, redPixel);
-    usleep(600000);
     press(_pause);
+    const double pausePressedAt = CACurrentMediaTime();
     wait_for(@"PAUSED", 5);
     NSBitmapImageRep* pausedSnapshot = window_bitmap();
-    assert_no_bar_blue();
-    note(@"control-bar-no-blue=ok state=paused pixels=0");
-    const PixelStats pausedText = sample_window_pixels(_status, [](CGFloat r, CGFloat g, CGFloat b) {
-        return std::abs(r - g) < 0.08 && std::abs(r - b) < 0.08 && r > 0.35;
-    }, 20);
-    const PixelStats pausedDot = sample_window_pixels(_statusDot, redPixel);
-    const CGFloat pausedTextContrast = measured_contrast(pausedText, statusSurface);
-    const bool neutralText = pausedText.count >= 20 &&
-        std::abs(pausedText.meanRed - pausedText.meanGreen) < 0.04 &&
-        std::abs(pausedText.meanRed - pausedText.meanBlue) < 0.04 &&
-        pausedTextContrast >= 4.5;
-    const bool dimRedDot = pausedDot.count >= 5 && recordingDot.count >= 5 &&
-        pausedDot.meanRed > pausedDot.meanGreen * 1.5 &&
-        pausedDot.meanRed > pausedDot.meanBlue * 1.5 &&
-        pausedDot.meanRed < recordingDot.meanRed * 0.8;
-    if (!neutralText || !dimRedDot)
-        fail([NSString stringWithFormat:@"paused status pixels failed (text contrast %.2f, neutral %d, paused dot %.2f/%.2f/%.2f, recording dot %.2f/%.2f/%.2f)",
-            pausedTextContrast, neutralText, pausedDot.meanRed, pausedDot.meanGreen, pausedDot.meanBlue,
-            recordingDot.meanRed, recordingDot.meanGreen, recordingDot.meanBlue]);
-    note([NSString stringWithFormat:@"paused-status=ok text=%.2f dot=%.2f,%.2f,%.2f recording-dot=%.2f,%.2f,%.2f",
-          pausedTextContrast, pausedDot.meanRed, pausedDot.meanGreen, pausedDot.meanBlue,
-          recordingDot.meanRed, recordingDot.meanGreen, recordingDot.meanBlue]);
-    note(@"status-paused-color=ok text-2=ok dot=accent-dim-vs-recording");
     usleep(1500000);
     press(_pause);
     wait_for(recording, 5);
+    const double resumedAt = CACurrentMediaTime();
     sleep(2);
     press(_record);
+    const double pauseRecordStop = CACurrentMediaTime();
     wait_for(@"READY", 30);
     ui(^{ [self refresh]; });
     saved(@"pause");
@@ -4021,6 +4019,58 @@ struct PreviewHit {
     save_window_png(@"app-recording.png", recordingSnapshot);
     save_window_png(@"app-paused-status.png", pausedSnapshot);
     save_window_png(@"app-paused.png", pausedSnapshot);
+    const double recordedWall = pausePressedAt - pauseRecordStart + pauseRecordStop - resumedAt;
+    note([NSString stringWithFormat:@"pause-recorded-wall=%.2f", recordedWall]);
+    note([NSString stringWithFormat:@"paused-wall=%.2f", resumedAt - pausePressedAt]);
+    const PixelStats recordingRed = sample_snapshot_view(recordingSnapshot, _status, [](CGFloat r, CGFloat g, CGFloat b) {
+        return r > 0.80 && g < 0.32 && b < 0.32 && r > g * 2 && r > b * 2;
+    });
+    const PixelStats recordingDisc = sample_snapshot_view(recordingSnapshot, _record, redPixel);
+    const PixelStats recordingCenter = sample_snapshot_view(recordingSnapshot, _record, [](CGFloat r, CGFloat g, CGFloat b) {
+        return r > 0.80 && g > 0.80 && b > 0.80;
+    });
+    if (recordingRed.count < 12) fail(@"recording status pixels did not render in accent red");
+    if (recordingDisc.count < 100 || recordingCenter.count < 12)
+        fail(@"recording record disc is not accent red with its light center");
+    const PixelStats pausedText = sample_snapshot_view(pausedSnapshot, _status, [](CGFloat r, CGFloat g, CGFloat b) {
+        return std::abs(r - g) < 0.08 && std::abs(r - b) < 0.08 && r > 0.35;
+    });
+    const PixelStats pausedDisc = sample_snapshot_view(pausedSnapshot, _record, redPixel);
+    __block NSRect contentBounds;
+    ui(^{ contentBounds = self->_window.contentView.bounds; });
+    const PixelStats pausedDot = sample_bitmap_pixels(pausedSnapshot, contentBounds,
+        contentBounds, [](CGFloat r, CGFloat g, CGFloat b) {
+        return r > 0.15 && r < 0.75 && g < 0.4 && b < 0.4 && r > g * 1.5 && r > b * 1.5;
+    });
+    const CGFloat pausedTextContrast = measured_contrast(pausedText, statusSurface);
+    const bool neutralText = pausedText.count >= 20 &&
+        std::abs(pausedText.meanRed - pausedText.meanGreen) < 0.04 &&
+        std::abs(pausedText.meanRed - pausedText.meanBlue) < 0.04 &&
+        pausedTextContrast >= 4.5;
+    const bool dimRedDot = pausedDot.count >= 5 && recordingDisc.count >= 5 &&
+        pausedDot.meanRed > pausedDot.meanGreen * 1.5 &&
+        pausedDot.meanRed > pausedDot.meanBlue * 1.5 &&
+        pausedDot.meanRed < recordingDisc.meanRed * 0.8;
+    if (!neutralText || !dimRedDot || pausedDisc.count < 100)
+        fail([NSString stringWithFormat:@"paused status pixels failed (text contrast %.2f, neutral %d, paused dot %.2f/%.2f/%.2f, recording dot %.2f/%.2f/%.2f)",
+            pausedTextContrast, neutralText, pausedDot.meanRed, pausedDot.meanGreen, pausedDot.meanBlue,
+            recordingDisc.meanRed, recordingDisc.meanGreen, recordingDisc.meanBlue]);
+    note([NSString stringWithFormat:@"paused-status=ok text=%.2f dot=%.2f,%.2f,%.2f recording-dot=%.2f,%.2f,%.2f",
+          pausedTextContrast, pausedDot.meanRed, pausedDot.meanGreen, pausedDot.meanBlue,
+          recordingDisc.meanRed, recordingDisc.meanGreen, recordingDisc.meanBlue]);
+    note(@"status-paused-color=ok neutral dot=accent-dim-vs-recording");
+    note(@"record-disc-recording=ok accent=ok dot=light clock=present");
+    note(@"record-disc-paused=ok accent=ok");
+    const auto blueInSnapshot = [&](NSBitmapImageRep* snapshot) {
+        return sample_snapshot_view(snapshot, _controlBar, [](CGFloat r, CGFloat g, CGFloat b) {
+            return b > r + 60.0 / 255 && b > g + 40.0 / 255;
+        }).count;
+    };
+    const auto recordingBlue = blueInSnapshot(recordingSnapshot);
+    const auto pausedBlue = blueInSnapshot(pausedSnapshot);
+    if (recordingBlue || pausedBlue) fail(@"system-blue pixels in recording or paused control bar");
+    note(@"control-bar-no-blue=ok state=recording pixels=0");
+    note(@"control-bar-no-blue=ok state=paused pixels=0");
 
     // 2. The global hotkey, delivered as the system delivers it to the registered handler.
     if (!_hotkey) fail(@"Shift-Command-R could not be registered");

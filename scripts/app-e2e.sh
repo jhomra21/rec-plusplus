@@ -181,14 +181,15 @@ grep -qx 'accessibility=ok' "$report"
 grep -qx 'meter-accessibility=ok' "$report"
 grep '^margins=' "$report"
 grep -qx 'status-line=ok' "$report"
-grep -qx 'control-bar-geometry=ok full-width=40' "$report"
-grep -qx 'record-disc-idle=ok circle=24 control=ok dot=accent' "$report"
-grep -qx 'record-disc-recording=ok circle=24 accent=ok dot=light clock=present' "$report"
+grep -qx 'control-bar-geometry=ok bar=measured' "$report"
+grep -qx 'record-disc-idle=ok control=ok dot=accent' "$report"
+grep -qx 'record-disc-recording=ok accent=ok dot=light clock=present' "$report"
 grep -qx 'control-bar-no-blue=ok state=idle pixels=0' "$report"
 grep -qx 'control-bar-no-blue=ok state=recording pixels=0' "$report"
 grep -qx 'control-bar-no-blue=ok state=paused pixels=0' "$report"
-grep -qx 'status-paused-color=ok text-2=ok dot=accent-dim-vs-recording' "$report"
-grep -qx 'clock-text=ok format=HH:MM:SS' "$report"
+grep -qx 'record-disc-paused=ok accent=ok' "$report"
+grep -qx 'status-paused-color=ok neutral dot=accent-dim-vs-recording' "$report"
+grep -qx 'clock-text=ok advancing=HH:MM:SS' "$report"
 grep -qx 'screen-strip=ok' "$report"
 grep -Eq '^mixer-row-fit=ok camera=off right=[0-9.]+ limit=[0-9.]+$' "$report"
 grep -Eq '^strip-panels=ok top-bottom=shared gaps=[0-9.]+/[0-9.]+ reset-mute=baseline$' "$report"
@@ -278,9 +279,11 @@ if [[ -n "${REC_APP_SELF_TEST_PHONE:-}" ]]; then
 fi
 probe "$(step pause)" app-pause
 grep -qx 'audio_tracks=3' "$artifacts/app-pause.probe"
-# About 2.6 s recorded (0.6 s, then 2 s after resuming) plus start and snapshot/probe latency;
-# a pause that cut nothing would add its 1.5 s and land above the range.
-within "$(value duration "$artifacts/app-pause.probe")" 2.5 5.0
+# Measure pause/resume edges directly; a no-op pause records this extra ~1.5 s.
+wall="$(awk -F= '$1 == "pause-recorded-wall" { print $2 }' "$report")"
+paused_wall="$(awk -F= '$1 == "paused-wall" { print $2 }' "$report")"
+within "$(value duration "$artifacts/app-pause.probe")" "$(awk -v v="$wall" 'BEGIN { print v - 0.4 }')" "$(awk -v v="$wall" 'BEGIN { print v + 0.4 }')"
+within "$paused_wall" 1.4 3.0
 within "$(value av_sync_events "$artifacts/app-pause.probe")" 3 5
 # A hosted VM's first frame can land one 33 ms slot late; a real Mac stays within a few ms.
 within "$(value av_offset_max_ms "$artifacts/app-pause.probe")" 0 "$([[ "${GITHUB_ACTIONS:-}" == true ]] && echo 35 || echo 20)"
